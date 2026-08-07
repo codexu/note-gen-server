@@ -1,0 +1,1 @@
+export const BLOB_COMPLETION_LEASE_MS = 60 * 60 * 1_000

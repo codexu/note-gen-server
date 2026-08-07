@@ -1,0 +1,10 @@
+node_modules
+dist
+.next
+out
+.turbo
+.git
+.env
+coverage
+data
+*.log

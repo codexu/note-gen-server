@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.next/
+out/
+.turbo/
+.env
+.env.*
+!.env.example
+coverage/
+data/
+*.log
+.DS_Store

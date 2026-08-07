@@ -1,0 +1,33 @@
+{
+  "name": "note-gen-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NoteGen synchronization service and account portal monorepo",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "turbo dev",
+    "dev:server": "pnpm --filter @notegen/server dev",
+    "dev:web": "pnpm --filter @notegen/web dev",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "test:self": "pnpm --filter @notegen/server test:self",
+    "test:integration": "pnpm --filter @notegen/server test:integration",
+    "db:generate": "pnpm --filter @notegen/server db:generate",
+    "db:migrate": "pnpm --filter @notegen/server db:migrate",
+    "db:studio": "pnpm --filter @notegen/server db:studio",
+    "maintenance": "pnpm --filter @notegen/server maintenance"
+  },
+  "packageManager": "pnpm@10.20.0",
+  "devDependencies": {
+    "turbo": "^2.5.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "argon2",
+      "esbuild"
+    ]
+  }
+}

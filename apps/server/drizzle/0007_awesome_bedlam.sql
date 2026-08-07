@@ -1,0 +1,1 @@
+ALTER TABLE "blob_uploads" ADD COLUMN "completing_at" timestamp with time zone;

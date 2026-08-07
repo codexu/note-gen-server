@@ -1,0 +1,57 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "passThroughEnv": [
+        "MIGRATE_ON_START",
+        "HOST",
+        "PORT",
+        "POSTGRES_PASSWORD",
+        "DATABASE_URL",
+        "DATABASE_POOL_SIZE",
+        "PUBLIC_BASE_URL",
+        "SERVER_NAME",
+        "TRUST_PROXY",
+        "AUTH_SECRET",
+        "SETUP_TOKEN",
+        "REGISTRATION_MODE",
+        "BLOB_STORAGE_DRIVER",
+        "BLOB_STORAGE_PATH",
+        "S3_ENDPOINT",
+        "S3_REGION",
+        "S3_BUCKET",
+        "S3_ACCESS_KEY_ID",
+        "S3_SECRET_ACCESS_KEY",
+        "S3_FORCE_PATH_STYLE",
+        "MAX_OBJECT_BYTES",
+        "MAX_REQUEST_BYTES",
+        "MAX_BLOB_BYTES",
+        "BLOB_PART_BYTES",
+        "CHANGE_RETENTION_DAYS",
+        "VERSION_RETENTION_DAYS",
+        "TOMBSTONE_RETENTION_DAYS",
+        "LOG_LEVEL",
+        "CORS_ORIGINS",
+        "WEB_ENABLED",
+        "WEB_DIST_PATH",
+        "WEB_PUBLIC_BASE_URL",
+        "DEPLOYMENT_MODE",
+        "NEXT_PUBLIC_API_BASE_URL"
+      ]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**", "out/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    }
+  }
+}

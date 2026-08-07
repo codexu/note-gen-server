@@ -1,0 +1,2 @@
+DROP INDEX "workspace_key_envelopes_recipient_unique";--> statement-breakpoint
+ALTER TABLE "workspace_key_envelopes" ADD CONSTRAINT "workspace_key_envelopes_recipient_unique" UNIQUE NULLS NOT DISTINCT("workspace_id","key_version","envelope_type","recipient_id");

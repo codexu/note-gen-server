@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: notegen
+          POSTGRES_USER: notegen
+          POSTGRES_PASSWORD: integration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notegen -d notegen"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://notegen:integration-password@127.0.0.1:5432/notegen
+      PUBLIC_BASE_URL: http://127.0.0.1:3789
+      SERVER_NAME: NoteGen CI Server
+      AUTH_SECRET: 0123456789abcdef0123456789abcdef
+      SETUP_TOKEN: integration-setup-token
+      BLOB_STORAGE_PATH: /tmp/notegen-ci-blobs
+      LOG_LEVEL: silent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Live protocol test
+        env:
+          INTEGRATION_BASE_URL: http://127.0.0.1:3789
+          INTEGRATION_SETUP_TOKEN: integration-setup-token
+        run: |
+          node apps/server/dist/entrypoint.js > /tmp/notegen-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3789/health/ready; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/notegen-server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          pnpm test:integration
+      - run: docker build --tag note-gen-server:ci .
