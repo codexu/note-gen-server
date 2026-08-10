@@ -2,7 +2,7 @@ import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox'
 import { Type } from '@sinclair/typebox'
 import type { AppConfig } from '../config.js'
 import type { ServiceDependencies } from '../services.js'
-import { resolveWebPublicBaseUrl } from '../development-origin.js'
+import { resolveApiPublicBaseUrl, resolveWebPublicBaseUrl } from '../development-origin.js'
 
 const CapabilitiesResponse = Type.Object({
   service: Type.Literal('note-gen-server'),
@@ -32,6 +32,9 @@ const CapabilitiesResponse = Type.Object({
     manualDeviceToken: Type.Boolean(),
     collaboration: Type.Literal(true),
     collaborationAwareness: Type.Boolean(),
+    durableCrdtUpdates: Type.Boolean(),
+    synchronizedConflicts: Type.Boolean(),
+    assetObjects: Type.Boolean(),
   }),
   limits: Type.Object({
     maxBatchOperations: Type.Integer(),
@@ -68,7 +71,7 @@ export function createCapabilitiesRoutes(
       serverName: config.serverName,
       serverVersion: dependencies.version,
       serverTime: new Date().toISOString(),
-      publicBaseUrl: config.publicBaseUrl,
+      publicBaseUrl: resolveApiPublicBaseUrl(config, request),
       protocol: { minimum: 1, maximum: 1 },
       features: {
         deltaSync: true,
@@ -89,7 +92,10 @@ export function createCapabilitiesRoutes(
         devicePairing: config.webEnabled,
         manualDeviceToken: false,
         collaboration: true as const,
-        collaborationAwareness: true,
+        collaborationAwareness: false,
+        durableCrdtUpdates: true,
+        synchronizedConflicts: true,
+        assetObjects: true,
       },
       limits: {
         maxBatchOperations: 100,

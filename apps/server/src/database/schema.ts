@@ -197,6 +197,9 @@ export const objects = pgTable('objects', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   objectId: uuid('object_id').notNull(),
   kind: objectKind('kind').notNull(),
+  parentObjectId: uuid('parent_object_id'),
+  nameCiphertext: text('name_ciphertext'),
+  nameBlindIndex: text('name_blind_index'),
   currentRevision: bigint('current_revision', { mode: 'bigint' }).notNull(),
   ciphertext: text('ciphertext').notNull(),
   ciphertextHash: text('ciphertext_hash').notNull(),
@@ -208,6 +211,9 @@ export const objects = pgTable('objects', {
   primaryKey({ columns: [table.workspaceId, table.objectId] }),
   index('objects_workspace_kind_idx').on(table.workspaceId, table.kind),
   index('objects_workspace_updated_idx').on(table.workspaceId, table.updatedAt),
+  index('objects_sibling_name_blind_idx')
+    .on(table.workspaceId, table.parentObjectId, table.nameBlindIndex)
+    .where(sql`${table.deletedAt} is null and ${table.nameBlindIndex} is not null`),
   foreignKey({
     columns: [table.workspaceId, table.keyVersion],
     foreignColumns: [workspaceKeys.workspaceId, workspaceKeys.keyVersion],
@@ -232,6 +238,9 @@ export const objectVersions = pgTable('object_versions', {
   revision: bigint('revision', { mode: 'bigint' }).notNull(),
   sequence: bigint('sequence', { mode: 'bigint' }).notNull(),
   kind: objectKind('kind').notNull(),
+  parentObjectId: uuid('parent_object_id'),
+  nameCiphertext: text('name_ciphertext'),
+  nameBlindIndex: text('name_blind_index'),
   ciphertext: text('ciphertext').notNull(),
   ciphertextHash: text('ciphertext_hash').notNull(),
   keyVersion: integer('key_version').notNull(),
@@ -247,6 +256,31 @@ export const objectVersions = pgTable('object_versions', {
     columns: [table.workspaceId, table.keyVersion],
     foreignColumns: [workspaceKeys.workspaceId, workspaceKeys.keyVersion],
     name: 'object_versions_workspace_key_fk',
+  }),
+])
+
+export const syncV2ResourceBindings = pgTable('sync_v2_resource_bindings', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  ownerObjectId: uuid('owner_object_id').notNull(),
+  ownerRevision: bigint('owner_revision', { mode: 'bigint' }).notNull(),
+  resourceObjectId: uuid('resource_object_id').notNull(),
+  resourceRevision: bigint('resource_revision', { mode: 'bigint' }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.ownerObjectId, table.ownerRevision, table.resourceObjectId] }),
+  index('sync_v2_resource_bindings_resource_idx')
+    .on(table.workspaceId, table.resourceObjectId, table.resourceRevision),
+  index('sync_v2_resource_bindings_owner_idx')
+    .on(table.workspaceId, table.ownerObjectId, table.ownerRevision),
+  foreignKey({
+    columns: [table.workspaceId, table.ownerObjectId, table.ownerRevision],
+    foreignColumns: [objectVersions.workspaceId, objectVersions.objectId, objectVersions.revision],
+    name: 'sync_v2_resource_bindings_owner_version_fk',
+  }).onDelete('cascade'),
+  foreignKey({
+    columns: [table.workspaceId, table.resourceObjectId, table.resourceRevision],
+    foreignColumns: [objectVersions.workspaceId, objectVersions.objectId, objectVersions.revision],
+    name: 'sync_v2_resource_bindings_resource_version_fk',
   }),
 ])
 
@@ -338,3 +372,144 @@ export const blobUploadParts = pgTable('blob_upload_parts', {
   etag: text('etag').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [primaryKey({ columns: [table.uploadId, table.partNumber] })])
+
+// The sync protocol keeps lifecycle commands, CRDT traffic and conflict state in
+// one durable workspace sequence while reusing the object, version and Blob tables.
+export const syncV2Commands = pgTable('sync_v2_commands', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  commandId: uuid('command_id').notNull(),
+  sourceDeviceId: uuid('source_device_id').notNull().references(() => devices.id),
+  requestHash: text('request_hash').notNull(),
+  result: jsonb('result').$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.commandId] }),
+  index('sync_v2_commands_created_idx').on(table.createdAt),
+])
+
+export const syncV2Events = pgTable('sync_v2_events', {
+  id: bigserial('id', { mode: 'bigint' }).primaryKey(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  sequence: bigint('sequence', { mode: 'bigint' }).notNull(),
+  eventId: uuid('event_id').notNull().defaultRandom(),
+  commandId: uuid('command_id').notNull(),
+  sourceDeviceId: uuid('source_device_id').notNull().references(() => devices.id),
+  type: text('event_type').notNull(),
+  objectId: uuid('object_id'),
+  documentId: text('document_id'),
+  documentSequence: bigint('document_sequence', { mode: 'bigint' }),
+  keyVersion: integer('key_version'),
+  ciphertext: text('ciphertext'),
+  ciphertextHash: text('ciphertext_hash'),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('sync_v2_events_workspace_sequence_unique').on(table.workspaceId, table.sequence),
+  uniqueIndex('sync_v2_events_workspace_event_unique').on(table.workspaceId, table.eventId),
+  index('sync_v2_events_document_idx').on(table.workspaceId, table.documentId, table.documentSequence),
+  index('sync_v2_events_created_idx').on(table.createdAt),
+])
+
+export const syncV2Documents = pgTable('sync_v2_documents', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  documentId: text('document_id').notNull(),
+  objectId: uuid('object_id').notNull(),
+  kind: objectKind('kind').notNull(),
+  latestDocumentSequence: bigint('latest_document_sequence', { mode: 'bigint' }).notNull().default(sql`0`),
+  checkpointDocumentSequence: bigint('checkpoint_document_sequence', { mode: 'bigint' }).notNull().default(sql`0`),
+  checkpointId: uuid('checkpoint_id'),
+  checkpointKeyVersion: integer('checkpoint_key_version'),
+  checkpointCiphertext: text('checkpoint_ciphertext'),
+  checkpointCiphertextHash: text('checkpoint_ciphertext_hash'),
+  materializedRevision: bigint('materialized_revision', { mode: 'bigint' }),
+  ...timestamps,
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.documentId] }),
+  uniqueIndex('sync_v2_documents_object_unique').on(table.workspaceId, table.objectId),
+])
+
+export const syncV2Updates = pgTable('sync_v2_updates', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  documentId: text('document_id').notNull(),
+  documentSequence: bigint('document_sequence', { mode: 'bigint' }).notNull(),
+  updateId: uuid('update_id').notNull(),
+  eventSequence: bigint('event_sequence', { mode: 'bigint' }).notNull(),
+  sourceDeviceId: uuid('source_device_id').notNull().references(() => devices.id),
+  keyVersion: integer('key_version').notNull(),
+  ciphertext: text('ciphertext').notNull(),
+  ciphertextHash: text('ciphertext_hash').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.documentId, table.documentSequence] }),
+  uniqueIndex('sync_v2_updates_id_unique').on(table.workspaceId, table.updateId),
+  index('sync_v2_updates_event_idx').on(table.workspaceId, table.eventSequence),
+])
+
+export const syncV2Checkpoints = pgTable('sync_v2_checkpoints', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  checkpointId: uuid('checkpoint_id').notNull(),
+  documentId: text('document_id').notNull(),
+  objectId: uuid('object_id').notNull(),
+  coversDocumentSequence: bigint('covers_document_sequence', { mode: 'bigint' }).notNull(),
+  eventSequence: bigint('event_sequence', { mode: 'bigint' }).notNull(),
+  materializedRevision: bigint('materialized_revision', { mode: 'bigint' }),
+  keyVersion: integer('key_version').notNull(),
+  ciphertext: text('ciphertext').notNull(),
+  ciphertextHash: text('ciphertext_hash').notNull(),
+  sourceDeviceId: uuid('source_device_id').notNull().references(() => devices.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.checkpointId] }),
+  index('sync_v2_checkpoints_document_idx').on(table.workspaceId, table.documentId, table.eventSequence),
+])
+
+export const syncV2Conflicts = pgTable('sync_v2_conflicts', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  conflictId: uuid('conflict_id').notNull(),
+  objectId: uuid('object_id').notNull(),
+  kind: objectKind('kind').notNull(),
+  type: text('conflict_type').notNull(),
+  status: text('status').notNull().default('unresolved'),
+  expectedRevision: bigint('expected_revision', { mode: 'bigint' }),
+  expectedDocumentSequence: bigint('expected_document_sequence', { mode: 'bigint' }),
+  keyVersion: integer('key_version').notNull(),
+  ciphertext: text('ciphertext').notNull(),
+  ciphertextHash: text('ciphertext_hash').notNull(),
+  createdSequence: bigint('created_sequence', { mode: 'bigint' }).notNull(),
+  resolvedSequence: bigint('resolved_sequence', { mode: 'bigint' }),
+  resolvedByDeviceId: uuid('resolved_by_device_id').references(() => devices.id),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  ...timestamps,
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.conflictId] }),
+  index('sync_v2_conflicts_status_idx').on(table.workspaceId, table.status, table.createdAt),
+  index('sync_v2_conflicts_object_idx').on(table.workspaceId, table.objectId),
+])
+
+export const syncV2BootstrapSessions = pgTable('sync_v2_bootstrap_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  snapshotSequence: bigint('snapshot_sequence', { mode: 'bigint' }).notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('sync_v2_bootstrap_sessions_workspace_idx').on(table.workspaceId, table.expiresAt),
+])
+
+export const syncV2BootstrapObjects = pgTable('sync_v2_bootstrap_objects', {
+  sessionId: uuid('session_id').notNull().references(() => syncV2BootstrapSessions.id, { onDelete: 'cascade' }),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  objectId: uuid('object_id').notNull(),
+  revision: bigint('revision', { mode: 'bigint' }).notNull(),
+  documentId: text('document_id'),
+  latestDocumentSequence: bigint('latest_document_sequence', { mode: 'bigint' }),
+  checkpointDocumentSequence: bigint('checkpoint_document_sequence', { mode: 'bigint' }),
+  checkpointId: uuid('checkpoint_id'),
+  checkpointKeyVersion: integer('checkpoint_key_version'),
+  checkpointCiphertext: text('checkpoint_ciphertext'),
+  checkpointCiphertextHash: text('checkpoint_ciphertext_hash'),
+  materializedRevision: bigint('materialized_revision', { mode: 'bigint' }),
+}, (table) => [
+  primaryKey({ columns: [table.sessionId, table.objectId] }),
+  index('sync_v2_bootstrap_objects_workspace_idx').on(table.workspaceId, table.sessionId, table.objectId),
+])

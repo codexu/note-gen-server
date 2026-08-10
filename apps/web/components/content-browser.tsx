@@ -28,6 +28,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import {
   Item,
@@ -401,24 +406,37 @@ export function ContentBrowser({
           ) : items.length ? (
             <div className="grid items-start gap-4 xl:grid-cols-[minmax(20rem,0.85fr)_minmax(0,1.6fr)]">
               {visibleItems.length ? (
-                <ItemGroup className="max-h-[42rem] overflow-y-auto pr-1">
-                  {kind === "note" ? (
-                    <NoteTree
-                      items={visibleItems}
-                      selectedObjectId={selectedObjectId}
-                      onSelectObject={onSelectObject}
-                    />
-                  ) : (
-                    visibleItems.map((item) => (
+                kind === "note" ? (
+                  <Card className="max-h-[42rem] min-w-0 gap-0 overflow-hidden">
+                    <CardHeader className="border-b py-3">
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <FolderIcon />
+                        笔记目录
+                      </CardTitle>
+                      <CardDescription>
+                        {visibleItems.length} 个文件，点击文件夹可展开或收起
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="min-h-0 overflow-y-auto p-2">
+                      <NoteTree
+                        items={visibleItems}
+                        selectedObjectId={selectedObjectId}
+                        onSelectObject={onSelectObject}
+                      />
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <ItemGroup className="max-h-[42rem] overflow-y-auto pr-1">
+                    {visibleItems.map((item) => (
                       <ContentListItem
                         key={item.object.objectId}
                         item={item}
                         selected={item.object.objectId === selectedObjectId}
                         onSelect={() => onSelectObject(item.object.objectId)}
                       />
-                    ))
-                  )}
-                </ItemGroup>
+                    ))}
+                  </ItemGroup>
+                )
               ) : (
                 <Alert>
                   <ListChecksIcon />
@@ -436,7 +454,7 @@ export function ContentBrowser({
                   </CardTitle>
                   <CardDescription>
                     {selected
-                      ? `${kindLabel(selected.object.kind)} · 更新于 ${formatFixedDate(selected.object.updatedAt)}`
+                      ? `${kindLabel(selected.object.kind)} · ${selected.object.kind === "note" ? `${contentPath(selected)} · ` : ""}更新于 ${formatFixedDate(selected.object.updatedAt)}`
                       : "从左侧选择一项，查看正文与同步元数据。"}
                   </CardDescription>
                 </CardHeader>
@@ -572,6 +590,7 @@ function sortWorkspaces(workspaces: WebWorkspace[]): WebWorkspace[] {
 
 type NoteTreeNode = {
   name: string
+  path: string
   children: Map<string, NoteTreeNode>
   item?: DecodedSyncObject
 }
@@ -585,14 +604,19 @@ function NoteTree({
   selectedObjectId: string | null
   onSelectObject: (value: string) => void
 }) {
-  const root: NoteTreeNode = { name: "", children: new Map() }
+  const root: NoteTreeNode = {
+    name: "",
+    path: "",
+    children: new Map(),
+  }
 
   for (const item of items) {
-    const parts = contentPath(item).split("/").filter(Boolean)
+    const parts = contentPath(item).split(/[\\/]/).filter(Boolean)
     let current = root
     parts.forEach((part, index) => {
       const child = current.children.get(part) ?? {
         name: part,
+        path: parts.slice(0, index + 1).join("/"),
         children: new Map<string, NoteTreeNode>(),
       }
       current.children.set(part, child)
@@ -602,72 +626,127 @@ function NoteTree({
   }
 
   return (
-    <NoteTreeNodes
-      node={root}
-      depth={0}
-      selectedObjectId={selectedObjectId}
-      onSelectObject={onSelectObject}
-    />
+    <div role="tree" aria-label="笔记目录" className="flex flex-col gap-0.5">
+      <NoteTreeNodes
+        node={root}
+        selectedObjectId={selectedObjectId}
+        onSelectObject={onSelectObject}
+      />
+    </div>
   )
 }
 
 function NoteTreeNodes({
   node,
-  depth,
   selectedObjectId,
   onSelectObject,
 }: {
   node: NoteTreeNode
-  depth: number
   selectedObjectId: string | null
   onSelectObject: (value: string) => void
 }) {
   return [...node.children.values()]
-    .sort(
-      (left, right) =>
-        Number(Boolean(right.item)) - Number(Boolean(left.item)) ||
-        left.name.localeCompare(right.name, "zh-CN")
+    .sort((left, right) =>
+      Number(right.children.size > 0) - Number(left.children.size > 0) ||
+      left.name.localeCompare(right.name, "zh-CN")
     )
-    .map((child) => (
-      <div key={child.name} className="flex flex-col gap-2">
-        {child.item ? (
-          <ContentListItem
-            item={child.item}
-            selected={child.item.object.objectId === selectedObjectId}
-            onSelect={() => onSelectObject(child.item!.object.objectId)}
-            indent={depth}
-          />
-        ) : (
-          <div
-            className="flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-sm font-medium"
-            style={{ marginLeft: `${depth}rem` }}
-          >
-            <FolderIcon className="text-muted-foreground" />
-            <span className="truncate">{child.name}</span>
-          </div>
-        )}
-        {child.children.size ? (
-          <NoteTreeNodes
-            node={child}
-            depth={depth + 1}
-            selectedObjectId={selectedObjectId}
-            onSelectObject={onSelectObject}
-          />
-        ) : null}
-      </div>
-    ))
+    .map((child) => {
+      if (child.children.size) {
+        return (
+          <Collapsible key={child.path} defaultOpen>
+            <CollapsibleTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="group w-full justify-start transition-none"
+                  role="treeitem"
+                />
+              }
+            >
+              <ChevronRightIcon className="transition-transform group-data-[state=open]:rotate-90" />
+              <FolderIcon />
+              <span className="truncate">{child.name}</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {countTreeFiles(child)}
+              </span>
+            </CollapsibleTrigger>
+            <CollapsibleContent role="group" className="ml-4 border-l pl-1">
+              {child.item ? (
+                <NoteFileRow
+                  item={child.item}
+                  selected={child.item.object.objectId === selectedObjectId}
+                  onSelect={() => onSelectObject(child.item!.object.objectId)}
+                />
+              ) : null}
+              <NoteTreeNodes
+                node={child}
+                selectedObjectId={selectedObjectId}
+                onSelectObject={onSelectObject}
+              />
+            </CollapsibleContent>
+          </Collapsible>
+        )
+      }
+      if (!child.item) return null
+      return (
+        <NoteFileRow
+          key={child.path}
+          item={child.item}
+          selected={child.item.object.objectId === selectedObjectId}
+          onSelect={() => onSelectObject(child.item!.object.objectId)}
+        />
+      )
+    })
+}
+
+function NoteFileRow({
+  item,
+  selected,
+  onSelect,
+}: {
+  item: DecodedSyncObject
+  selected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <Button
+      variant={selected ? "secondary" : "ghost"}
+      size="sm"
+      className="w-full justify-start font-normal transition-none"
+      role="treeitem"
+      aria-selected={selected}
+      onClick={onSelect}
+    >
+      <FileTextIcon />
+      <span className="truncate">{contentTitle(item)}</span>
+      {item.object.deletedAt ? (
+        <Badge variant="outline" className="ml-auto">
+          已删除
+        </Badge>
+      ) : null}
+    </Button>
+  )
+}
+
+function countTreeFiles(node: NoteTreeNode): number {
+  return (
+    Number(Boolean(node.item)) +
+    [...node.children.values()].reduce(
+      (total, child) => total + countTreeFiles(child),
+      0
+    )
+  )
 }
 
 function ContentListItem({
   item,
   selected,
   onSelect,
-  indent = 0,
 }: {
   item: DecodedSyncObject
   selected: boolean
   onSelect: () => void
-  indent?: number
 }) {
   const Icon = kindIcon(item.object.kind)
   return (
@@ -677,11 +756,6 @@ function ContentListItem({
         selected
           ? "border-primary/40 ring-1 ring-primary/20"
           : "cursor-pointer hover:bg-muted/50"
-      }
-      style={
-        indent
-          ? { marginLeft: `${indent}rem`, width: `calc(100% - ${indent}rem)` }
-          : undefined
       }
       role="button"
       tabIndex={0}
@@ -737,14 +811,14 @@ function isAdminTestObject(item: DecodedSyncObject): boolean {
 
 function kindIcon(kind: SyncObjectKind) {
   if (kind === "note") return FileTextIcon
-  if (kind === "record") return ListChecksIcon
+  if (kind === "record" || kind === "mark") return ListChecksIcon
   if (kind === "canvas") return PaletteIcon
   return FileCogIcon
 }
 
 function kindLabel(kind: string): string {
   if (kind === "note") return "笔记"
-  if (kind === "record") return "记录"
+  if (kind === "record" || kind === "mark") return "记录"
   if (kind === "canvas") return "绘图"
   if (kind === "setting") return "配置"
   return kind

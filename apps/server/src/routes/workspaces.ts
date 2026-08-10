@@ -152,7 +152,7 @@ export function createWorkspaceRoutes(
         request.params.keyVersion,
         request.body.envelopes,
       )
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.put('/v1/workspaces/:workspaceId/encryption/managed', {
@@ -173,7 +173,7 @@ export function createWorkspaceRoutes(
         request.params.workspaceId,
         request.body.keys,
       )
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.delete('/v1/workspaces/:workspaceId', {
@@ -181,7 +181,7 @@ export function createWorkspaceRoutes(
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
       await workspaces.remove(claims.accountId, request.params.workspaceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.post('/v1/workspaces/:workspaceId/restore', {
@@ -189,7 +189,7 @@ export function createWorkspaceRoutes(
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
       await workspaces.restore(claims.accountId, request.params.workspaceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
   }
 }

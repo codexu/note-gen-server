@@ -27,7 +27,8 @@ export async function unlockManagedWorkspaceKeys(
 
 export async function decodeWorkspaceObject(
   object: WebSyncObject,
-  keys: ReadonlyMap<number, CryptoKey>
+  keys: ReadonlyMap<number, CryptoKey>,
+  workspaceId: string
 ): Promise<DecodedSyncObject> {
   const key = keys.get(object.keyVersion)
   if (!key) {
@@ -39,11 +40,34 @@ export async function decodeWorkspaceObject(
   }
   try {
     const bytes = fromBase64Url(object.ciphertext)
-    if (bytes.byteLength <= 12) throw new Error("invalid encrypted payload")
+    const isV2Envelope = bytes[0] === 0x02 && bytes[1] === 0x01
+    const nonceOffset = isV2Envelope ? 2 : 0
+    const ciphertextOffset = nonceOffset + 12
+    if (bytes.byteLength <= ciphertextOffset + 16)
+      throw new Error("invalid encrypted payload")
+    const algorithm: AesGcmParams = {
+      name: "AES-GCM",
+      iv: bytes.slice(nonceOffset, ciphertextOffset),
+      ...(isV2Envelope
+        ? {
+            additionalData: new TextEncoder().encode(
+              JSON.stringify([
+                "notegen-sync-v1",
+                workspaceId,
+                object.objectId,
+                object.kind,
+                object.keyVersion,
+                "object",
+                object.objectId,
+              ])
+            ),
+          }
+        : {}),
+    }
     const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: bytes.slice(0, 12) },
+      algorithm,
       key,
-      bytes.slice(12)
+      bytes.slice(ciphertextOffset)
     )
     return {
       object,
@@ -76,6 +100,13 @@ export function contentTitle(item: DecodedSyncObject): string {
     stringValue(payload?.label) ??
     stringValue(payload?.key) ??
     stringValue(payload?.relativePath)
+  if (item.object.kind === "mark") {
+    if (title) return title
+    const recordText = recordTextValue(value)
+    if (recordText) return compact(firstLine(recordText), 48)
+    const type = stringValue(value?.type)
+    return type ? `${recordTypeName(type)}记录` : fallbackTitle(item)
+  }
   return title || fallbackTitle(item)
 }
 
@@ -109,6 +140,11 @@ export function contentSummary(item: DecodedSyncObject): string {
     )
   }
 
+  if (item.object.kind === "mark") {
+    const text = recordTextValue(recordPayload(payload.value))
+    return text ? compact(text, 180) : "这条记录没有可展示的文字内容。"
+  }
+
   const text =
     stringValue(payload.content) ??
     stringValue(payload.text) ??
@@ -129,6 +165,10 @@ export function displayPayload(item: DecodedSyncObject): string {
   ) {
     return payload.content
   }
+  if (item.object.kind === "mark" && payload) {
+    const value = recordPayload(payload.value)
+    if (value) return displayRecord(value)
+  }
   return JSON.stringify(sanitizePayload(item.payload), null, 2) ?? "内容为空"
 }
 
@@ -138,10 +178,64 @@ function fallbackTitle(item: DecodedSyncObject): string {
 
 function kindName(kind: string): string {
   if (kind === "note") return "未命名笔记"
-  if (kind === "record") return "未命名记录"
+  if (kind === "record" || kind === "mark") return "未命名记录"
   if (kind === "canvas") return "未命名绘图"
   if (kind === "setting") return "未命名配置"
   return "同步对象"
+}
+
+function recordTextValue(value: Record<string, unknown> | null): string | null {
+  if (!value) return null
+  return (
+    stringValue(value.desc) ??
+    stringValue(value.content) ??
+    stringValue(value.text) ??
+    stringValue(value.transcript) ??
+    stringValue(value.url)
+  )
+}
+
+function displayRecord(value: Record<string, unknown>): string {
+  const sections: string[] = []
+  const type = stringValue(value.type)
+  if (type) sections.push(`类型：${recordTypeName(type)}`)
+
+  const content = stringValue(value.content)
+  const description = stringValue(value.desc)
+  const url = stringValue(value.url)
+  if (content) sections.push(content)
+  if (description && description !== content) sections.push(`说明：\n${description}`)
+  if (url && url !== content && url !== description) sections.push(`资源：\n${url}`)
+
+  const createdAt = timestampValue(value.createdAt)
+  if (createdAt) sections.push(`创建时间：${createdAt}`)
+  return sections.join("\n\n") || "这条记录没有可展示的文字内容。"
+}
+
+function recordTypeName(type: string): string {
+  const names: Record<string, string> = {
+    scan: "扫描",
+    text: "文本",
+    image: "图片",
+    link: "链接",
+    file: "文件",
+    recording: "录音",
+    todo: "待办",
+  }
+  return names[type] ?? type
+}
+
+function timestampValue(value: unknown): string | null {
+  if (typeof value !== "number" && typeof value !== "string") return null
+  const raw = typeof value === "number" && value < 10_000_000_000
+    ? value * 1000
+    : value
+  const date = new Date(raw)
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleString("zh-CN")
+}
+
+function firstLine(value: string): string {
+  return value.split(/\r?\n/, 1)[0]?.trim() || value
 }
 
 function recordPayload(value: unknown): Record<string, unknown> | null {
@@ -181,7 +275,7 @@ function sanitizePayload(value: unknown, key = ""): unknown {
   return value
 }
 
-function fromBase64Url(value: string): Uint8Array {
+function fromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   const padded =
     value.replaceAll("-", "+").replaceAll("_", "/") +
     "=".repeat((4 - (value.length % 4)) % 4)

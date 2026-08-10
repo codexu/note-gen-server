@@ -342,7 +342,13 @@ export class WorkspaceService {
   }) {
     await this.assertOwned(accountId, workspaceId)
     const filters = [eq(objects.workspaceId, workspaceId)]
-    if (input.kind !== undefined) filters.push(eq(objects.kind, input.kind))
+    if (input.kind === 'record') {
+      // NoteGen clients sync user-facing records as `mark` objects. Keep the
+      // legacy `record` kind visible for older and admin-created test objects.
+      filters.push(inArray(objects.kind, ['record', 'mark']))
+    } else if (input.kind !== undefined) {
+      filters.push(eq(objects.kind, input.kind))
+    }
     if (input.status === 'active') filters.push(isNull(objects.deletedAt))
     if (input.status === 'deleted') filters.push(isNotNull(objects.deletedAt))
 

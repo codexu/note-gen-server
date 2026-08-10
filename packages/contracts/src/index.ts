@@ -244,10 +244,47 @@ export interface ServerCapabilitiesContract {
   serverName: string
   serverVersion: string
   publicBaseUrl: string
+  protocol: { minimum: 1, maximum: 1 }
+  features: {
+    durableCrdtUpdates: boolean
+    synchronizedConflicts: boolean
+    assetObjects: boolean
+    [key: string]: boolean
+  }
   registrationMode: "closed" | "open"
   deploymentMode: "self-hosted" | "hosted"
   web: {
     accountUrl: string
     deviceAuthorizationUrl: string
   }
+}
+
+export interface SyncEventContract {
+  eventId: string
+  sequence: string
+  commandId: string
+  sourceDeviceId: string
+  type: 'object.upserted' | 'object.deleted' | 'document.updated'
+    | 'document.checkpointed' | 'conflict.created' | 'conflict.resolved'
+  objectId: string | null
+  documentId: string | null
+  documentSequence: string | null
+  keyVersion: number | null
+  ciphertext: string | null
+  ciphertextHash: string | null
+  metadata: Record<string, unknown>
+  createdAt: string
+}
+
+export interface SyncCommandResultContract {
+  commandId: string
+  status: 'applied' | 'conflict' | 'rejected'
+  duplicate: boolean
+  sequence?: string
+  revision?: string
+  documentSequence?: string
+  conflictId?: string
+  code?: string
+  retryable?: boolean
+  details?: Record<string, unknown>
 }

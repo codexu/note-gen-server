@@ -80,11 +80,11 @@ async function main(): Promise<void> {
   console.log(`✓ 创建 Workspace：${workspace.id}`)
 
   const noteId = randomUUID()
-  const firstOperation = makeOperation(randomUUID(), noteId, 'note', '# NoteGen self test', null)
-  const first = await push(workspace.id, authA, firstOperation)
+  const firstCommand = makeCommand(randomUUID(), noteId, 'note', '# NoteGen self test', null)
+  const first = await push(workspace.id, authA, firstCommand)
   assert(first.status === 'applied' && first.revision === '1' && first.duplicate === false, '首次 Push 结果不正确')
 
-  const duplicate = await push(workspace.id, authA, firstOperation)
+  const duplicate = await push(workspace.id, authA, firstCommand)
   assert(duplicate.status === 'applied' && duplicate.revision === '1' && duplicate.duplicate === true,
     '同一 operationId 没有被幂等处理')
   console.log('✓ 首次 Push 与响应丢失后的幂等重试')
@@ -105,22 +105,22 @@ async function main(): Promise<void> {
   assert(authenticated.type === 'authenticated', 'WebSocket 认证失败')
 
   const changedNotice = nextSocketMessage(socket)
-  const secondOperation = makeOperation(randomUUID(), noteId, 'note', '# Edited offline on device A', '1')
-  const second = await push(workspace.id, authA, secondOperation)
+  const secondCommand = makeCommand(randomUUID(), noteId, 'note', '# Edited offline on device A', '1')
+  const second = await push(workspace.id, authA, secondCommand)
   assert(second.status === 'applied' && second.revision === '2', '第二版笔记 Push 失败')
   const notice = await changedNotice
   assert(notice.type === 'workspace.changed' && notice.workspaceId === workspace.id, '没有收到实时变更通知')
   socket.close()
   console.log('✓ WebSocket 实时唤醒')
 
-  const staleOperation = makeOperation(randomUUID(), noteId, 'note', '# Edited offline on device B', '1')
-  const conflict = await push(workspace.id, authB, staleOperation)
-  assert(conflict.status === 'conflict' && conflict.current?.currentRevision === '2',
+  const staleCommand = makeCommand(randomUUID(), noteId, 'note', '# Edited offline on device B', '1')
+  const conflict = await push(workspace.id, authB, staleCommand)
+  assert(conflict.status === 'conflict' && conflict.revision === '2',
     '过期 revision 没有产生可处理的冲突')
   console.log('✓ 双设备离线编辑不会静默覆盖')
 
   const settingId = deterministicSettingId('editor.fontSize')
-  const setting = makeOperation(
+  const setting = makeCommand(
     randomUUID(),
     settingId,
     'setting',
@@ -130,9 +130,9 @@ async function main(): Promise<void> {
   const settingResult = await push(workspace.id, authB, setting)
   assert(settingResult.status === 'applied', '允许同步的编辑器设置 Push 失败')
 
-  const pulled = await request<Pull>(`/v1/workspaces/${workspace.id}/sync/changes?after=0`, { headers: authA })
-  assert(pulled.changes.some((item) => item.objectId === noteId && item.revision === '2'), '设备 A 未拉取到最新笔记')
-  assert(pulled.changes.some((item) => item.objectId === settingId && item.kind === 'setting'), '设备 A 未拉取到同步设置')
+  const pulled = await request<Pull>(`/v1/workspaces/${workspace.id}/sync/events?after=0`, { headers: authA })
+  assert(pulled.events.some((item) => item.objectId === noteId && item.metadata.revision === '2'), '设备 A 未拉取到最新笔记')
+  assert(pulled.events.some((item) => item.objectId === settingId && item.metadata.kind === 'setting'), '设备 A 未拉取到同步设置')
   console.log(`✓ 增量 Pull 收敛到 cursor ${pulled.nextCursor}`)
   console.log('✓ 配置对象同步；SyncProfile、Token 和本地路径未进入测试载荷')
 
@@ -153,29 +153,30 @@ async function main(): Promise<void> {
   console.log('\n✅ 全部验收通过')
 }
 
-async function push(workspaceId: string, headers: Record<string, string>, operation: Operation): Promise<PushResult> {
-  const response = await request<{ results: PushResult[] }>(`/v1/workspaces/${workspaceId}/sync/push`, {
+async function push(workspaceId: string, headers: Record<string, string>, command: SyncCommand): Promise<PushResult> {
+  const response = await request<{ results: PushResult[] }>(`/v1/workspaces/${workspaceId}/sync/commands`, {
     method: 'POST',
     headers,
-    body: { operations: [operation] },
+    body: { commands: [command] },
   })
   const result = response.results[0]
   if (result === undefined) throw new Error('Push 未返回结果')
   return result
 }
 
-function makeOperation(
-  operationId: string,
+function makeCommand(
+  commandId: string,
   objectId: string,
   kind: 'note' | 'setting',
   plaintext: string,
   baseRevision: string | null,
-): Operation {
+): SyncCommand {
   // 服务端只处理 opaque ciphertext。这里使用协议形状正确的模拟密文，
   // 真正的 AEAD 加解密由 NoteGen 客户端负责并单独测试。
   const encryptedBytes = Buffer.from(plaintext)
   return {
-    operationId,
+    type: 'upsert-object',
+    commandId,
     objectId,
     kind,
     baseRevision,
@@ -183,7 +184,8 @@ function makeOperation(
     ciphertext: encryptedBytes.toString('base64url'),
     ciphertextHash: createHash('sha256').update(encryptedBytes).digest('base64url'),
     blobRefs: [],
-    delete: false,
+    parentObjectId: null,
+    nameCiphertext: encryptedBytes.toString('base64url'),
   }
 }
 
@@ -273,8 +275,9 @@ interface Capabilities {
 }
 
 interface Session { accessToken: string }
-interface Operation {
-  operationId: string
+interface SyncCommand {
+  type: 'upsert-object'
+  commandId: string
   objectId: string
   kind: 'note' | 'setting'
   baseRevision: string | null
@@ -282,16 +285,17 @@ interface Operation {
   ciphertext: string
   ciphertextHash: string
   blobRefs: string[]
-  delete: boolean
+  parentObjectId: null
+  nameCiphertext: string
 }
 type PushResult =
   | { status: 'applied', revision: string, sequence: string, duplicate: boolean }
-  | { status: 'conflict', current: { currentRevision: string } | null }
+  | { status: 'conflict', revision?: string }
   | { status: 'rejected', code: string, retryable: boolean }
 interface Bootstrap {
   objects: Array<{ objectId: string, currentRevision: string }>
 }
 interface Pull {
-  changes: Array<{ objectId: string, revision: string, kind: string }>
+  events: Array<{ objectId: string | null, metadata: { revision?: string, kind?: string } }>
   nextCursor: string
 }

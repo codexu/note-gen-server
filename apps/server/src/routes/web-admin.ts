@@ -166,7 +166,7 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await admin.revokeWebSession(session.accountId, request.params.sessionId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.delete('/v1/web/admin/accounts/:accountId/sessions', { schema: {
@@ -185,7 +185,7 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await admin.restoreWorkspace(session.accountId, request.params.workspaceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.get('/v1/web/admin/storage/orphans', { schema: { response: { 200: StorageReport } } }, async (request) => {
@@ -221,7 +221,7 @@ export function createWebAdminRoutes(
 
     app.get('/v1/web/admin/backups/:backupId/download', { schema: {
       params: Type.Object({ backupId: Type.String({ format: 'uuid' }) }),
-      response: { 200: Type.String({ contentMediaType: 'application/octet-stream' }) },
+      response: { 200: Type.Any() },
     } }, async (request, reply) => {
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       const backup = await admin.getBackupFile(session.accountId, request.params.backupId)
@@ -235,7 +235,7 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await admin.deleteBackup(session.accountId, request.params.backupId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.get('/v1/web/admin/jobs', { schema: { response: { 200: Type.Array(AdminJob) } } }, async (request) => {
@@ -258,7 +258,7 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await admin.deleteWorkspace(session.accountId, request.params.workspaceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.delete('/v1/web/admin/devices/:deviceId', { schema: {
@@ -268,7 +268,7 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await admin.revokeDevice(session.accountId, request.params.deviceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.patch('/v1/web/admin/accounts/:accountId', {
@@ -287,7 +287,7 @@ export function createWebAdminRoutes(
         webSessions,
       )
       await admin.setAccountSuspended(session.accountId, request.params.accountId, request.body.suspended)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.patch('/v1/web/admin/accounts/:accountId/role', {
@@ -306,7 +306,7 @@ export function createWebAdminRoutes(
         webSessions,
       )
       await admin.setAccountAdmin(session.accountId, request.params.accountId, request.body.isAdmin)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.post('/v1/web/admin/accounts/batch', {

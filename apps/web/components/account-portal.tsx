@@ -174,7 +174,9 @@ export function AccountPortal() {
         return
       }
       const keys = await unlockManagedWorkspaceKeys(versions)
-      const decoded = await Promise.all(page.objects.map((object) => decodeWorkspaceObject(object, keys)))
+      const decoded = await Promise.all(page.objects.map((object) => (
+        decodeWorkspaceObject(object, keys, workspaceId)
+      )))
       setContentItems(decoded)
       setContentTotal(page.total)
       setSelectedObjectId((current) => (

@@ -118,7 +118,7 @@ export function createBlobRoutes(
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
       await blobs.abort(claims.accountId, request.params.workspaceId, request.params.uploadId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.head('/v1/workspaces/:workspaceId/blobs/:blobId', {
@@ -129,13 +129,13 @@ export function createBlobRoutes(
       return reply.headers({
         'content-length': blob.size.toString(),
         'x-ciphertext-hash': blob.ciphertextHash,
-      }).status(200).send()
+      }).status(200).send(null)
     })
 
     app.get('/v1/workspaces/:workspaceId/blobs/:blobId', {
       schema: { params: BlobParams, response: {
-        200: Type.String({ contentMediaType: 'application/octet-stream' }),
-        206: Type.String({ contentMediaType: 'application/octet-stream' }),
+        200: Type.Any(),
+        206: Type.Any(),
       } },
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)

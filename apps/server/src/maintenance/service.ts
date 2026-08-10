@@ -2,7 +2,8 @@ import { and, asc, eq, isNull, lt, or } from 'drizzle-orm'
 import type { AppConfig } from '../config.js'
 import type { DatabaseContext } from '../database/client.js'
 import {
-  blobs, blobUploads, bootstrapSessions, deviceAuthorizations, devicePairings, webSessions, workspaces,
+  blobs, blobUploads, bootstrapSessions, deviceAuthorizations, devicePairings,
+  syncV2BootstrapSessions, webSessions, workspaces,
 } from '../database/schema.js'
 import type { BlobStorage } from '../storage/blob-storage.js'
 import { BLOB_COMPLETION_LEASE_MS } from '../blobs/constants.js'
@@ -10,6 +11,7 @@ import { BLOB_COMPLETION_LEASE_MS } from '../blobs/constants.js'
 export interface MaintenanceResult {
   skipped: boolean
   bootstrapSessions: number
+  syncV2BootstrapSessions: number
   deviceAuthorizations: number
   devicePairings: number
   webSessions: number
@@ -72,6 +74,9 @@ export class MaintenanceService {
     const removedBootstrapSessions = await this.database.db.delete(bootstrapSessions)
       .where(lt(bootstrapSessions.expiresAt, new Date()))
       .returning({ id: bootstrapSessions.id })
+    const removedSyncV2BootstrapSessions = await this.database.db.delete(syncV2BootstrapSessions)
+      .where(lt(syncV2BootstrapSessions.expiresAt, new Date()))
+      .returning({ id: syncV2BootstrapSessions.id })
     const removedDeviceAuthorizations = await this.database.db.delete(deviceAuthorizations)
       .where(lt(deviceAuthorizations.expiresAt, new Date()))
       .returning({ id: deviceAuthorizations.id })
@@ -121,6 +126,20 @@ export class MaintenanceService {
                   and s.expires_at > now()
                   and v2.sequence <= s.snapshot_sequence
               )
+              and not exists (
+                select 1 from sync_v2_bootstrap_objects bo
+                join sync_v2_bootstrap_sessions bs on bs.id = bo.session_id
+                where bo.workspace_id = v2.workspace_id
+                  and bo.object_id = v2.object_id
+                  and bo.revision = v2.revision
+                  and bs.expires_at > now()
+              )
+              and not exists (
+                select 1 from sync_v2_resource_bindings rb
+                where rb.workspace_id = v2.workspace_id
+                  and rb.resource_object_id = v2.object_id
+                  and rb.resource_revision = v2.revision
+              )
             limit 5000
           ) returning revision`
         const removedOperations = await sql`
@@ -161,6 +180,7 @@ export class MaintenanceService {
     return {
       skipped: false,
       bootstrapSessions: removedBootstrapSessions.length,
+      syncV2BootstrapSessions: removedSyncV2BootstrapSessions.length,
       deviceAuthorizations: removedDeviceAuthorizations.length,
       devicePairings: removedDevicePairings.length,
       webSessions: removedWebSessions.length,
@@ -240,6 +260,7 @@ function emptyMaintenanceResult(): MaintenanceResult {
   return {
     skipped: true,
     bootstrapSessions: 0,
+    syncV2BootstrapSessions: 0,
     deviceAuthorizations: 0,
     devicePairings: 0,
     webSessions: 0,

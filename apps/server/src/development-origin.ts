@@ -17,7 +17,8 @@ export function isLocalNetworkHostname(value: string): boolean {
   if (hostname === '::1' || hostname.startsWith('fc') || hostname.startsWith('fd') || hostname.startsWith('fe80:')) {
     return true
   }
-  const parts = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)?.slice(1).map(Number)
+  const match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  const parts = match === null ? undefined : match.slice(1).map(Number) as [number, number, number, number]
   return Boolean(parts
     && parts.every((part) => part >= 0 && part <= 255)
     && (parts[0] === 10

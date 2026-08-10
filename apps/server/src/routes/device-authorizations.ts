@@ -46,7 +46,7 @@ export function createDeviceAuthorizationRoutes(
       schema: { body: Type.Object({ deviceCode: Type.String({ minLength: 20 }) }), response: { 204: Type.Null() } },
     }, async (request, reply) => {
       await authorizations.cancel(request.body.deviceCode)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.get('/v1/web/device-authorizations/:userCode', {
@@ -72,7 +72,7 @@ export function createDeviceAuthorizationRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await authorizations.approve(request.params.userCode, session.accountId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.post('/v1/web/device-authorizations/:userCode/deny', {
@@ -83,7 +83,7 @@ export function createDeviceAuthorizationRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await authorizations.deny(request.params.userCode)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
   }
 }

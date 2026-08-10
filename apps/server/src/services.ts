@@ -10,7 +10,7 @@ import type { WebSessionService } from './auth/web-session-service.js'
 import type { DeviceAuthorizationService } from './auth/device-authorization-service.js'
 import type { DevicePairingService } from './auth/device-pairing-service.js'
 import type { AdminService } from './admin/service.js'
-import type { CollaborationService } from './collab/service.js'
+import type { DurableSyncService } from './durable-sync/service.js'
 
 export interface ServiceDependencies {
   readonly version: string
@@ -27,5 +27,5 @@ export interface ServiceDependencies {
   readonly deviceAuthorizations?: DeviceAuthorizationService
   readonly devicePairings?: DevicePairingService
   readonly admin?: AdminService
-  readonly collaboration?: CollaborationService
+  readonly syncProtocol?: DurableSyncService
 }

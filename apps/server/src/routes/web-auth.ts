@@ -80,7 +80,7 @@ export function createWebAuthRoutes(
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await webSessions.destroy(request.cookies[WEB_SESSION_COOKIE])
       clearSessionCookies(config, reply)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.put('/v1/web/auth/password', {
@@ -101,7 +101,7 @@ export function createWebAuthRoutes(
       setSessionCookies(config, reply, nextSession)
       await admin?.recordAudit(session.accountId, 'account.password-change', 'account', session.accountId)
         .catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record password change audit'))
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.get('/v1/web/devices', { schema: { response: { 200: Type.Array(Type.Object({
@@ -143,7 +143,7 @@ export function createWebAuthRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await auth.enableTotp(session.accountId, request.body.code)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.delete('/v1/web/auth/totp', {
@@ -159,7 +159,7 @@ export function createWebAuthRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await auth.disableTotp(session.accountId, request.body.currentPassword, request.body.code)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.delete('/v1/web/sessions/others', { schema: {
@@ -181,7 +181,7 @@ export function createWebAuthRoutes(
       await auth.revokeDevice(session.accountId, request.params.deviceId)
       await admin?.recordAudit(session.accountId, 'device.revoke', 'device', request.params.deviceId)
         .catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record device revocation audit'))
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
   }
 }
@@ -247,7 +247,7 @@ function safeEqual(value: string | undefined, expected: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right)
 }
 
-function sessionContext(request: { ip: string, headers: { 'user-agent'?: string } }) {
+function sessionContext(request: { ip: string, headers: { 'user-agent'?: string | undefined } }) {
   return { ip: request.ip, ...(request.headers['user-agent'] === undefined ? {} : { userAgent: request.headers['user-agent'] }) }
 }
 

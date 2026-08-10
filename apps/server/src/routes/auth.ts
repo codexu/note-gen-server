@@ -78,7 +78,7 @@ export function createAuthRoutes(
       schema: { body: RefreshBody, response: { 204: Type.Null() } },
     }, async (request, reply) => {
       await auth.logout(request.body.refreshToken, request.body.deviceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.get('/v1/devices', {
@@ -139,7 +139,7 @@ export function createAuthRoutes(
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
       await auth.revokeDevice(claims.accountId, request.params.deviceId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.patch('/v1/devices/:deviceId', {
@@ -151,7 +151,7 @@ export function createAuthRoutes(
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
       await auth.renameDevice(claims.accountId, request.params.deviceId, request.body.name)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
   }
 }

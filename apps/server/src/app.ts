@@ -25,7 +25,6 @@ import { createWebAuthRoutes } from './routes/web-auth.js'
 import { createDeviceAuthorizationRoutes } from './routes/device-authorizations.js'
 import { createDevicePairingRoutes } from './routes/device-pairings.js'
 import { createWebAdminRoutes } from './routes/web-admin.js'
-import { createCollaborationRoutes } from './routes/collab.js'
 import { isAllowedDevelopmentWebOrigin } from './development-origin.js'
 import { createPostgresRateLimitStore } from './observability/postgres-rate-limit-store.js'
 import type { DatabaseContext } from './database/client.js'
@@ -145,19 +144,13 @@ export async function buildApp(
   if (dependencies.workspaces !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
     await app.register(createWorkspaceRoutes(dependencies.workspaces, dependencies.tokens, dependencies.auth))
   }
-  if (dependencies.sync !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
-    await app.register(createSyncRoutes(dependencies.sync, dependencies.tokens, dependencies.auth))
+  if (dependencies.syncProtocol !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
+    await app.register(createSyncRoutes(dependencies.syncProtocol, dependencies.tokens, dependencies.auth))
   }
   if (dependencies.tokens !== undefined && dependencies.workspaces !== undefined
     && dependencies.notifier !== undefined && dependencies.auth !== undefined) {
     await app.register(createEventRoutes(
       dependencies.tokens, dependencies.auth, dependencies.workspaces, dependencies.notifier,
-    ))
-  }
-  if (dependencies.collaboration !== undefined && dependencies.tokens !== undefined
-    && dependencies.auth !== undefined && dependencies.workspaces !== undefined) {
-    await app.register(createCollaborationRoutes(
-      dependencies.collaboration, dependencies.tokens, dependencies.auth, dependencies.workspaces,
     ))
   }
   if (dependencies.blobs !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {

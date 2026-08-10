@@ -1,157 +1,180 @@
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox'
 import { Type } from '@sinclair/typebox'
+import type { AuthService } from '../auth/service.js'
 import { requireAuth } from '../auth/http-auth.js'
 import type { TokenService } from '../auth/tokens.js'
-import type { AuthService } from '../auth/service.js'
-import type { SyncService } from '../sync/service.js'
+import type { DurableSyncService } from '../durable-sync/service.js'
 import { syncObjectKinds } from '../sync/types.js'
-import {
-  BootstrapObjectResponse, ChangeResponse, CounterString, ObjectVersionResponse, PushResponse,
-  PushResultResponse,
-} from './api-schemas.js'
 
+const Counter = Type.String({ pattern: '^\\d{1,19}$' })
+const Hash = Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' })
 const WorkspaceParams = Type.Object({ workspaceId: Type.String({ format: 'uuid' }) })
-const ObjectParams = Type.Object({
+const ObjectVersionParams = Type.Object({
   workspaceId: Type.String({ format: 'uuid' }),
   objectId: Type.String({ format: 'uuid' }),
+  revision: Counter,
 })
-const Counter = Type.String({ pattern: '^\\d{1,19}$' })
-const ObjectKind = Type.Union(syncObjectKinds.map((kind) => Type.Literal(kind)))
-const PushOperation = Type.Object({
-  operationId: Type.String({ format: 'uuid' }),
-  objectId: Type.String({ format: 'uuid' }),
-  kind: ObjectKind,
-  baseRevision: Type.Union([Counter, Type.Null()]),
+const Kind = Type.Union(syncObjectKinds.map(kind => Type.Literal(kind)))
+const Envelope = {
   keyVersion: Type.Integer({ minimum: 1 }),
   ciphertext: Type.String({ pattern: '^[A-Za-z0-9_-]+$' }),
-  ciphertextHash: Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' }),
-  blobRefs: Type.Array(Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' }), { maxItems: 1_000 }),
-  delete: Type.Boolean(),
-})
+  ciphertextHash: Hash,
+}
+const CommandId = { commandId: Type.String({ format: 'uuid' }) }
+const Command = Type.Union([
+  Type.Object({
+    ...CommandId, type: Type.Literal('upsert-object'), objectId: Type.String({ format: 'uuid' }),
+    kind: Kind, parentObjectId: Type.Optional(Type.Union([Type.String({ format: 'uuid' }), Type.Null()])),
+    nameCiphertext: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    nameBlindIndex: Type.Optional(Type.Union([Hash, Type.Null()])),
+    nameBlindIndexKeyVersion: Type.Optional(Type.Integer({ minimum: 1 })),
+    nameConflictId: Type.Optional(Type.String({ format: 'uuid' })),
+    nameConflictCiphertext: Type.Optional(Type.String({ pattern: '^[A-Za-z0-9_-]+$' })),
+    nameConflictCiphertextHash: Type.Optional(Hash),
+    baseRevision: Type.Union([Counter, Type.Null()]), blobRefs: Type.Array(Hash, { maxItems: 1_000 }),
+    resourceObjectIds: Type.Optional(Type.Array(Type.String({ format: 'uuid' }), { maxItems: 1_000 })),
+    ...Envelope,
+  }),
+  Type.Object({
+    ...CommandId, type: Type.Literal('delete-object'), objectId: Type.String({ format: 'uuid' }),
+    kind: Kind, parentObjectId: Type.Optional(Type.Union([Type.String({ format: 'uuid' }), Type.Null()])),
+    nameCiphertext: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    baseRevision: Counter, expectedDocumentSequence: Counter, blobRefs: Type.Array(Hash, { maxItems: 1_000 }),
+    conflictId: Type.String({ format: 'uuid' }), conflictCiphertext: Type.String({ pattern: '^[A-Za-z0-9_-]+$' }),
+    conflictCiphertextHash: Hash, ...Envelope,
+  }),
+  Type.Object({
+    ...CommandId, type: Type.Literal('delete-subtree'), rootObjectId: Type.String({ format: 'uuid' }),
+    conflictId: Type.String({ format: 'uuid' }), conflictKeyVersion: Type.Integer({ minimum: 1 }),
+    conflictCiphertext: Type.String({ pattern: '^[A-Za-z0-9_-]+$' }), conflictCiphertextHash: Hash,
+    mutationIds: Type.Optional(Type.Array(Type.String({ format: 'uuid' }), { maxItems: 10_000 })),
+    objects: Type.Array(Type.Object({
+      objectId: Type.String({ format: 'uuid' }), kind: Kind, baseRevision: Counter,
+      expectedDocumentSequence: Counter, blobRefs: Type.Array(Hash, { maxItems: 1_000 }), ...Envelope,
+    }), { minItems: 1, maxItems: 10_000 }),
+  }),
+  Type.Object({
+    ...CommandId, type: Type.Literal('append-update'), updateId: Type.String({ format: 'uuid' }),
+    documentId: Type.String({ minLength: 1, maxLength: 512 }), objectId: Type.String({ format: 'uuid' }),
+    kind: Kind, ...Envelope,
+  }),
+  Type.Object({
+    ...CommandId, type: Type.Literal('commit-checkpoint'), checkpointId: Type.String({ format: 'uuid' }),
+    documentId: Type.String({ minLength: 1, maxLength: 512 }), objectId: Type.String({ format: 'uuid' }),
+    kind: Kind, coversDocumentSequence: Counter, materializedRevision: Type.Union([Counter, Type.Null()]), ...Envelope,
+  }),
+  Type.Object({
+    ...CommandId, type: Type.Literal('create-conflict'), conflictId: Type.String({ format: 'uuid' }),
+    objectId: Type.String({ format: 'uuid' }), kind: Kind, conflictType: Type.String({ minLength: 1, maxLength: 64 }),
+    expectedRevision: Type.Union([Counter, Type.Null()]),
+    expectedDocumentSequence: Type.Union([Counter, Type.Null()]), ...Envelope,
+  }),
+  Type.Object({
+    ...CommandId, type: Type.Literal('resolve-conflict'), conflictId: Type.String({ format: 'uuid' }),
+    expectedCreatedSequence: Counter,
+    requiresCommandId: Type.Optional(Type.String({ format: 'uuid' })),
+    deleteObject: Type.Optional(Type.Boolean()),
+    objectResolution: Type.Optional(Type.Object({
+      objectId: Type.String({ format: 'uuid' }), kind: Kind,
+      parentObjectId: Type.Optional(Type.Union([Type.String({ format: 'uuid' }), Type.Null()])),
+      nameCiphertext: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      nameBlindIndex: Type.Optional(Type.Union([Hash, Type.Null()])),
+      nameBlindIndexKeyVersion: Type.Optional(Type.Integer({ minimum: 1 })),
+      blobRefs: Type.Optional(Type.Array(Hash, { maxItems: 1_000 })), ...Envelope,
+      resourceObjectIds: Type.Optional(Type.Array(Type.String({ format: 'uuid' }), { maxItems: 1_000 })),
+    })),
+    resolution: Type.Optional(Type.Object({
+      checkpointId: Type.String({ format: 'uuid' }), documentId: Type.String({ minLength: 1, maxLength: 512 }),
+      objectId: Type.String({ format: 'uuid' }), kind: Kind, expectedDocumentSequence: Counter, ...Envelope,
+    })),
+  }),
+])
 
 export function createSyncRoutes(
-  sync: SyncService,
+  sync: DurableSyncService,
   tokens: TokenService,
   auth: AuthService,
 ): FastifyPluginAsyncTypebox {
   return async function syncRoutes(app) {
-    app.post('/v1/workspaces/:workspaceId/sync/push', {
-      config: { rateLimit: { max: 300, timeWindow: '1 minute' } },
-      schema: {
-        params: WorkspaceParams,
-        body: Type.Object({ operations: Type.Array(PushOperation, { minItems: 1, maxItems: 100 }) }),
-        response: { 200: PushResponse },
-      },
-    }, async (request) => {
-      const claims = await requireAuth(request, tokens, auth)
-      return sync.push(claims.accountId, claims.deviceId, request.params.workspaceId, request.body.operations)
-    })
-
-    app.get('/v1/workspaces/:workspaceId/sync/changes', {
+    app.post('/v1/workspaces/:workspaceId/sync/commands', {
       config: { rateLimit: { max: 600, timeWindow: '1 minute' } },
       schema: {
         params: WorkspaceParams,
-        querystring: Type.Object({
-          after: Type.Optional(Counter),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
-        }),
-        response: {
-          200: Type.Object({
-            changes: Type.Array(ChangeResponse),
-            nextCursor: CounterString,
-            hasMore: Type.Boolean(),
-            latestSequence: CounterString,
-          }),
-        },
+        body: Type.Object({ commands: Type.Array(Command, { minItems: 1, maxItems: 100 }) }),
       },
-    }, async (request) => {
+    }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      return sync.pull(claims.accountId, request.params.workspaceId, request.query.after ?? '0', request.query.limit ?? 200)
+      return sync.commands(claims.accountId, claims.deviceId, request.params.workspaceId, request.body.commands)
     })
 
-    app.post('/v1/workspaces/:workspaceId/sync/session', {
+    app.get('/v1/workspaces/:workspaceId/sync/events', {
       schema: {
         params: WorkspaceParams,
-        body: Type.Object({ cursor: Counter }),
-        response: {
-          200: Type.Object({
-            latestSequence: CounterString,
-            cursorValid: Type.Boolean(),
-            bootstrapRequired: Type.Boolean(),
-            webSocketPath: Type.String(),
-          }),
-        },
+        querystring: Type.Object({ after: Type.Optional(Counter), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })) }),
       },
-    }, async (request) => {
+    }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      return sync.session(claims.accountId, request.params.workspaceId, request.body.cursor)
+      return sync.events(claims.accountId, request.params.workspaceId, request.query.after ?? '0', request.query.limit ?? 200)
     })
 
-    app.put('/v1/workspaces/:workspaceId/sync/cursor', {
-      schema: { params: WorkspaceParams, body: Type.Object({ cursor: Counter }), response: { 204: Type.Null() } },
-    }, async (request, reply) => {
+    app.get('/v1/workspaces/:workspaceId/sync/objects/:objectId/versions/:revision', {
+      schema: { params: ObjectVersionParams },
+    }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      await sync.acknowledge(claims.accountId, claims.deviceId, request.params.workspaceId, request.body.cursor)
-      return reply.status(204).send()
-    })
-
-    app.get('/v1/workspaces/:workspaceId/sync/bootstrap', {
-      config: { rateLimit: { max: 600, timeWindow: '1 minute' } },
-      schema: {
-        params: WorkspaceParams,
-        querystring: Type.Object({
-          afterObjectId: Type.Optional(Type.String({ format: 'uuid' })),
-          bootstrapSessionId: Type.Optional(Type.String({ format: 'uuid' })),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
-        }),
-        response: {
-          200: Type.Object({
-            objects: Type.Array(BootstrapObjectResponse),
-            nextObjectId: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]),
-            hasMore: Type.Boolean(),
-            snapshotSequence: CounterString,
-            bootstrapSessionId: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]),
-          }),
-        },
-      },
-    }, async (request) => {
-      const claims = await requireAuth(request, tokens, auth)
-      return sync.bootstrap(
+      return sync.objectVersion(
         claims.accountId,
-        claims.deviceId,
         request.params.workspaceId,
-        request.query.afterObjectId ?? null,
-        request.query.limit ?? 200,
-        request.query.bootstrapSessionId ?? null,
+        request.params.objectId,
+        request.params.revision,
       )
     })
 
-    app.get('/v1/workspaces/:workspaceId/objects/:objectId/history', {
+    app.get('/v1/workspaces/:workspaceId/sync/objects/:objectId/versions', {
       schema: {
-        params: ObjectParams,
-        querystring: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })) }),
-        response: { 200: Type.Array(ObjectVersionResponse) },
+        params: Type.Object({
+          workspaceId: Type.String({ format: 'uuid' }),
+          objectId: Type.String({ format: 'uuid' }),
+        }),
+        querystring: Type.Object({
+          before: Type.Optional(Counter),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+        }),
       },
-    }, async (request) => {
+    }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      return sync.history(claims.accountId, request.params.workspaceId, request.params.objectId, request.query.limit ?? 100)
+      return sync.objectVersions(
+        claims.accountId, request.params.workspaceId, request.params.objectId,
+        request.query.before ?? null, request.query.limit ?? 20,
+      )
     })
 
-    app.post('/v1/workspaces/:workspaceId/objects/:objectId/history/:revision/restore', {
+    app.get('/v1/workspaces/:workspaceId/sync/bootstrap', {
       schema: {
-        params: Type.Intersect([ObjectParams, Type.Object({ revision: Counter })]),
-        body: Type.Object({
-          operationId: Type.String({ format: 'uuid' }),
-          baseRevision: Counter,
+        params: WorkspaceParams,
+        querystring: Type.Object({
+          bootstrapId: Type.Optional(Type.String({ format: 'uuid' })),
+          afterObjectId: Type.Optional(Type.String({ format: 'uuid' })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
         }),
-        response: { 200: PushResultResponse },
       },
-    }, async (request) => {
+    }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      return sync.restore(
-        claims.accountId, claims.deviceId, request.params.workspaceId,
-        request.params.objectId, request.params.revision,
-        request.body.operationId, request.body.baseRevision,
+      return sync.bootstrap(
+        claims.accountId, request.params.workspaceId, request.query.bootstrapId ?? null,
+        request.query.afterObjectId ?? null, request.query.limit ?? 200,
+      )
+    })
+
+    app.get('/v1/workspaces/:workspaceId/documents/:documentId/updates', {
+      schema: {
+        params: Type.Object({ workspaceId: Type.String({ format: 'uuid' }), documentId: Type.String({ minLength: 1, maxLength: 512 }) }),
+        querystring: Type.Object({ after: Type.Optional(Counter), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })) }),
+      },
+    }, async request => {
+      const claims = await requireAuth(request, tokens, auth)
+      return sync.documentUpdates(
+        claims.accountId, request.params.workspaceId, request.params.documentId,
+        request.query.after ?? '0', request.query.limit ?? 500,
       )
     })
   }

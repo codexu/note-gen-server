@@ -67,7 +67,7 @@ export function createDevicePairingRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       await pairings.cancel(request.params.id, session.accountId)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.post('/v1/device-pairings/exchange', {

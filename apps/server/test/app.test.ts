@@ -73,7 +73,8 @@ describe('service foundation', () => {
       features: {
         deltaSync: true, webSocketWakeUp: true, endToEndEncryption: true,
         managedDefaultWorkspace: true,
-        blobUpload: true, yjsUpdates: true, collaboration: false,
+        blobUpload: true, yjsUpdates: true, collaboration: true,
+        durableCrdtUpdates: true, synchronizedConflicts: true,
       },
     })
   })

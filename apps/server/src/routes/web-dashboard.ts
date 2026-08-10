@@ -219,7 +219,7 @@ export function createWebDashboardRoutes(
       await admin?.recordAudit(session.accountId, 'object.delete', 'object', request.params.objectId, {
         workspaceId: request.params.workspaceId,
       }).catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record object deletion audit'))
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
 
     app.delete('/v1/web/workspaces/:workspaceId', {
@@ -238,7 +238,7 @@ export function createWebDashboardRoutes(
       await workspaces.remove(session.accountId, request.params.workspaceId, { allowDefault: false })
       await admin?.recordAudit(session.accountId, 'workspace.delete', 'workspace', request.params.workspaceId)
         .catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record workspace deletion audit'))
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
   }
 }

@@ -19,7 +19,7 @@ import { DeviceAuthorizationService } from './auth/device-authorization-service.
 import { DevicePairingService } from './auth/device-pairing-service.js'
 import { AdminService } from './admin/service.js'
 import { TotpService } from './auth/totp-service.js'
-import { CollaborationService } from './collab/service.js'
+import { DurableSyncService } from './durable-sync/service.js'
 
 async function main(): Promise<void> {
   const config = loadConfig()
@@ -28,7 +28,6 @@ async function main(): Promise<void> {
   let app: FastifyInstance | undefined
   let stopMaintenance: (() => void) | undefined
   let shutdownPromise: Promise<void> | undefined
-  let collaboration: CollaborationService | undefined
 
   const shutdown = (signal: string): Promise<void> => {
     shutdownPromise ??= (async () => {
@@ -36,7 +35,6 @@ async function main(): Promise<void> {
       stopMaintenance?.()
       await app?.close().catch((error: unknown) => app?.log.error({ err: error }, 'Failed to close HTTP server'))
       await notifier?.close().catch((error: unknown) => app?.log.error({ err: error }, 'Failed to close notifier'))
-      await collaboration?.close().catch((error: unknown) => app?.log.error({ err: error }, 'Failed to close collaboration'))
       await database?.close().catch((error: unknown) => app?.log.error({ err: error }, 'Failed to close database'))
     })()
     return shutdownPromise
@@ -66,8 +64,7 @@ async function main(): Promise<void> {
     await notifier.initialize()
     const workspaces = new WorkspaceService(database, notifier)
     const sync = new SyncService(database, workspaces, notifier, config.maxObjectBytes)
-    collaboration = new CollaborationService(database, workspaces)
-    await collaboration.initialize()
+    const syncProtocol = new DurableSyncService(database, workspaces, notifier, config.maxObjectBytes)
     const blobService = new BlobService(
       database, workspaces, blobStorage, config.maxBlobBytes, config.blobPartBytes,
     )
@@ -82,8 +79,8 @@ async function main(): Promise<void> {
       auth,
       workspaces,
       sync,
+      syncProtocol,
       notifier,
-      collaboration,
       blobs: blobService,
       webSessions,
       deviceAuthorizations,

@@ -134,6 +134,34 @@
       "when": 1786111200000,
       "tag": "0018_collaboration_updates",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786197600000,
+      "tag": "0019_sync_protocol",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786201200000,
+      "tag": "0020_sync_bootstrap_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786204800000,
+      "tag": "0021_sync_name_blind_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1786237200000,
+      "tag": "0022_sync_resource_bindings",
+      "breakpoints": true
     }
   ]
 }
