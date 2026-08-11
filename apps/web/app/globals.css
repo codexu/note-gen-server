@@ -119,11 +119,19 @@
 @layer base {
   * {
     @apply border-border outline-ring/50;
-    }
-  body {
-    @apply bg-background text-foreground;
-    }
+  }
+
   html {
-    @apply font-sans;
-    }
+    @apply min-h-full font-sans antialiased;
+  }
+
+  body {
+    @apply min-h-svh bg-background text-foreground;
+    background-image: radial-gradient(circle at top, color-mix(in oklch, var(--primary) 8%, transparent), transparent 32rem);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }

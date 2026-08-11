@@ -7,6 +7,7 @@ import { resolveApiPublicBaseUrl, resolveWebPublicBaseUrl } from '../development
 const CapabilitiesResponse = Type.Object({
   service: Type.Literal('note-gen-server'),
   instanceId: Type.String({ format: 'uuid' }),
+  syncEpoch: Type.String({ format: 'uuid' }),
   serverName: Type.String(),
   serverVersion: Type.String(),
   serverTime: Type.String({ format: 'date-time' }),
@@ -35,6 +36,7 @@ const CapabilitiesResponse = Type.Object({
     durableCrdtUpdates: Type.Boolean(),
     synchronizedConflicts: Type.Boolean(),
     assetObjects: Type.Boolean(),
+    invitationRegistration: Type.Optional(Type.Boolean()),
   }),
   limits: Type.Object({
     maxBatchOperations: Type.Integer(),
@@ -49,6 +51,16 @@ const CapabilitiesResponse = Type.Object({
     tombstoneRetentionDays: Type.Integer(),
   }),
   registrationMode: Type.Union([Type.Literal('closed'), Type.Literal('open')]),
+  capabilitySchema: Type.Literal(2),
+  instanceCapabilityRevision: Type.String(),
+  registrationPolicyRevision: Type.String(),
+  requiredSyncFeatures: Type.Array(Type.String()),
+  registration: Type.Object({
+    policy: Type.Union([Type.Literal('bootstrap'), Type.Literal('disabled'), Type.Literal('invitation'), Type.Literal('public')]),
+    methods: Type.Array(Type.String()),
+    emailVerificationRequired: Type.Boolean(),
+  }),
+  instanceCapabilities: Type.Record(Type.String(), Type.Boolean()),
   deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
   web: Type.Object({
     accountUrl: Type.String({ format: 'uri' }),
@@ -65,9 +77,22 @@ export function createCapabilitiesRoutes(
       schema: { response: { 200: CapabilitiesResponse } },
     }, async (request) => {
       const webPublicBaseUrl = resolveWebPublicBaseUrl(config, request)
+      const registrationPolicy = dependencies.deployment?.getState().registrationPolicy
+        ?? (config.registrationMode === 'open' ? 'public' : 'disabled')
+      const instanceCapabilities = dependencies.capabilities?.resolvePublic() ?? {}
+      const registrationMethods = dependencies.deployment?.canBootstrapAdministrator() === true
+        ? ['setup']
+        : registrationPolicy === 'invitation'
+          ? ['invitation', 'browser']
+          : registrationPolicy === 'public'
+            ? config.deploymentMode === 'hosted'
+              ? instanceCapabilities['identity.emailVerification'] === true ? ['email-password'] : []
+              : ['password']
+            : []
       return {
       service: 'note-gen-server' as const,
       instanceId: dependencies.instanceId,
+      syncEpoch: dependencies.syncEpoch,
       serverName: config.serverName,
       serverVersion: dependencies.version,
       serverTime: new Date().toISOString(),
@@ -77,7 +102,7 @@ export function createCapabilitiesRoutes(
         deltaSync: true,
         webSocketWakeUp: true,
         endToEndEncryption: true,
-        managedDefaultWorkspace: true,
+        managedDefaultWorkspace: config.deploymentMode !== 'hosted' || config.hostedReleaseStage !== 'internal-test',
         blobUpload: true,
         yjsUpdates: true,
         settingsSync: true,
@@ -96,6 +121,7 @@ export function createCapabilitiesRoutes(
         durableCrdtUpdates: true,
         synchronizedConflicts: true,
         assetObjects: true,
+        invitationRegistration: dependencies.capabilities?.resolvePublic()['registration.invitation'] ?? false,
       },
       limits: {
         maxBatchOperations: 100,
@@ -109,8 +135,18 @@ export function createCapabilitiesRoutes(
         versionRetentionDays: config.versionRetentionDays,
         tombstoneRetentionDays: config.tombstoneRetentionDays,
       },
-      registrationMode: config.registrationMode,
-      deploymentMode: config.deploymentMode,
+      registrationMode: dependencies.deployment?.legacyRegistrationMode() ?? config.registrationMode,
+      deploymentMode: dependencies.deployment?.getState().deploymentMode ?? config.deploymentMode,
+      capabilitySchema: 2 as const,
+      instanceCapabilityRevision: dependencies.deployment?.getState().configurationRevision ?? '0',
+      registrationPolicyRevision: dependencies.deployment?.getState().configurationRevision ?? '0',
+      requiredSyncFeatures: [],
+      registration: {
+        policy: registrationPolicy,
+        methods: registrationMethods,
+        emailVerificationRequired: registrationMethods.includes('email-password'),
+      },
+      instanceCapabilities,
       web: {
         accountUrl: `${webPublicBaseUrl}/`,
         deviceAuthorizationUrl: `${webPublicBaseUrl}/connect/`,

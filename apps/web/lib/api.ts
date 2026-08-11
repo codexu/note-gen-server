@@ -129,6 +129,8 @@ const apiErrorMessages: Record<string, string> = {
   web_test_data_conflict: "测试数据创建发生冲突，请刷新后重试。",
   rate_limited: "操作过于频繁，请稍等一会再试。",
   request_invalid: "提交的信息不完整或格式不正确，请检查后重试。",
+  runtime_configuration_invalid: "运行配置中的数值关系无效，请检查保留周期和附件上限。",
+  runtime_configuration_conflict: "运行配置已被其他管理员修改，请刷新后重试。",
   internal_error: "服务器处理请求时出错，请稍后重试。",
 }
 

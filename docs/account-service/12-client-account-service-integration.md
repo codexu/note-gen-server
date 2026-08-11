@@ -1,6 +1,6 @@
 # 12：NoteGen 客户端账号服务接入技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；生产 capability 灰度与版本普及门槛移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`hosted` 与 `self-hosted`
 - 前置依赖：[00 共享部署策略与能力基础](00-shared-foundation.md)
@@ -135,7 +135,7 @@ interface AccountServiceRuntimeState {
 
 `canPush/canPull/canCreateDevice/canExport/canDelete` 只从服务端逐 operation action 与本地 transport/compatibility 取交集；客户端不猜“risk 通常允许 Pull”或“policy 一定阻止全部写”。Presentation selector 再按 fatal/recovery → reauthentication → challenge → maintenance → read-only → warning 的优先级选一个 primary banner/action，其余保留为次级提示。
 
-通用不变量：offline/5xx/timeout/maintenance/risk/quota/billing 保留 Session 与 outbox；只有明确 refresh invalid/revoked/reused、device revoked 或 deletion completed 清凭据。任何 operation 被 deny 都不等于把本地 command 标永久失败；outbox 等待 context revision/用户动作，只有服务端明确 `non_retryable_data_error` 才进入人工冲突/丢弃流程。
+通用不变量：offline/5xx/timeout/maintenance/risk/quota/billing 保留 Session 与 outbox；只有明确 refresh invalid/revoked/reused、device revoked 或 deletion completed 清凭据。任何 operation 被 deny 都不等于把本地 command 标永久失败；outbox 等待 context revision/用户动作，只有服务端明确 `non_retryable_data_error` 才进入人工冲突/丢弃流程。`accountContextRevision` 至少组合 deployment policy、entitlement、usage 与未接受政策的 revision，不能固定为常量。
 
 ## 7. 结构化错误模型
 
@@ -166,13 +166,13 @@ interface ServerErrorEnvelope {
 - command-level rejected 与 HTTP error 进入同一分类器。
 - `retryable=false` 只表示“不要立即原样重试”，不等于永久丢弃本地 operation。Quota/risk/billing/policy/maintenance 进入 scope-level blocked queue，等待 context revision/action；真正不可恢复的 payload/schema/ownership 错误才标 command failed 并进入冲突/人工处理。`retryable=true` 也必须经过调度退避，不能在同一 flush loop 立即自旋。
 
-稳定映射至少覆盖：`email_verification_required`、`policy_acceptance_required`、`risk_challenge_required`、`risk_temporarily_locked`、`quota_exceeded`、`device_limit_exceeded`、`account_read_only`、`credential_review_required`、`server_maintenance`、`cursor_expired`、`sync_epoch_changed`。`credential_review_required` 表示灾备恢复出的密码/TOTP 尚未由部署者处理：不反复尝试密码登录，不清 profile/outbox，self-hosted 显示 operator CLI/受信说明，等待审阅后重新浏览器授权。
+稳定映射至少覆盖：`email_verification_required`、`policy_acceptance_required`、`risk_challenge_required`、`risk_temporarily_locked`、`quota_exceeded`、`device_limit_exceeded`、`account_read_only`、`credential_review_required`、`instance_auth_epoch_invalid`、`server_maintenance`、`cursor_expired`、`sync_epoch_changed`。`credential_review_required` 表示灾备恢复出的密码/TOTP 尚未由部署者处理：不反复尝试密码登录，不清 profile/outbox，self-hosted 显示 operator CLI/受信说明，等待审阅后重新浏览器授权。
 
 ## 8. Refresh 与安全凭据
 
 ### 8.1 凭据存储
 
-- Tauri refresh token 使用 OS Keychain/Keystore，key 为 `instanceId + accountId + deviceId`。
+- Android/iOS refresh token 使用 OS Keychain/Keystore，key 以 `instanceId` 命名空间隔离、record 内再绑定 `instanceId + accountId + deviceId`；读取时绑定不匹配即删除。当前桌面尚无审阅后的 secure adapter，保持 memory-only，不写普通 Store。
 - Access token 仅内存保存，应用重启用 refresh 获取。
 - Store/profile 保留 base URL、instance ID、非秘密 `accountId`、server name、login/display identity、device ID、Workspace/local binding，以及 credential schema/version/ref；不保存 token。
 - Web runtime 明确选择“refresh 仅内存、关闭跨重启自动连接”；账号 Web 的 HttpOnly Cookie 不能替代跨源同步 bearer。未来如需持久自动同步，另做同源 BFF 规格；绝不回退 localStorage。
@@ -180,11 +180,11 @@ interface ServerErrorEnvelope {
 
 迁移：读取旧 Store → 写安全存储 → 校验读取 → 删除旧 session。任一步失败保留旧数据、停止自动迁移并要求重新授权，不能先删后写。
 
-Refresh rotation 需要 server/client 共同的 crash-safe 协议：客户端在安全存储写 `refreshRequestId + family/version` journal 后发请求；服务端对“同一旧 token + 同一 requestId”在短 TTL 内返回同一加密缓存响应，不判 reuse，不同 requestId/超时后复用才撤销 family。客户端先原子写新 token/version并读回，再清 journal。没有这一幂等恢复，服务端已旋转而客户端落盘前崩溃会把正常设备误判为 token 重放。
+Refresh rotation 现有 server/client crash-safe 协议：Android/iOS 客户端必须先在 Keychain/Keystore 中把旧 refresh token 与 `refreshRequestId` 写入同一 record，写入成功后才携带 request ID 发请求；安全记录不可用或写入失败时按无 request ID 的普通轮换处理，不能宣称具备崩溃恢复。服务端对“同一旧 token + 同一 requestId”在 5 分钟 TTL 内仅在 AEAD 缓存响应通过 account/device/token/TTL 结构校验时返回同一完整 session，不判 reuse；不同 requestId、缓存校验失败或超时后的复用才撤销设备 family。客户端成功后以新 refresh token 覆盖同一安全 record，从而清除 journal；冷启动与 restore epoch 接受路径会携带尚存 request-id 重试。桌面/Web 没有审阅后的安全持久化，不发送可跨崩溃恢复的 request ID，保持内存 session 且绝不回退普通 Store。
 
 ### 8.2 Refresh 分类
 
-只有以下 code 清除凭据：`refresh_token_invalid`、`refresh_token_revoked`、`refresh_token_reused`、`device_revoked`、明确的 account deletion complete。timeout、网络、429、5xx、maintenance、quota、billing 和 risk 不清除。
+只有以下 code 清除凭据：`refresh_token_invalid`、`refresh_token_revoked`、`refresh_token_reused`、`device_revoked`、`credential_epoch_invalid`、`instance_auth_epoch_invalid`、明确的 account deletion complete。timeout、网络、429、5xx、maintenance、quota、billing 和 risk 不清除；不明 401 也不得仅凭状态码清除。
 
 计划 10 restore 推进共享实例 auth epoch 后，旧 refresh/access token 按规范返回 revoked/invalid；客户端只删除该 credential ref，保留非秘密 profile、Workspace、live materialization 和 outbox。重新授权若得到 `credential_review_required`，进入可恢复认证状态而不是删除本地同步数据；只有 operator 已审计处置并清除对应 `AccountRestriction` 后才取得新 Session并继续 sync epoch reconciliation。
 
@@ -261,7 +261,7 @@ encryption: {
 
 1. 浏览器授权完成后先读取 encryption policy 与 Workspace 列表，不调用 `/v1/workspaces/default`。若已有 Workspace，要求用户选择；E2EE Workspace 使用现有同步口令、恢复密钥或已授权 device envelope 解锁，不能为同一账号静默再建默认 Workspace。
 2. 没有 Workspace 且 policy 允许/默认 E2EE 时进入前台向导，明确区分“账号登录密码”和“同步口令”。用户输入 Workspace 名、满足本地/KDF 政策的同步口令并二次确认；客户端复用现有 `createServerWorkspace` 在本地生成 Workspace key、passphrase envelope 与 recovery envelope，服务端只收到密文/envelope。每次向导先持久化随机 creation idempotency key，再发起创建。
-3. 创建成功后一次性展示恢复密钥，要求用户完成复制/下载并通过末尾字符或重新输入确认。确认前不把同步标记为 active、不启动后台 Push；支持系统安全存储的平台可把 pending Workspace/recovery key 放入有 TTL 的 Keychain/Keystore onboarding record，确认后立即删除。没有安全存储或 pending secret 丢失时，用户重新输入同步口令解锁同一 Workspace，客户端撤销未确认的 recovery envelope、生成并确认一条新 recovery envelope，不能让未知 recovery key 永久有效。
+3. 创建成功后一次性展示恢复密钥，要求用户完成复制/下载并通过末尾字符或重新输入确认。确认前不把同步标记为 active、不启动后台 Push；Android/iOS 将 pending Workspace/recovery key 写入以 instance/account/device 为命名空间且再绑定 workspace/creation idempotency key 的 Keychain/Keystore onboarding record，TTL 固定 30 分钟；恢复时仅完全匹配且未过期的记录可用于先解锁并继续确认，确认、过期、不匹配或解锁失败立即删除。没有安全存储或 pending secret 丢失时，用户重新输入同步口令解锁同一 Workspace，客户端撤销未确认的 recovery envelope、生成并确认一条新 recovery envelope，不能让未知 recovery key 永久有效。
 4. 客户端在 secure profile 中原子保存 instance/workspace/device/encryption mode，再把解锁 key 交给内存中的后台 runtime；不把同步口令、恢复密钥或明文 Workspace key 写入普通 Store、日志、诊断或本地账号备份。
 5. 进程若在 server 创建成功、profile 提交或 recovery confirmation 之间退出，重开先 list Workspace 并读取非秘密 phase journal/安全 pending record，恢复选择/确认流程；以 creation idempotency key 找回同一次创建，不能重复建 Workspace。无前台 UI 的 background runtime 进入 `foreground_onboarding_required`，不得回退调用 managed endpoint。
 6. 若 policy 不提供任何客户端支持的模式，返回结构化 `encryption_policy_unsupported` 并保留会话/profile；不能清账号凭据或假装连接成功。

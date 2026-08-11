@@ -4,6 +4,7 @@ import { MaintenanceService } from '../maintenance/service.js'
 import { FilesystemBlobStorage } from '../storage/filesystem-blob-storage.js'
 import { S3BlobStorage } from '../storage/s3-blob-storage.js'
 import type { BlobStorage } from '../storage/blob-storage.js'
+import { FilesystemDeletionLedgerStore } from '../compliance/deletion-ledger-store.js'
 
 const config = loadConfig()
 const database = createDatabase({ ...config, databasePoolSize: 1 })
@@ -16,9 +17,11 @@ const storage: BlobStorage = config.blobStorageDriver === 's3'
   : new FilesystemBlobStorage(config.blobStoragePath)
 
 if (storage instanceof FilesystemBlobStorage) await storage.initialize()
+const deletionLedger = config.deploymentMode === 'hosted' ? new FilesystemDeletionLedgerStore(config.deletionLedgerPath) : undefined
+await deletionLedger?.initialize()
 
 try {
-  const result = await new MaintenanceService(database, storage, config).runOnce()
+  const result = await new MaintenanceService(database, storage, config, undefined, undefined, deletionLedger).runOnce()
   process.stdout.write(`${JSON.stringify(result)}\n`)
 } finally {
   await database.close()

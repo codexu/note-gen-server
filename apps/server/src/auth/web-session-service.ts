@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { and, eq, gt, isNull, lt, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
-import { accounts, webSessions } from '../database/schema.js'
+import { accounts, deploymentSettings, webSessions } from '../database/schema.js'
 import { ApiError } from '../errors.js'
+import type { RiskService } from '../risk/service.js'
 
 export interface WebSessionResult {
   sessionToken: string
@@ -19,19 +20,33 @@ export interface WebAccountSession {
 }
 
 export class WebSessionService {
-  constructor(private readonly database: DatabaseContext) {}
+  constructor(private readonly database: DatabaseContext, private readonly risk?: RiskService) {}
 
-  async create(accountId: string, context?: { ip?: string, userAgent?: string }): Promise<WebSessionResult> {
+  async create(accountId: string, context?: { ip?: string, userAgent?: string }, expectedCredentialEpoch?: string): Promise<WebSessionResult> {
     const sessionToken = randomBytes(32).toString('base64url')
     const csrfToken = randomBytes(24).toString('base64url')
     const expiresAt = addDays(new Date(), 30)
-    await this.database.db.insert(webSessions).values({
-      accountId,
-      tokenHash: hashToken(sessionToken),
-      csrfTokenHash: hashToken(csrfToken),
-      expiresAt,
-      lastIp: context?.ip ?? null,
-      userAgent: context?.userAgent?.slice(0, 500) ?? null,
+    await this.database.db.transaction(async (tx) => {
+      const [account] = await tx.select({ credentialEpoch: accounts.credentialEpoch }).from(accounts).where(and(
+        eq(accounts.id, accountId), isNull(accounts.suspendedAt), isNull(accounts.disabledAt),
+      )).limit(1).for('update')
+      if (account === undefined || (expectedCredentialEpoch !== undefined && account.credentialEpoch.toString() !== expectedCredentialEpoch)) {
+        throw new ApiError({ code: 'credentials_stale', message: 'Credentials changed during sign-in', statusCode: 401 })
+      }
+      await this.risk?.enforceAccountInTransaction(tx, accountId, 'authentication')
+      const [instanceAuth] = await tx.select({ epoch: deploymentSettings.instanceAuthEpoch }).from(deploymentSettings)
+        .where(eq(deploymentSettings.id, true)).limit(1).for('update')
+      if (instanceAuth === undefined) throw new Error('Instance authentication state is missing')
+      const issuedAt = new Date()
+      await tx.insert(webSessions).values({
+        accountId,
+        tokenHash: hashToken(sessionToken),
+        csrfTokenHash: hashToken(csrfToken),
+        expiresAt,
+        issuedInstanceAuthEpoch: instanceAuth.epoch, issuedAt,
+        lastIp: context?.ip ?? null,
+        userAgent: context?.userAgent?.slice(0, 500) ?? null,
+      })
     })
     return { sessionToken, csrfToken, expiresAt }
   }
@@ -46,6 +61,8 @@ export class WebSessionService {
       login: accounts.login,
       isAdmin: accounts.isAdmin,
       csrfTokenHash: webSessions.csrfTokenHash,
+      issuedInstanceAuthEpoch: webSessions.issuedInstanceAuthEpoch,
+      issuedAt: webSessions.issuedAt,
       lastIp: webSessions.lastIp,
     }).from(webSessions).innerJoin(accounts, eq(accounts.id, webSessions.accountId)).where(and(
       eq(webSessions.tokenHash, hashToken(sessionToken)),
@@ -54,6 +71,12 @@ export class WebSessionService {
       isNull(accounts.disabledAt),
     )).limit(1)
     if (session === undefined) {
+      throw new ApiError({ code: 'web_session_invalid', message: 'Web session is invalid or expired', statusCode: 401 })
+    }
+    const [instanceAuth] = await this.database.db.select({ epoch: deploymentSettings.instanceAuthEpoch, tokenNotBefore: deploymentSettings.tokenNotBefore, enforced: deploymentSettings.authEpochEnforced })
+      .from(deploymentSettings).where(eq(deploymentSettings.id, true)).limit(1)
+    if (instanceAuth === undefined || (instanceAuth.enforced && (session.issuedInstanceAuthEpoch === null
+      || session.issuedInstanceAuthEpoch !== instanceAuth.epoch || session.issuedAt === null || session.issuedAt < instanceAuth.tokenNotBefore))) {
       throw new ApiError({ code: 'web_session_invalid', message: 'Web session is invalid or expired', statusCode: 401 })
     }
     const now = new Date()

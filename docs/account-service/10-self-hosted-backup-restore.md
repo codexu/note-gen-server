@@ -1,6 +1,6 @@
 # 10：自托管备份、恢复与灾备技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；加密/S3、排程保留、artifact-driven restore apply 与 preserve restore 移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`self-hosted`；hosted 使用内部基础设施 Runbook，不向普通管理员开放整库下载
 - 前置依赖：[00 共享基础](00-shared-foundation.md)，包括实例级 `authEpoch/tokenNotBefore` 的签发与全链路校验契约
@@ -24,6 +24,8 @@
 - 提供只读 verify 与 offline restore CLI，不在运行中的 Web 服务直接覆盖实例。
 - 明确原地灾备恢复和克隆测试恢复的身份语义。
 - 每次正式版本发布前至少能完成自动校验，周期性执行真实恢复演练。
+
+当前可使用 `restore drill-verify --backup-id … --manifest … --trust-store … --root-public-key … --minimum-trust-revision … --expected-trust-digest … --confirm RECORD_VERIFY_DRILL` 记录 verify-only 演练；它重新验证签名、artifact inventory 与 generation binding，并写入 `restore_drills`。它不导入数据库、不执行 isolation restore，因此不能替代 synthetic 账号的真实恢复演练。
 
 ## 3. 非目标
 
@@ -212,7 +214,7 @@ restore_markers
 
 ### 7.3 Blob 不变性
 
-ready Blob 的 storage key 内容必须不可原地覆盖；相同 key 的写入视为完整性错误。当前 filesystem `rename` 与 S3 multipart complete 均不能直接视为满足此契约，PR-10C/D 必须先增加 adapter capability：filesystem 使用 conditional create/no-replace；S3 使用 versioned immutable key 或 provider 支持的 conditional complete，并持久化 VersionId/ETag。若后端无法证明 no-overwrite/version pinning，持续写入模式不可用，只能 write-drain 后复制。备份任务随机抽样重新计算 ciphertext hash，全量 hash 由策略选择。
+ready Blob 的 storage key 内容必须不可原地覆盖；相同 key 的写入视为完整性错误。filesystem adapter 已用同一文件系统内原子 hard-link publish 替代可覆盖的 `rename`，目标存在即失败；S3 multipart complete 仍不能直接视为满足此契约，PR-10C/D 必须使用 versioned immutable key 或 provider 支持的 conditional complete，并持久化 VersionId/ETag。若后端无法证明 no-overwrite/version pinning，持续写入模式不可用，只能 write-drain 后复制。备份任务随机抽样重新计算 ciphertext hash，全量 hash 由策略选择。
 
 ## 8. 加密与 secret
 
@@ -245,6 +247,19 @@ notegen-server restore apply <manifest> --target-config <file>
 notegen-server restore validate --target-config <file>
 ```
 
+当前实现以带完整验证参数和 `backup-id` 的形式调用 preflight：
+
+```bash
+pnpm --filter @notegen/server restore -- preflight \
+  --backup-id <uuid> --mode clone --manifest /safe/backup/manifest.json \
+  --trust-store /etc/notegen/backup-trust.json \
+  --root-public-key /etc/notegen/backup-root.pub \
+  --minimum-trust-revision 12 \
+  --expected-trust-digest <sha256-of-canonical-unsigned-trust-store>
+```
+
+它是只读操作，但仍要求目标实例保持 `maintenance=offline`；它验明 package 中恰有一个 `database.dump` 并调用 `pg_restore --list` 解析 archive，再读取目标 PostgreSQL 版本和本 binary 的数据库迁移/auth 契约。它不会导入数据库、写 Blob、注册 inventory 或创建 restore marker。
+
 `restore apply` 只在 HTTP/worker 已停止或显式 offline target 上运行。流程：
 
 1. 限制性解析并验证 manifest signature/envelope/checksum，不写当前实例；不信任包内路径、大小或 README。
@@ -260,15 +275,49 @@ notegen-server restore validate --target-config <file>
 
 CLI 必须在每个破坏步骤前打印 resolved target、实例 ID、backup ID、数据量和模式，并要求明确 confirmation；自动化使用一次性 confirmation file/flag，不能默认覆盖。
 
+当前首个只读 inventory/reader 为：
+
+```bash
+pnpm --filter @notegen/server backup -- list
+```
+
+它只返回最近 100 条 backup run 的 ID、状态、manifest reference、字节/Blob 汇总、错误码和时间，不打开 artifact、不会泄露 secret，也不改变 run 状态。签名与 artifact 读取使用：
+
+```bash
+pnpm --filter @notegen/server backup -- verify /safe/backup/manifest.json \
+  --trust-store /etc/notegen/backup-trust.json \
+  --root-public-key /etc/notegen/backup-root.pub \
+  --minimum-trust-revision 12 \
+  --expected-trust-digest <sha256-of-canonical-unsigned-trust-store>
+```
+
+它限制 manifest、签名、trust store 与 root key 的读取大小，拒绝 symlink 和 artifact path traversal；先以外部 root key 验证 trust store，再以其中 active key 验证紧邻 `manifest.sig` 的 detached Ed25519 signature，最后逐个校验 regular-file artifact 的精确大小和 SHA-256。`minimum-trust-revision` 是恢复环境从离线受信状态带入的下限（低于它的 store 被拒绝，更高 revision 可配合外部给定 digest 使用），digest 仍必须精确匹配，reader 不会从待验证包或 trust store 自行初始化水位。它不解密、不执行 `pg_restore`、不写数据库/Blob；旧 DB-only artifact 因而不能通过该检查提升为 unified ready backup。
+
+首个 writer 仅面向本地、受控的文件系统目标。操作员先停止/隔离业务进程并将 maintenance 切至 `offline`，再显式运行：
+
+```bash
+pnpm --filter @notegen/server backup -- create \
+  --signing-key /run/secrets/notegen-backup-ed25519.pem \
+  --signing-key-id local-backup-2026-08 \
+  --allow-unencrypted-local I_UNDERSTAND_UNENCRYPTED_LOCAL_BACKUP \
+  --confirm CREATE_OFFLINE_FILESYSTEM_BACKUP
+```
+
+它只接受 `self-hosted` + filesystem Blob，且必须单独确认未加密本地目标；拒绝 Blob 路径与 `BACKUP_PATH` 重叠、权限过宽/符号链接的私钥、非 offline 维护或运行期间维护 generation 变化。每次运行创建独立 `.incomplete-<backupId>` 目录，写入 custom-format `database.dump` 和每个 Blob 的副本，逐项 SHA-256 后生成 v2 generation-bound manifest 和 detached Ed25519 signature；仅目录原子发布成功后才把 run 标为 `ready`。它尚不提供 encryption、S3、在线 snapshot、排程或保留；这些形态不能通过此命令绕过其专用预检。
+
 ### 10.1 Restore sanitation allowlist
 
 恢复数据库会带回过时的 lease、任务和凭据，不能“恢复完直接启动”：
+
+`restore sanitize` 只接受 generation-bound 的 format v2 manifest：签名中的 `backupGeneration` 必须与 restored target 离线登记的 `backup_runs.generation` 完全相同。`restore register-verified` 会在 offline transaction 中保留已验证的源 generation 并推进目标 serial sequence，不能用目标库新分配的 generation 替代它；否则内容正确的包也会错误失去可恢复性，或让后续 run 发生 generation 碰撞。旧 format v1 包可继续作只读校验，但不能进入 register/sanitize；这防止把内容正确但并非该持久 inventory run 的包伪装成恢复基线。
+
+源数据库 snapshot 可以包含同一 backup run 的 `draining/dumping/copying` 等中间状态；离线 register 在 generation 匹配后可把该陈旧状态接管为 imported preparing，并只接受与已验证 manifest 完全相同的已有 artifact inventory。generation 不同或 artifact 不同一律失败，不能用“snapshot 时还没 ready”绕过绑定。
 
 - 清除/重建 advisory owner、rate-limit bucket、maintenance ack、backup/Blob lease、worker heartbeat、临时 upload 与运行中 job 状态。
 - 将恢复出的 pending/running outbox、邮件、Webhook、billing/support sync 和未知 generation job 全部放入 quarantine；逐类人工 reconcile 后才可重放，默认不向外部系统再次发送。
 - Restore preflight 先证明目标 binary 已达到计划 00 的最低认证契约且所有旧进程已停止；随后 Preserve 与 clone 在同一恢复事务中覆盖备份值，执行数据库 `instance_auth_epoch = instance_auth_epoch + 1`、`token_not_before = now()`、`auth_epoch_enforced = true`，并撤销全部 refresh/Web Session、device authorization、pairing、step-up grant、invitation、challenge 和 action token。数据库列是 bigint，manifest/wire 使用无损十进制字符串；即使旧备份中的 enforced=false 也不能带入运行态。旧 Access JWT 必须同时因 token 内代次/`iat` 与当前实例状态不匹配而立即失效。目标 binary 没有在全部认证入口执行该检查时 sanitation/preflight 失败并保持 offline。
 - 备份之后可能发生密码/TOTP 变更、账号删除或封禁。所有恢复账号默认创建计划 00 的 `AccountRestriction(reasonCode='credential_review_required')`；AuthService 在校验密码/TOTP 后、签发任何 Web/Access/Refresh/device session 前锁账号并再次检查该 restriction，命中时返回稳定 `credential_review_required`，不得签发“受限但仍可写”的临时 Session。
-- 本机 `restore credentials review` 逐账号只允许：安全重置密码并按政策重置/保留 TOTP、保持账号 disabled，或在显示 backup cutoff/账号/风险后逐字确认接受恢复凭据；每个动作都再次撤销该账号 Session、清除对应 `AccountRestriction` 并写 break-glass 审计。至少一位管理员必须通过本机重置/审阅后，才能执行联网账号登录验证；clone 默认不接受生产凭据，改为本机创建 synthetic 管理员/测试账号。
+- 本机 `restore credential-review` 已实现三条逐账号路径：`--decision accept-restored-credentials` 显式接受旧材料；`--decision reset-password --password-stdin` 从 stdin 写入新的 Argon2id 密码并清除旧 TOTP（重新登记由后续认证流程完成）；或 `--decision disable-account` 保持账号不可登录。三者都要求 `--offline-confirm ACCEPT_RESTORED_CREDENTIALS`，只在 completed restore marker 与 `maintenance=offline` 下运行，以 marker/account 唯一的 `restore_credential_reviews` 写 immutable local-operator audit，撤销对应 `AccountRestriction`、再次撤销 session/action/device ceremony 并递增账号 credential epoch。至少一位管理员必须通过本机审阅后，才能执行联网账号登录验证；clone 默认不接受生产凭据，改为本机创建 synthetic 管理员/测试账号。
 - 撤销恢复出的全部 `bootstrap_credentials`。若恢复后 lifecycle=`uninitialized`，marker 以数据库时间写 `bootstrap_token_cutoff` 和 `bootstrap_reissue_required=true`，completed marker 永久阻止再次导入环境 `SETUP_TOKEN`；只有本机 setup CLI 可在事务中签发新 token、审计关联 marker 并清除此标志。ready 实例保持 bootstrap 关闭。
 - 把包内 backup run/index 标为 imported history，创建新的 restore marker；删除 incomplete 临时 artifact 只按明确 prefix/allowlist 执行。
 - Sanitation 每步持久化 checkpoint/结果；失败保持 offline，可重入，不允许“尽量清理后继续”。
@@ -354,7 +403,7 @@ Web 不提供 `restore apply`。它只展示离线恢复说明、manifest 下载
 - 旧 Access JWT 在恢复切换后立即因共享 auth epoch 失败；恢复密码/TOTP 在 `credential_review_required` 清除前不能创建任何 Session，clone 生产凭据默认不可用。
 - uninitialized 备份恢复后，包内 bootstrap credential、仍在环境中的 legacy `SETUP_TOKEN` 和上一次 restore 后签发的 token 全部失败；本机 CLI 针对最新 marker 重签后只有新 token 可用。
 - 旧客户端/旧 WebSocket、缺 expected epoch 的 command/Blob/cursor/document update 在 restore 后全部被拒绝。
-- 恢复出的 job/outbox/lease/rate limit 不会在 sanitation 前运行，sanitation 各崩溃点可重入。
+- 恢复出的 job/outbox/lease/rate limit 不会在 sanitation 前运行，sanitation 各崩溃点可重入；其后仍不得自动重放：`background_jobs` 的 pending/running 转为保留 payload 的 `dead_letter(restore_quarantined)`，mail outbox 的 pending/sending 转为 `delivery_unknown(restore_quarantined)` 并清除 lease。只有人工新建、审阅的意图可以再次触发外部副作用。
 - E2EE 内容在恢复后仍可用原恢复密钥解锁。
 - 下载/删除路径约束与审计；hosted route 不存在。
 - 从至少 N-2 真实备份格式做 verify/迁移测试。

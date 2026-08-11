@@ -1,6 +1,6 @@
 # 00：共享部署策略与能力基础技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；生产上线准备与外部依赖移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`hosted` 与 `self-hosted`
 - 面向读者：服务端、账号 Web、NoteGen 客户端开发者
@@ -50,7 +50,7 @@
 1. 读取环境配置中的 `DEPLOYMENT_MODE`。
 2. 读取 `deployment_settings.deployment_mode`；若尚不存在，可读取 legacy metadata 作为一次性候选值。
 3. singleton 不存在时，在事务和 advisory lock 内校验候选值后写入；legacy metadata 随后只保留迁移审计，不再读取。
-4. singleton 存在但环境值不一致时进入 `StartupSafetyGate`：live/受限诊断可用，ready 失败；普通 HTTP、WebSocket upgrade、业务 worker 和内部定时任务全部拒绝启动/执行。
+4. singleton 存在但环境值不一致时进入 `StartupSafetyGate`。当前实现会在路由、worker 与 socket bind 前硬失败；普通 HTTP、WebSocket upgrade、业务 worker 和内部定时任务均不会启动。需要受控诊断时由独立本机 doctor 读取数据库，不能把一个对外监听的“受限诊断”进程当作隔离边界。
 
 `StartupSafetyGate` 必须安装在路由分发和 worker start 之前，使用显式 allowlist，仅允许 `/health/live`、安全的 readiness 原因和本机/受控管理员诊断。不能把“负载均衡器会尊重 readiness”当作安全边界。Hosted 必需 provider 静态配置缺失时使用同一 gate；self-hosted 可选 provider 缺失不触发全局 gate。
 
@@ -105,7 +105,7 @@ interface CapabilityDefinition {
 
 Resolver 按 `available = enabled && configured && dependenciesSatisfied && lifecycleOrPolicyAllows` 计算最终值，但它仍不是账号授权。`healthy=false` 不自动改写 enabled/configured/available；最终动作是否 fail-open、fail-closed 或降级由 5.5 的逐操作策略决定，避免 UI 抖动又避免公开注册在风控故障时误开放。
 
-建议通过显式的 `CAPABILITIES_ENABLE`、`CAPABILITIES_DISABLE` 逗号列表覆盖模式默认值。未知 ID、同一 ID 同时启停、依赖环和跨模式非法能力属于结构错误，进程启动失败。`overrideable=false` 的生命周期能力拒绝任何环境覆盖：尤其 `operations.webBootstrap` 只能在数据库 lifecycle=uninitialized 时 available，初始化后单调关闭，配置不能重开。缺少 provider/secret 时解析为 `configured=false`：hosted 发布所必需的能力触发 StartupSafetyGate；self-hosted 可选 SMTP 等能力保持同步服务 ready，但具体流程禁用并告警。提供 `capabilities explain <id>` CLI 输出解析来源，但不打印秘密。
+建议通过显式的 `CAPABILITIES_ENABLE`、`CAPABILITIES_DISABLE` 逗号列表覆盖模式默认值。未知 ID、同一 ID 同时启停、依赖环和跨模式非法能力属于结构错误，进程启动失败。`overrideable=false` 的生命周期能力拒绝任何环境覆盖：尤其 `operations.webBootstrap` 只能在数据库 lifecycle=uninitialized 时 available，初始化后单调关闭，配置不能重开。缺少 provider/secret 时解析为 `configured=false`：hosted 发布所必需的能力触发 StartupSafetyGate；self-hosted 可选 SMTP 等能力保持同步服务 ready，但具体流程禁用并告警。现已提供 `pnpm --filter @notegen/server capabilities -- explain <id>` 本机 CLI，输出请求来源、硬门槛、依赖 availability 与无秘密 reason code。
 
 ### 5.3 部署策略不是能力开关
 
@@ -183,9 +183,9 @@ Resolver 按 `available = enabled && configured && dependenciesSatisfied && life
 - 离线恢复先证明目标 binary 达到最低认证契约并停止全部旧进程；随后在 maintenance owner 持锁的一个数据库事务内覆盖备份值，执行 `instance_auth_epoch = instance_auth_epoch + 1`、`token_not_before = now()`、`auth_epoch_enforced = true`，并撤销全部 Refresh Token、Web Session、待处理设备授权/pairing、step-up grant、邀请、challenge 和 action token。事务提交后才允许新 binary 启动；旧 Access JWT 因 epoch/not-before 校验立即失效，不能只等待自然过期，也不能让旧备份中的 enforced=false 重开兼容读取。
 - 普通密码重置或邮箱换绑仍可使用计划 01 的账号级 credential epoch；账号级代次只能进一步收紧，不能代替实例恢复代次。
 
-恢复事务还必须为备份中恢复出的每个账号创建持久 `AccountRestriction(reasonCode='credential_review_required')`。该 restriction 的优先级属于硬安全 deny：operator 明确处理前禁止密码/TOTP 登录、refresh、设备授权和全部 domain write；旧远程凭据已由实例 epoch 失效，唯一允许的处置入口是本机/容器 TTY 的恢复控制面。Entitlement、staff grant、HTTP 管理 API 或 capability override 均不能绕过。operator 必须逐账号选择强制重置/重新登记认证因子或明确接受恢复凭据风险，记录不可删除审计；清除 restriction 与递增 `accountContextRevision` 在同一事务完成。
+恢复事务还必须为备份中恢复出的每个账号创建持久 `AccountRestriction(reasonCode='credential_review_required')`。该 restriction 的优先级属于硬安全 deny：operator 明确处理前禁止密码/TOTP 登录、refresh、设备授权和全部 domain write；旧远程凭据已由实例 epoch 失效，唯一允许的处置入口是本机/容器 TTY 的恢复控制面。Entitlement、staff grant、HTTP 管理 API 或 capability override 均不能绕过。当前 `restore credential-review` 在 completed restore marker 与 offline maintenance 下支持逐账号接受旧凭据、从 stdin 强制重置 Argon2id 密码并清除 TOTP，或保持账号 disabled；每种操作都写 marker/account 唯一的 local-operator 审计、撤销所有现有凭据/ceremony 并递增 credential epoch。
 
-兼容上线采用硬序列：先 additive 增加 claim/列并让所有 binary 签发新 epoch，验证所有鉴权入口已经双读；兼容期可暂时读取 legacy 凭据，但 restore capability 必须保持关闭。随后撤销或迁移无 epoch 的持久凭据、等待旧 Access Token 最大 TTL，停止并确认所有旧进程退出，再原子切换 `auth_epoch_enforced=true`。切换后缺失 epoch 的凭据一律拒绝，并把该版本记为认证契约最低 binary；不得回退到不校验实例 epoch 的版本。
+兼容上线采用硬序列：先 additive 增加 claim/列并让所有 binary 签发新 epoch，验证所有鉴权入口已经双读；兼容期可暂时读取 legacy 凭据，但 restore capability 必须保持关闭。随后在 offline maintenance 下运行 `restore enforce-auth-epoch --offline-confirm ENFORCE_AUTH_EPOCH`：它原子推进实例 epoch/not-before、撤销 refresh/Web/action/bootstrap/invitation/设备 authorization/pairing 后切换 `auth_epoch_enforced=true`。切换后缺失 epoch 的凭据一律拒绝，并把该版本记为认证契约最低 binary；不得回退到不校验实例 epoch 的版本。
 
 ### 5.5 双层 Guard
 
@@ -284,7 +284,7 @@ outbox_messages
 
 执行约束：
 
-- 业务状态与 job/outbox 在同一数据库事务创建。
+- 业务状态与 job/outbox 在同一数据库事务创建。邮件 outbox 使用 `locked_by`/可过期 `lease_expires_at` 领取，敏感收件人与模板变量只通过 `secret_payload_ref` 在投递时解析。
 - Worker 使用 `FOR UPDATE SKIP LOCKED` 领取，带实例 ID 和可过期 lease。
 - 重试采用带抖动的指数退避；永久错误进入 `dead_letter`，不无限重试。
 - 内部状态转换与 handler 按 idempotency key + request hash 设计；同 key 不同载荷返回冲突。
@@ -300,7 +300,7 @@ outbox_messages
 4. 每个旧任务类型分别双读/迁移/切换；兼容窗口内不删旧表。
 5. 回滚先停止新 worker与新 enqueue，drain/冻结新 generation，再启动只认识旧 generation 的 binary；不可把未知任务交给旧 recovery。
 
-Worker 启动时公布 handler allowlist/version；不满足 `min_handler_version` 的任务保持 queued 并告警。具体表名可在实现时调整，但不得继续新增不可恢复的 fire-and-forget 任务。
+Worker 启动时公布 handler allowlist/version；领取 API 必须传入非空 allowlist，未声明类型或不满足 `min_handler_version` 的任务保持 queued 并告警。具体表名可在实现时调整，但不得继续新增不可恢复的 fire-and-forget 任务。
 
 邮件适配器契约也放在共享层，避免 self-hosted SMTP 反向依赖 hosted 身份计划：
 
@@ -316,9 +316,11 @@ interface MailProvider {
 }
 ```
 
-Capability Registry 使用传输无关的 `mail.delivery` 表示可用邮件投递器；`operations.smtpAdmin` 仅支持 self-hosted、仅向管理员暴露状态、测试与队列入口，一期 SMTP 配置仍来自环境/secret。Hosted 托管 provider 可以让 `mail.delivery` configured，但永远不能让 `operations.smtpAdmin` available。身份、邀请、备份和升级模块只写 outbox/template，不直接引用 SMTP 或托管供应商 SDK；`MailTemplateId`、locale 和可重试错误分类属于共享 contract。Action token plaintext 若邮件投递必须使用，只能进入独立 key 加密的 `secret_payload_ref`，管理 API 不可读取；发送或作废后擦除。重发 dead-letter 安全链接时撤销旧 token、生成新 token，不长期保留可解密明文。
+Capability Registry 使用传输无关的 `mail.delivery` 表示可用邮件投递器；`identity.email` 必须依赖它，不能仅以环境 override 假装可验证邮箱。`operations.smtpAdmin` 仅支持 self-hosted、仅向管理员暴露状态、测试与队列入口，一期 SMTP 配置仍来自环境/secret。Hosted 托管 provider 可以让 `mail.delivery` configured，但永远不能让 `operations.smtpAdmin` available。身份、邀请、备份和升级模块只写 outbox/template，不直接引用 SMTP 或托管供应商 SDK；`MailTemplateId`、locale 和可重试错误分类属于共享 contract。Action token plaintext 若邮件投递必须使用，只能进入独立 key 加密的 `secret_payload_ref`，管理 API 不可读取；发送或作废后擦除。重发 dead-letter 安全链接时撤销旧 token、生成新 token，不长期保留可解密明文。
 
 ### 5.7 审计事件规范
+
+当前实现已新增独立的 `account_service_audit_events` append-only actor 审计表，`actor_type` 固定为 `account | staff | system | webhook`，actor ID 以无外键文本快照保存，避免账号或 Staff 主体删除抹去因果记录。首个接入者是 Hosted internal-test 的 staff support read/reply；旧 `admin_audit_logs` 继续仅服务 self-hosted customer-admin 兼容面，不与 Staff realm 混用。
 
 扩展现有审计表或新增统一表，支持 actor 类型：`account | staff | system | webhook`。事件字段至少包括：
 
@@ -358,9 +360,9 @@ staff_role_assignments
 
 `role_key` 不是跨计划封闭数据库 enum；代码中的 typed permission registry 才是授权事实。首批权限至少覆盖 `risk.read/manage/admin`、`billing.read/grant/admin`、`compliance.request.process`、`legal_hold.read/manage/approve`、`support.read/write/diagnostics`、`platform.provision`。可提供 security analyst/admin、billing support/admin、compliance operator、legal-hold admin、support read/write 等默认角色模板；`platform_admin` 不天然绕过 legal hold 双人审批。
 
-Staff 使用受限 OIDC/SSO、独立 issuer/audience/cookie/signing key，校验 state/nonce/PKCE 与 `acr/amr`；MFA、短 Session、IdP disable 传播和高敏 step-up 是上线门槛。Hosted 客户账号永不通过 `isAdmin` 获得这些权限。Self-hosted `isAdmin` 只表示该实例管理员，不进入 staff realm。
+Staff 使用受限 OIDC/SSO、独立 issuer/audience/cookie/signing key，校验 state/nonce/PKCE 与 `acr/amr`；MFA、短 Session、IdP disable 传播和高敏 step-up 是上线门槛。内部 Staff 高敏路由只接受 phishing-resistant assertion，或建立后 5 分钟内的 `step-up` assertion，不能用长期遗留的 step-up 标记绕过新鲜度。Hosted 客户账号永不通过 `isAdmin` 获得这些权限。Self-hosted `isAdmin` 只表示该实例管理员，不进入 staff realm。
 
-共享 `WebStepUpService` 同时服务 self-hosted admin、客户高敏动作和 staff：
+共享 `WebStepUpService` 同时服务 self-hosted admin、客户高敏动作和 staff。当前首个 self-hosted account 实现已提供 5 分钟一次性 opaque grant：密码认证（启用 TOTP 时同时校验 TOTP）后，grant 以 keyed digest 保存并绑定 account、Web session、audience 与 request hash；邀请创建/撤销及注册策略变更必须消费对应 grant。staff OIDC grant 将在 staff realm 接入时复用相同表与消费语义：
 
 ```text
 step_up_grants
@@ -379,6 +381,7 @@ step_up_grants
 
 - 默认 TTL 5 分钟；下载备份、legal hold、账号删除等 destructive action 使用一次性 grant。
 - audience、actor、session、instance、request hash 必须匹配；Session 撤销时 grant 同时失效。
+- account Web endpoint 使用 `POST /v1/web/auth/step-up`；`requestHash` 固定为目标动作 canonical JSON 的 SHA-256 base64url（43 字符）。调用敏感 endpoint 时将 grant 放入 `X-Step-Up-Token`，服务端重建目标动作摘要后在同一 grant transaction 内消费。
 - 账号已启用 TOTP 时要求密码/最近强认证 + TOTP；staff 使用 IdP MFA/强 `acr`，权限校验仍独立执行。
 - Step-up endpoint 受 CSRF/origin/限流保护，返回的高熵 opaque token 只保存带 `digest_key_id` 的 keyed digest，并通过唯一索引查找，不进入 URL、日志或诊断；`request_hash` 只绑定目标动作载荷，不能兼作 token digest。验证与一次性 `consumed_at` 更新必须在同一事务完成。
 
@@ -439,7 +442,8 @@ maintenance_instance_acks
 - 在注册、设备会话、同步 command、Blob 上传、后台写操作接入 Guard。
 - 在 Access/Refresh/Web Session、WebSocket 与设备授权的签发和每次鉴权中接入 instance auth epoch/not-before，并提供仅本机可用的 credential review 恢复命令。
 - 在 HTTP、WebSocket、worker start 安装 StartupSafetyGate；readiness 只是其可观察投影，不是唯一执行点。
-- 提供 staff OIDC/session/permission、WebStepUpService、EffectiveLimitsProvider 和 MaintenanceModeCoordinator 基础实现。
+- 已提供独立 `staff_principals`/`staff_sessions`/`staff_role_assignments` schema、代码级 permission/role template registry 与 transport-free `StaffSessionService`：它只接受已由未来 OIDC edge 验证的 issuer/subject，建立短 TTL session，并在每次权限检查时重新校验 session、principal 禁用状态与角色有效期；session 建立/撤销与跨 realm append-only audit 在同一事务提交。客户 `accounts.isAdmin` 不参与该 registry。OIDC redirect/PKCE/cookie、staff origin 与 IdP 配置、staff step-up route 仍待外部 IdP 准备后接入。EffectiveLimitsProvider 和 MaintenanceModeCoordinator 已有基础实现。
+- Hosted legal hold 的审批/释放人以 `approved_by_staff_id`/`released_by_staff_id` 单独存储，必须同时拥有 `legal_hold.manage` 与 `legal_hold.approve`；旧 customer-account 审批列只为历史兼容保留，不能再授予 hosted authority。
 
 ### 7.2 账号 Web
 

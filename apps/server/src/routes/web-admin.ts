@@ -6,6 +6,7 @@ import { Type } from '@sinclair/typebox'
 import type { AdminService } from '../admin/service.js'
 import type { AppConfig } from '../config.js'
 import type { WebSessionService } from '../auth/web-session-service.js'
+import type { WebStepUpService } from '../step-up/service.js'
 import { NullableTimestamp, Timestamp } from './api-schemas.js'
 import {
   requireCsrf, requireWebSession, WEB_CSRF_COOKIE, WEB_SESSION_COOKIE,
@@ -71,11 +72,59 @@ const AdminJob = Type.Object({
   error: Type.Union([Type.String(), Type.Null()]), startedAt: NullableTimestamp,
   finishedAt: NullableTimestamp, createdAt: Timestamp,
 })
+const RiskRestriction = Type.Object({
+  id: Type.String({ format: 'uuid' }),
+  scope: Type.Union([Type.Literal('authentication'), Type.Literal('recovery'), Type.Literal('device'), Type.Literal('sync_write'), Type.Literal('blob'), Type.Literal('billing'), Type.Literal('all')]),
+  action: Type.Union([Type.Literal('challenge'), Type.Literal('deny'), Type.Literal('lock'), Type.Literal('read_only'), Type.Literal('review')]),
+  reasonCode: Type.String(), source: Type.String(), expiresAt: NullableTimestamp,
+  createdBy: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]), revokedAt: NullableTimestamp,
+  revokedBy: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]), createdAt: Timestamp,
+})
+const RiskEvent = Type.Object({
+  id: Type.String(), eventType: Type.String(), requestId: Type.String(), outcome: Type.String(),
+  reasonCodes: Type.Array(Type.String()), createdAt: Timestamp,
+})
+const AccountRiskRestrictionBody = Type.Object({
+  scope: Type.Union([Type.Literal('authentication'), Type.Literal('recovery'), Type.Literal('device'), Type.Literal('sync_write'), Type.Literal('blob'), Type.Literal('billing'), Type.Literal('all')]),
+  action: Type.Union([Type.Literal('challenge'), Type.Literal('deny'), Type.Literal('lock'), Type.Literal('read_only'), Type.Literal('review')]),
+  reasonCode: Type.String({ minLength: 3, maxLength: 100, pattern: '^[a-z0-9][a-z0-9_.-]*$' }),
+  expiresAt: Type.Optional(NullableTimestamp),
+})
+const AccountUsage = Type.Object({
+  revision: Type.String(),
+  metrics: Type.Record(Type.String(), Type.String()),
+  updatedAt: NullableTimestamp,
+})
+const RuntimeConfiguration = Type.Object({
+  serverName: Type.String({ minLength: 1, maxLength: 100 }),
+  maxObjectBytes: Type.Integer({ minimum: 1, maximum: 67_108_864 }),
+  maxBlobBytes: Type.Integer({ minimum: 1, maximum: 1_099_511_627_776 }),
+  changeRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),
+  versionRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),
+  tombstoneRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),
+  mailDefaultLocale: Type.Union([Type.Literal('en'), Type.Literal('zh-CN')]),
+  pendingEmailVerificationDays: Type.Integer({ minimum: 1, maximum: 90 }),
+  accountDeletionCoolingOffDays: Type.Integer({ minimum: 1, maximum: 365 }),
+  accountDeletionRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),
+  mailDriver: Type.Union([Type.Literal('disabled'), Type.Literal('smtp')]),
+  mailFromAddress: Type.String({ maxLength: 320 }),
+  mailFromName: Type.String({ maxLength: 200 }),
+  mailReplyTo: Type.String({ maxLength: 320 }),
+  smtpHost: Type.String({ maxLength: 255 }),
+  smtpPort: Type.Integer({ minimum: 1, maximum: 65_535 }),
+  smtpTlsMode: Type.Union([Type.Literal('starttls-required'), Type.Literal('starttls'), Type.Literal('tls'), Type.Literal('none')]),
+  smtpUsername: Type.String({ maxLength: 500 }),
+  smtpPasswordConfigured: Type.Boolean(),
+  smtpConnectTimeoutMs: Type.Integer({ minimum: 1_000, maximum: 120_000 }),
+  smtpCommandTimeoutMs: Type.Integer({ minimum: 1_000, maximum: 120_000 }),
+  smtpTlsRejectUnauthorized: Type.Boolean(),
+})
 
 export function createWebAdminRoutes(
   _config: AppConfig,
   admin: AdminService,
   webSessions: WebSessionService,
+  stepUps: WebStepUpService,
 ): FastifyPluginAsyncTypebox {
   return async function webAdminRoutes(app) {
     app.get('/v1/web/admin/overview', {
@@ -143,6 +192,27 @@ export function createWebAdminRoutes(
     } }, async (request) => {
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       return admin.getRuntimeConfiguration(session.accountId)
+    })
+
+    app.put('/v1/web/admin/configuration', { schema: {
+      headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }),
+      body: Type.Object({
+        revision: Type.String({ pattern: '^[0-9]+$', maxLength: 18 }),
+        configuration: RuntimeConfiguration,
+        smtpPassword: Type.Optional(Type.Union([Type.String({ maxLength: 2_000 }), Type.Null()])),
+      }),
+      response: { 200: Type.Record(Type.String(), Type.Unknown()) },
+    } }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
+      await stepUps.consumeAccountGrant({
+        token: request.headers['x-step-up-token'],
+        accountId: session.accountId,
+        sessionId: session.sessionId,
+        audience: 'runtime.configuration.update',
+        requestHash: stepUps.requestHash(request.body),
+      })
+      return admin.updateRuntimeConfiguration(session.accountId, request.body.configuration, request.body.revision, request.body.smtpPassword)
     })
 
     app.get('/v1/web/admin/sessions', { schema: {
@@ -322,6 +392,60 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       return admin.batchSetAccountsSuspended(session.accountId, request.body.accountIds, request.body.suspended)
+    })
+
+    app.get('/v1/web/admin/accounts/:accountId/risk/restrictions', { schema: {
+      params: Type.Object({ accountId: Type.String({ format: 'uuid' }) }),
+      response: { 200: Type.Array(RiskRestriction) },
+    } }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      return admin.listAccountRiskRestrictions(session.accountId, request.params.accountId)
+    })
+
+    app.get('/v1/web/admin/accounts/:accountId/risk/events', { schema: {
+      params: Type.Object({ accountId: Type.String({ format: 'uuid' }) }),
+      response: { 200: Type.Array(RiskEvent) },
+    } }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      return admin.listAccountRiskEvents(session.accountId, request.params.accountId)
+    })
+
+    app.get('/v1/web/admin/accounts/:accountId/usage', { schema: {
+      params: Type.Object({ accountId: Type.String({ format: 'uuid' }) }), response: { 200: AccountUsage },
+    } }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      return admin.getAccountUsage(session.accountId, request.params.accountId)
+    })
+
+    app.post('/v1/web/admin/accounts/:accountId/usage/reconcile', {
+      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+      schema: { params: Type.Object({ accountId: Type.String({ format: 'uuid' }) }), response: { 200: AccountUsage } },
+    }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
+      return admin.reconcileAccountUsage(session.accountId, request.params.accountId)
+    })
+
+    app.put('/v1/web/admin/accounts/:accountId/risk/restrictions', {
+      config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+      schema: {
+        params: Type.Object({ accountId: Type.String({ format: 'uuid' }) }), body: AccountRiskRestrictionBody,
+        response: { 200: Type.Object({ id: Type.String({ format: 'uuid' }) }) },
+      },
+    }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
+      const expiresAt = request.body.expiresAt === undefined || request.body.expiresAt === null ? null : new Date(request.body.expiresAt)
+      return admin.upsertAccountRiskRestriction(session.accountId, { ...request.body, targetAccountId: request.params.accountId, expiresAt })
+    })
+
+    app.delete('/v1/web/admin/risk/restrictions/:restrictionId', { schema: {
+      params: Type.Object({ restrictionId: Type.String({ format: 'uuid' }) }), response: { 204: EmptyResponse },
+    } }, async (request, reply) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
+      await admin.revokeAccountRiskRestriction(session.accountId, request.params.restrictionId)
+      return reply.status(204).send(null)
     })
 
     app.get('/v1/web/admin/audit', {

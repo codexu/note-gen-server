@@ -1,7 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto'
 import { and, eq, gt, isNull } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
-import { deviceAuthorizations } from '../database/schema.js'
+import { accounts, deploymentSettings, deviceAuthorizations } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import type { AuthService, DeviceSessionInput, SessionResult } from './service.js'
 import { hashToken } from './web-session-service.js'
@@ -59,19 +59,31 @@ export class DeviceAuthorizationService {
   }
 
   async approve(userCode: string, accountId: string): Promise<void> {
-    const approved = await this.database.db.update(deviceAuthorizations).set({
-      accountId,
-      status: 'approved',
-      approvedAt: new Date(),
-    }).where(and(
-      eq(deviceAuthorizations.userCode, normalizeUserCode(userCode)),
-      eq(deviceAuthorizations.status, 'pending'),
-      gt(deviceAuthorizations.expiresAt, new Date()),
-      isNull(deviceAuthorizations.consumedAt),
-    )).returning({ id: deviceAuthorizations.id })
-    if (approved.length === 0) {
-      throw new ApiError({ code: 'authorization_not_pending', message: 'Authorization is expired or no longer pending', statusCode: 409 })
-    }
+    await this.database.db.transaction(async (tx) => {
+      const [account] = await tx.select({ credentialEpoch: accounts.credentialEpoch }).from(accounts).where(and(
+        eq(accounts.id, accountId), isNull(accounts.suspendedAt), isNull(accounts.disabledAt),
+      )).limit(1).for('update')
+      if (account === undefined) throw new ApiError({ code: 'authorization_not_pending', message: 'Authorization is expired or no longer pending', statusCode: 409 })
+      const [instanceAuth] = await tx.select({ epoch: deploymentSettings.instanceAuthEpoch }).from(deploymentSettings)
+        .where(eq(deploymentSettings.id, true)).limit(1).for('update')
+      if (instanceAuth === undefined) throw new Error('Instance authentication state is missing')
+      const approvedAt = new Date()
+      const approved = await tx.update(deviceAuthorizations).set({
+        accountId,
+        status: 'approved',
+        approvedAt,
+        approvedCredentialEpoch: account.credentialEpoch,
+        approvedInstanceAuthEpoch: instanceAuth.epoch, approvedIssuedAt: approvedAt,
+      }).where(and(
+        eq(deviceAuthorizations.userCode, normalizeUserCode(userCode)),
+        eq(deviceAuthorizations.status, 'pending'),
+        gt(deviceAuthorizations.expiresAt, new Date()),
+        isNull(deviceAuthorizations.consumedAt),
+      )).returning({ id: deviceAuthorizations.id })
+      if (approved.length === 0) {
+        throw new ApiError({ code: 'authorization_not_pending', message: 'Authorization is expired or no longer pending', statusCode: 409 })
+      }
+    })
   }
 
   async deny(userCode: string): Promise<void> {
@@ -108,6 +120,9 @@ export class DeviceAuthorizationService {
       deviceName: deviceAuthorizations.deviceName,
       platform: deviceAuthorizations.platform,
       encryptionPublicKey: deviceAuthorizations.encryptionPublicKey,
+      approvedCredentialEpoch: deviceAuthorizations.approvedCredentialEpoch,
+      approvedInstanceAuthEpoch: deviceAuthorizations.approvedInstanceAuthEpoch,
+      approvedIssuedAt: deviceAuthorizations.approvedIssuedAt,
     })
     if (authorization === undefined || authorization.accountId === null) {
       const [current] = await this.database.db.select({
@@ -123,6 +138,23 @@ export class DeviceAuthorizationService {
       }
       throw new ApiError({ code: 'authorization_expired', message: 'Authorization is expired or already used', statusCode: 401 })
     }
+    if (authorization.approvedCredentialEpoch === null) {
+      // Pre-epoch approvals cannot prove that their approving credentials are
+      // still current after upgrade; require a fresh browser approval.
+      await this.database.db.update(deviceAuthorizations).set({ status: 'denied' }).where(and(
+        eq(deviceAuthorizations.id, authorization.id), eq(deviceAuthorizations.consumedAt, consumedAt),
+      ))
+      throw new ApiError({ code: 'authorization_expired', message: 'Authorization must be approved again', statusCode: 401 })
+    }
+    const [instanceAuth] = await this.database.db.select({ epoch: deploymentSettings.instanceAuthEpoch, tokenNotBefore: deploymentSettings.tokenNotBefore, enforced: deploymentSettings.authEpochEnforced })
+      .from(deploymentSettings).where(eq(deploymentSettings.id, true)).limit(1)
+    if (instanceAuth === undefined || (instanceAuth.enforced && (
+      authorization.approvedInstanceAuthEpoch === null || authorization.approvedIssuedAt === null ||
+      authorization.approvedInstanceAuthEpoch !== instanceAuth.epoch || authorization.approvedIssuedAt < instanceAuth.tokenNotBefore
+    ))) {
+      await this.database.db.update(deviceAuthorizations).set({ status: 'denied' }).where(and(eq(deviceAuthorizations.id, authorization.id), eq(deviceAuthorizations.consumedAt, consumedAt)))
+      throw new ApiError({ code: 'authorization_expired', message: 'Authorization must be approved again', statusCode: 401 })
+    }
     try {
       return await this.auth.createDeviceSession(authorization.accountId, {
         deviceId: authorization.deviceId,
@@ -131,7 +163,7 @@ export class DeviceAuthorizationService {
         ...(authorization.encryptionPublicKey === null
           ? {}
           : { encryptionPublicKey: authorization.encryptionPublicKey }),
-      })
+      }, authorization.approvedCredentialEpoch?.toString())
     } catch (error) {
       await this.database.db.update(deviceAuthorizations).set({ consumedAt: null }).where(and(
         eq(deviceAuthorizations.id, authorization.id),

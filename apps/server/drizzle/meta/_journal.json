@@ -162,6 +162,300 @@
       "when": 1786237200000,
       "tag": "0022_sync_resource_bindings",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786240800000,
+      "tag": "0023_deployment_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786244400000,
+      "tag": "0024_background_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786248000000,
+      "tag": "0025_bootstrap_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1786251600000,
+      "tag": "0026_registration_invitations",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1786255200000,
+      "tag": "0027_account_identities",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1786258800000,
+      "tag": "0028_account_login_claim_conflicts",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1786262400000,
+      "tag": "0029_account_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1786266000000,
+      "tag": "0030_backup_restore_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1786269600000,
+      "tag": "0031_risk_control",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1786273200000,
+      "tag": "0032_compliance_governance",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1786276800000,
+      "tag": "0033_billing_entitlements",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1786280400000,
+      "tag": "0034_outbox_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1786284000000,
+      "tag": "0035_maintenance_coordination",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1786287600000,
+      "tag": "0036_blob_usage_reservations",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1786291200000,
+      "tag": "0037_workspace_creation_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1786294800000,
+      "tag": "0038_workspace_recovery_envelopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1786298400000,
+      "tag": "0039_legal_holds",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1786302000000,
+      "tag": "0040_device_authorization_credential_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1786305600000,
+      "tag": "0041_device_pairing_credential_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1786309200000,
+      "tag": "0042_usage_current_counter_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1786312800000,
+      "tag": "0043_blob_upload_sync_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1786316400000,
+      "tag": "0044_support_case_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1786320000000,
+      "tag": "0045_backup_artifacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1786323600000,
+      "tag": "0046_mail_secret_payloads",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1786327200000,
+      "tag": "0047_staff_realm",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1786330800000,
+      "tag": "0048_refresh_rotation_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1786334400000,
+      "tag": "0049_restore_credential_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1786338000000,
+      "tag": "0050_instance_auth_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1786341600000,
+      "tag": "0051_web_session_instance_auth_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1786345200000,
+      "tag": "0052_refresh_token_instance_auth_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1786348800000,
+      "tag": "0053_device_ceremony_instance_auth_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1786352400000,
+      "tag": "0054_step_up_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1786356000000,
+      "tag": "0055_outbox_retry_budget",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1786359600000,
+      "tag": "0056_background_job_invariants",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1786363200000,
+      "tag": "0057_account_service_audit_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1786366800000,
+      "tag": "0058_deletion_purge_manifest",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1786370400000,
+      "tag": "0059_backup_run_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1786374000000,
+      "tag": "0060_legal_hold_staff_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1786377600000,
+      "tag": "0061_risk_restriction_staff_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1786381200000,
+      "tag": "0062_deletion_ledger_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1786384800000,
+      "tag": "0063_support_diagnostic_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1786388400000,
+      "tag": "0064_runtime_configuration",
+      "breakpoints": true
     }
   ]
 }

@@ -66,4 +66,3 @@ jobs:
             sleep 1
           done
           pnpm test:integration
-      - run: docker build --tag note-gen-server:ci .

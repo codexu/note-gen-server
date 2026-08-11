@@ -1,6 +1,6 @@
 # 11：自托管发布、升级与维护技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；签名发布、不可逆迁移与生产发布编排移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`self-hosted`；相同迁移兼容规则也约束 hosted 发布
 - 前置依赖：[00 共享基础](00-shared-foundation.md)
@@ -189,6 +189,8 @@ notegen-server migrate preflight
 notegen-server migrate apply
 notegen-server maintenance disable
 ```
+
+当前实现提供 `pnpm --filter @notegen/server doctor`，始终输出 machine-readable JSON；它只读检查 migration journal/SQL 文件、核心数据库对象、Drizzle migration table、deployment singleton、pending restore marker、`sync_epoch` 格式，以及 generic background job 与 mail outbox 的 expired lease/dead-letter 摘要，不执行 migration 或修改实例状态。Doctor 逐条比较 Drizzle record 的 journal timestamp 与 Drizzle-compatible SQL SHA-256，按 `migration_required`（DB 少于本地）、`binary_too_old`（DB 多于本地）或 `schema_drift`（顺序、timestamp 或 SQL hash 不同）阻断，而不是只比较记录数量；服务启动也会在装配业务服务、绑定 HTTP 端口之前执行同一 ordered migration-record 校验，不兼容时直接退出。本机 `maintenance:mode` 可进入 `read_only`/`write_drain`，并以独立 `ENABLE_OFFLINE_MAINTENANCE` 确认词进入 restore 所需的 `offline`；恢复正常仍需独立的 disable 确认。
 
 管理 Web 展示当前/可用版本、release notes link、Schema 状态、backup freshness、计划摘要和 Runbook。它不调用 Docker socket、不自动 pull/restart。敏感升级/维护动作优先 CLI，Web 只读或生成短期批准。
 

@@ -25,6 +25,14 @@ const config: AppConfig = {
   webDistPath: '../web/out',
   webPublicBaseUrl: 'http://localhost:3789',
   deploymentMode: 'self-hosted',
+  hostedReleaseStage: 'internal-test',
+  billingProvider: 'none', billingProviderEnvironment: 'test', billingMerchantEntity: '',
+  hostedMailProvider: 'log', mailDriver: 'disabled', mailFromAddress: '', mailFromName: 'NoteGen', mailReplyTo: '', mailDefaultLocale: 'zh-CN',
+  smtpHost: '', smtpPort: 587, smtpTlsMode: 'starttls-required', smtpUsername: '', smtpPassword: '', smtpConnectTimeoutMs: 10_000, smtpCommandTimeoutMs: 15_000, smtpTlsRejectUnauthorized: true,
+  hostedDataRegion: 'local-test', pendingEmailVerificationDays: 7,
+  accountDeletionCoolingOffDays: 30, accountDeletionRetentionDays: 90,
+  legalHoldApprovalAuthority: 'platform-admin', usageEnforcement: 'disabled',
+  capabilitiesEnable: [], capabilitiesDisable: [],
 }
 
 let app: FastifyInstance | undefined
@@ -37,6 +45,7 @@ afterEach(async () => {
 const healthyDependencies = {
   version: '0.1.0-test',
   instanceId: '0198f35d-30e1-7000-8000-000000000001',
+  syncEpoch: '0198f35d-30e1-7000-8000-000000000002',
   database: { check: async () => undefined, close: async () => undefined },
   blobStorage: { check: async () => undefined },
 }
@@ -69,6 +78,7 @@ describe('service foundation', () => {
     expect(response.json()).toMatchObject({
       service: 'note-gen-server',
       serverVersion: '0.1.0-test',
+      syncEpoch: '0198f35d-30e1-7000-8000-000000000002',
       protocol: { minimum: 1, maximum: 1 },
       features: {
         deltaSync: true, webSocketWakeUp: true, endToEndEncryption: true,

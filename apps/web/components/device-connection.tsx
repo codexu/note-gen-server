@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
+import { ThemeToggle } from "@/components/theme-toggle"
 import { apiRequest, isApiRequestError, userFacingErrorMessage, type DeviceAuthorization } from "@/lib/api"
 
 interface DevicePairing {
@@ -23,7 +24,11 @@ interface DevicePairing {
 
 type DevicePairingStatus = "pending" | "consumed" | "expired"
 
-export function DeviceConnection() {
+export function DeviceConnection({
+  embedded = false,
+}: {
+  embedded?: boolean
+}) {
   const [code, setCode] = useState("")
   const [authorization, setAuthorization] = useState<DeviceAuthorization | null>(null)
   const [signedIn, setSignedIn] = useState<boolean | null>(null)
@@ -146,10 +151,24 @@ export function DeviceConnection() {
     }
   }
 
-  return (
-    <main className="mx-auto flex min-h-svh w-full max-w-5xl items-center p-6">
+  const content = (
+    <>
+      {embedded ? null : (
+      <header className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+            <LaptopIcon />
+          </span>
+          <div>
+            <h1 className="text-lg font-semibold">关联新设备</h1>
+            <p className="text-sm text-muted-foreground">确认授权后，客户端会自动开始同步。</p>
+          </div>
+        </div>
+        <ThemeToggle />
+      </header>
+      )}
       <div className="grid w-full items-start gap-6 lg:grid-cols-2">
-      <Card className="w-full">
+      <Card className="w-full bg-card/90 shadow-sm">
         <CardHeader>
           <CardTitle>关联 NoteGen 设备</CardTitle>
           <CardDescription>确认设备信息后，服务器只会向这一台设备签发独立会话。</CardDescription>
@@ -212,33 +231,35 @@ export function DeviceConnection() {
             </Alert>
           ) : null}
         </CardContent>
-        <CardFooter className="justify-between gap-3">
-          {signedIn === false ? (
-            <Link
-              className={buttonVariants()}
-              href={`/?next=${encodeURIComponent(`/connect/?code=${code}`)}`}
-            >
-              登录或注册
-            </Link>
-          ) : authorization && !completed ? (
-            <>
-              <Button variant="destructive" disabled={busy} onClick={() => void decide("deny")}>
-                拒绝
-              </Button>
-              <Button disabled={busy} onClick={() => void decide("approve")}>
-                {busy ? <Spinner data-icon="inline-start" /> : <CheckCircle2Icon data-icon="inline-start" />}
-                允许连接
-              </Button>
-            </>
-          ) : (
-            <Link className={buttonVariants({ variant: "outline" })} href="/">
-              返回账号页面
-            </Link>
-          )}
-        </CardFooter>
+        {!embedded || signedIn === false || (authorization && !completed) ? (
+          <CardFooter className="justify-between gap-3">
+            {signedIn === false ? (
+              <Link
+                className={buttonVariants()}
+                href={`/?next=${encodeURIComponent(`/connect/?code=${code}`)}`}
+              >
+                登录或注册
+              </Link>
+            ) : authorization && !completed ? (
+              <>
+                <Button variant="destructive" disabled={busy} onClick={() => void decide("deny")}>
+                  拒绝
+                </Button>
+                <Button disabled={busy} onClick={() => void decide("approve")}>
+                  {busy ? <Spinner data-icon="inline-start" /> : <CheckCircle2Icon data-icon="inline-start" />}
+                  允许连接
+                </Button>
+              </>
+            ) : (
+              <Link className={buttonVariants({ variant: "outline" })} href="/">
+                返回账号页面
+              </Link>
+            )}
+          </CardFooter>
+        ) : null}
       </Card>
       {signedIn ? (
-        <Card className="w-full">
+        <Card className="w-full bg-card/90 shadow-sm">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <QrCodeIcon data-icon="inline-start" />
@@ -301,6 +322,14 @@ export function DeviceConnection() {
         </Card>
       ) : null}
       </div>
+    </>
+  )
+
+  if (embedded) return content
+
+  return (
+    <main className="mx-auto flex min-h-svh w-full max-w-5xl flex-col gap-6 p-6 md:justify-center md:p-10">
+      {content}
     </main>
   )
 }

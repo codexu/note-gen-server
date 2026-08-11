@@ -1,6 +1,6 @@
 # 08：共享邀请核心与自托管邀请注册技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；生产注册开放由 [13 生产上线准备](13-production-readiness.md) 的灰度门控）
 - 日期：2026-08-11
 - 适用形态：邀请 token/accept 核心共用；管理员 UI 默认 `self-hosted`
 - 核心前置：[00 共享基础](00-shared-foundation.md)
@@ -123,6 +123,7 @@ Self-hosted 管理员或 hosted 受权 staff 可选择：
 ```text
 POST   /v1/invitations/inspect
 POST   /v1/web/auth/register/invitation
+POST   /v1/web/auth/step-up
 GET    /v1/web/admin/invitations
 POST   /v1/web/admin/invitations
 POST   /v1/web/admin/invitations/:id/replace-and-send
@@ -187,6 +188,8 @@ SMTP 不可用不能让实例或已有账号同步不可用。
 - bound email 强制单次且不能因复制/邮件邀请直接变成 verified。
 - null、无限期和超过 90 天的邀请被拒绝；pepper 轮换期间旧邀请可消费，旧 key 仍有有效引用时不能退休。
 - 无 SMTP 的完整创建→复制→接受流程可用；SMTP 故障不破坏链接。
+- `send=true` 必须同时具备 bound email 和 `mail.delivery`；邀请、加密 payload 与 outbox 在同一事务创建，任一失败不留下可用 token 或孤儿投递。
+- replace-and-send 并发时只产生一个有效 replacement；旧 invitation 的 pending outbox 变为 dead-letter 并擦除 payload，已租约任务在 provider 调用前复核旧 token 已失效。
 - 邀请永不自动授予 admin；最后管理员保护仍有效。
 - 旧客户端看到 closed，现有登录和浏览器设备授权不受影响。
 

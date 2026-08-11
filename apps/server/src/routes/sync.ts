@@ -100,32 +100,43 @@ export function createSyncRoutes(
       config: { rateLimit: { max: 600, timeWindow: '1 minute' } },
       schema: {
         params: WorkspaceParams,
-        body: Type.Object({ commands: Type.Array(Command, { minItems: 1, maxItems: 100 }) }),
+        body: Type.Object({
+          commands: Type.Array(Command, { minItems: 1, maxItems: 100 }),
+          expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })),
+        }),
       },
     }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      return sync.commands(claims.accountId, claims.deviceId, request.params.workspaceId, request.body.commands)
+      const result = await sync.commands(
+        claims.accountId, claims.deviceId, request.params.workspaceId,
+        request.body.commands, request.body.expectedSyncEpoch,
+      )
+      void sync.recordCommandIngress(
+        claims.accountId, request.params.workspaceId,
+        BigInt(Buffer.byteLength(JSON.stringify(request.body.commands), 'utf8')), request.id,
+      ).catch(error => request.log.warn({ err: error }, 'Failed to record sync command ingress usage'))
+      return result
     })
 
     app.get('/v1/workspaces/:workspaceId/sync/events', {
       schema: {
         params: WorkspaceParams,
-        querystring: Type.Object({ after: Type.Optional(Counter), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })) }),
+        querystring: Type.Object({ after: Type.Optional(Counter), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })), expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })) }),
       },
     }, async request => {
       const claims = await requireAuth(request, tokens, auth)
-      return sync.events(claims.accountId, request.params.workspaceId, request.query.after ?? '0', request.query.limit ?? 200)
+      return sync.events(claims.accountId, request.params.workspaceId, request.query.after ?? '0', request.query.limit ?? 200, request.query.expectedSyncEpoch)
     })
 
     app.get('/v1/workspaces/:workspaceId/sync/objects/:objectId/versions/:revision', {
-      schema: { params: ObjectVersionParams },
+      schema: { params: ObjectVersionParams, querystring: Type.Object({ expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })) }) },
     }, async request => {
       const claims = await requireAuth(request, tokens, auth)
       return sync.objectVersion(
         claims.accountId,
         request.params.workspaceId,
         request.params.objectId,
-        request.params.revision,
+        request.params.revision, request.query.expectedSyncEpoch,
       )
     })
 
@@ -138,13 +149,14 @@ export function createSyncRoutes(
         querystring: Type.Object({
           before: Type.Optional(Counter),
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+          expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })),
         }),
       },
     }, async request => {
       const claims = await requireAuth(request, tokens, auth)
       return sync.objectVersions(
         claims.accountId, request.params.workspaceId, request.params.objectId,
-        request.query.before ?? null, request.query.limit ?? 20,
+        request.query.before ?? null, request.query.limit ?? 20, request.query.expectedSyncEpoch,
       )
     })
 
@@ -155,26 +167,27 @@ export function createSyncRoutes(
           bootstrapId: Type.Optional(Type.String({ format: 'uuid' })),
           afterObjectId: Type.Optional(Type.String({ format: 'uuid' })),
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
+          expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })),
         }),
       },
     }, async request => {
       const claims = await requireAuth(request, tokens, auth)
       return sync.bootstrap(
         claims.accountId, request.params.workspaceId, request.query.bootstrapId ?? null,
-        request.query.afterObjectId ?? null, request.query.limit ?? 200,
+        request.query.afterObjectId ?? null, request.query.limit ?? 200, request.query.expectedSyncEpoch,
       )
     })
 
     app.get('/v1/workspaces/:workspaceId/documents/:documentId/updates', {
       schema: {
         params: Type.Object({ workspaceId: Type.String({ format: 'uuid' }), documentId: Type.String({ minLength: 1, maxLength: 512 }) }),
-        querystring: Type.Object({ after: Type.Optional(Counter), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })) }),
+        querystring: Type.Object({ after: Type.Optional(Counter), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })), expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })) }),
       },
     }, async request => {
       const claims = await requireAuth(request, tokens, auth)
       return sync.documentUpdates(
         claims.accountId, request.params.workspaceId, request.params.documentId,
-        request.query.after ?? '0', request.query.limit ?? 500,
+        request.query.after ?? '0', request.query.limit ?? 500, request.query.expectedSyncEpoch,
       )
     })
   }

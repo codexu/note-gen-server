@@ -1,6 +1,6 @@
 # NoteGen 账号服务开发计划总览
 
-- 状态：Draft
+- 状态：已完成（原账号服务开发计划的内部测试范围已实施；尚未选择或启用的生产外部集成、合规政策与恢复能力已迁移至 [13 生产上线准备](13-production-readiness.md)，默认暂停）
 - 日期：2026-08-11
 - 面向读者：NoteGen Server、账号 Web、NoteGen 客户端的开发者与部署维护者
 - 文档目标：把现有同步服务演进为可长期运营的账号服务，并允许每个功能按独立任务实施、验收、上线和回滚
@@ -28,11 +28,11 @@
 
 以下结论来自当前仓库，而不是未来设想：
 
-- `DEPLOYMENT_MODE` 已在 `apps/server/src/config.ts` 中建模，并由 `/v1/capabilities` 返回；Web 也已经显示“官方托管 / 自托管”。当前它尚未参与路由注册、权限判断或服务策略，因此仍是展示字段。
+- `DEPLOYMENT_MODE` 已在 `apps/server/src/config.ts` 中建模，并由 `/v1/capabilities` 返回；它与持久 `deployment_settings` 共同构成 StartupSafetyGate、路由注册与服务策略的权威边界。配置/持久状态不一致时业务请求必须关闭，不得退化为展示字段。
 - `/v1/capabilities` 已经是客户端发现协议与功能的入口。后续必须保持增量兼容，不能让客户端根据版本号猜测功能。
-- 账号当前是任意 `login + password`；任何时刻只要不存在“有效管理员”，下一次普通注册都会自动成为全局管理员，不仅限于空库首位账号。全部管理员被停用/删除后也可能被接管，必须先从所有注册路径移除该隐式规则。
+- 普通注册不再基于“当前没有有效管理员”自动提权；自托管仅能在持久 lifecycle 的 bootstrap/repair-admin 受控流程中建立管理员，官方托管普通注册固定为非管理员。管理员修复状态由 `deployment_settings.admin_repair_required` 明确暴露并受本机流程约束。
 - PostgreSQL 已承载跨实例限流、维护 advisory lock、管理员审计、后台任务和数据库备份记录，可以继续作为账号服务一期的协调基础，无需为了运营功能立即引入 Redis 或消息队列。
-- 当前管理后台备份只包含 PostgreSQL；单机脚本才会同时复制文件系统 Blob。恢复仍是手工流程。
+- 旧管理后台 DB-only backup 与单机脚本均已停用，避免生成看似可恢复却未验证的 artifact。自托管现有受确认的 offline filesystem writer 会生成 PostgreSQL custom dump、Blob copy、v2 manifest 与 Ed25519 signature；restore preflight 只读验证 archive，实际 apply 仍未开放。
 - 当前同步实现同时保留历史 `SyncService` 和现用 `DurableSyncService`。两者共享对象/版本表，但写入日志不同。账号服务只能通过统一策略接口接入，不能把配额或审计逻辑只绑在其中一条路径上。
 - NoteGen 客户端已校验 `instanceId`、协议范围和部分能力字段；现有 `registrationMode`、`login` 字段及错误响应需要维持兼容窗口。
 
@@ -83,6 +83,8 @@ flowchart LR
 | 10 | [自托管备份与恢复](10-self-hosted-backup-restore.md) | 自托管 | 00；preserve restore 硬依赖 12H | 数据库+Blob 一致备份、清单校验、加密、计划任务、离线恢复 CLI |
 | 11 | [自托管升级与维护](11-self-hosted-upgrades-maintenance.md) | 自托管 | 00；不可逆升级硬依赖 10 与 12H | 版本检查、升级预检、维护编排、迁移兼容、回滚和升级 Runbook |
 | 12 | [NoteGen 客户端账号服务接入](12-client-account-service-integration.md) | 共用 | 00；逐项跟随 01～11 | 能力层、安全会话、状态机、账号入口、配额/维护 UX、sync epoch 恢复 |
+| 13 | [生产上线准备（暂缓）](13-production-readiness.md) | 官方托管/自托管 | 00～12 内部测试基线；产品、法务与运维决策 | 供应商选型、生产治理、OIDC、加密备份与恢复演练、灰度和回滚 |
+| 14 | [本地测试用例计划](14-local-test-plan.md) | 内部测试 | 00～12 实现基线 | 本地 fixture、手工冒烟、故障注入与自动化回归候选 |
 
 ## 5. 能力开关原则
 
@@ -99,10 +101,10 @@ flowchart LR
 | `usage.enforcement` | hosted | hosted 启用 | 03 hard-enforcement 与客户端 gate 就绪；self-hosted 只保留技术安全上限 |
 | `billing.subscription` | hosted | 显式启用 | 04、05 Pilot Gate、05D billing 删除/fencing handler、provider/Webhook 与客户端只读联动全部就绪 |
 | `compliance.requests` | hosted | hosted 启用 | 05 Pilot Gate 就绪；基础账号删除不等于完整合规工作流 |
-| `support.cases` | hosted | hosted 启用 | 06 与相应数据治理基线就绪 |
+| `support.cases` | hosted | 仅 internal-test 显式启用 | 06 的 Staff OIDC、permission enforcement、console 与相应数据治理基线就绪后，才可作为 live capability 开放 |
 | `operations.webBootstrap` | self-hosted | lifecycle 派生 | 仅 uninitialized 时 available；完成后永久关闭且不可 override |
-| `mail.delivery` | 两者 | provider 配置后启用 | 传输无关；hosted 使用托管 provider，self-hosted 可使用 09 SMTP adapter |
-| `operations.smtpAdmin` | self-hosted | 09 就绪后启用 | 仅管理员状态、测试与队列入口；一期配置仍来自环境/secret，hosted 永不 available |
+| `mail.delivery` | 两者 | provider 配置后显式启用 | 传输无关；hosted 的 `log` sink 仅可在 internal-test 支撑内部演练，live 需经评审的托管 provider；self-hosted 可使用 09 SMTP adapter |
+| `operations.smtpAdmin` | self-hosted | 09D 就绪后启用 | 仅管理员状态、测试与队列入口；一期配置仍来自环境/secret，hosted 永不 available |
 | `operations.unifiedBackup` | self-hosted | 10 就绪后启用 | hosted 内部备份不是客户实例 capability |
 | `operations.upgradeAssistant` | self-hosted | 11 release/doctor 就绪后启用 | hosted 内部发布不是客户实例 capability；不静默自动升级 |
 | `operations.preserveRestore` | self-hosted | 默认关闭 | 仅在 auth/sync fencing 与真实恢复演练完成后启用；legacy alias 为 `preserveRestore` |
@@ -115,7 +117,7 @@ flowchart LR
 
 `enabled/configured/available` 与 `healthy` 必须分开：SMTP 暂时超时不应让能力字段来回变化；管理员状态页和投递任务显示 degraded，逐操作 failure policy 决定是否影响 readiness/入口。
 
-## 6. 推荐实施顺序
+## 6. 原计划实施顺序（已完成）
 
 ```mermaid
 flowchart TD
@@ -146,7 +148,7 @@ flowchart TD
 
 实线表示计划级或分阶段硬依赖；虚线只表示可选增强。备份/升级链固定为 10A additive server contract → 12H 客户端普及与故障演练 → 10 preserve enablement → 11 irreversible migration；11 release/doctor 不等待该链。其他计划 12 的强制客户端 gate 同样与相应服务端 PR 配对：服务端先提供兼容 contract，客户端普及后才开启拒绝能力，避免整份计划循环。
 
-建议按交付波次推进：
+以下波次已作为内部测试开发计划完成；它们不是生产放行声明。
 
 1. **Wave 0：策略地基。** 完成 00，先修复所有普通注册路径在“无有效管理员”时自动提权的风险；同时完成 12 的 capability/error/secure-session 最小切片。
 2. **Wave 1：可安全建立账号。** 并行完成 01、07、08A/B、09、12G 的 E2EE-only 首次工作区引导与 05 Pilot Gate（inventory/政策/保留/基础访问、实际删除、外部 deletion ledger 与 restore barrier/drill）；随后完成 08C。官方托管在 01、02、E2EE onboarding 与该治理门槛前保持 disabled。
@@ -155,6 +157,8 @@ flowchart TD
 5. **Wave 4：规模化支持。** 完成 06，并根据真实工单量再决定是否接入外部客服平台。
 
 计划 12 不必等到最后整体实施：Capability Resolver、错误状态机和安全会话应从 Wave 0/1 开始；配额、计费、客服和 sync epoch 子项分别跟随对应服务端计划合并。
+
+生产放行不再继续沿用上述波次，统一遵循 [13 生产上线准备](13-production-readiness.md) 的决策顺序、灰度门槛和回滚条件。
 
 可接受的更小发布节点：
 

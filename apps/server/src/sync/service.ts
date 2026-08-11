@@ -6,15 +6,19 @@ import {
   workspaceKeyEnvelopes, workspaceKeys, workspaces,
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
+import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import type { ChangeNotifier, PushOperationInput, SyncObjectKind } from './types.js'
+import type { UsageService } from '../usage/service.js'
 
 export class SyncService {
   constructor(
     private readonly database: DatabaseContext,
     private readonly workspaceService: WorkspaceService,
     private readonly notifier: ChangeNotifier,
-    private readonly maxObjectBytes: number,
+    private readonly maxObjectBytes: number | (() => number),
+    private readonly usage?: UsageService,
+    private readonly storageLimitResolver?: (accountId: string) => Promise<bigint | null>,
   ) {}
 
   async push(accountId: string, deviceId: string, workspaceId: string, inputs: PushOperationInput[]) {
@@ -211,7 +215,7 @@ export class SyncService {
 
   async #pushOne(accountId: string, deviceId: string, workspaceId: string, input: PushOperationInput) {
     const ciphertextBytes = decodeBase64Url(input.ciphertext)
-    if (ciphertextBytes.byteLength > this.maxObjectBytes) {
+    if (ciphertextBytes.byteLength > this.currentMaxObjectBytes()) {
       throw new ApiError({ code: 'object_too_large', message: 'Object exceeds the configured limit', statusCode: 413 })
     }
     const ciphertextHash = createHash('sha256').update(ciphertextBytes).digest('base64url')
@@ -223,7 +227,9 @@ export class SyncService {
       })
     }
     const requestHash = hashOperation(input)
+    const storageLimit = this.storageLimitResolver === undefined ? null : await this.storageLimitResolver(accountId)
     const result = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       // Serialize mutations at workspace granularity. Locking only the object row is
       // insufficient for the first write because no row exists yet, and it also
       // lets an idempotent retry overtake the transaction that records its result.
@@ -293,6 +299,13 @@ export class SyncService {
         }
       }
 
+      await this.usage?.applyCurrentObject(tx, {
+        accountId,
+        previousBytes: current === undefined ? 0n : BigInt(decodeBase64Url(current.ciphertext).byteLength),
+        previousActive: current !== undefined && current.deletedAt === null,
+        nextBytes: BigInt(ciphertextBytes.byteLength), nextActive: !input.delete, storageLimit,
+      })
+
       const revision = (actual ?? 0n) + 1n
       const [sequenceRow] = await tx.update(workspaces).set({
         latestSequence: sql`${workspaces.latestSequence} + 1`,
@@ -350,6 +363,10 @@ export class SyncService {
       }).catch(() => undefined)
     }
     return result
+  }
+
+  private currentMaxObjectBytes(): number {
+    return typeof this.maxObjectBytes === 'function' ? this.maxObjectBytes() : this.maxObjectBytes
   }
 
   async pull(accountId: string, workspaceId: string, after: string, limit: number) {

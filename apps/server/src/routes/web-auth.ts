@@ -1,13 +1,15 @@
-import { timingSafeEqual } from 'node:crypto'
+import { createHmac } from 'node:crypto'
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox'
 import type { FastifyReply } from 'fastify'
-import { Type } from '@sinclair/typebox'
+import { type Static, Type } from '@sinclair/typebox'
 import type { AppConfig } from '../config.js'
 import { isAllowedDevelopmentWebOrigin } from '../development-origin.js'
 import { ApiError } from '../errors.js'
 import type { AuthService } from '../auth/service.js'
 import type { WebAccountSession, WebSessionService } from '../auth/web-session-service.js'
 import type { AdminService } from '../admin/service.js'
+import type { DeploymentService } from '../deployment/service.js'
+import type { RiskService } from '../risk/service.js'
 import { NullableTimestamp, Timestamp } from './api-schemas.js'
 
 export const WEB_SESSION_COOKIE = 'notegen_session'
@@ -32,40 +34,64 @@ export function createWebAuthRoutes(
   auth: AuthService,
   webSessions: WebSessionService,
   admin?: AdminService,
+  deployment?: DeploymentService,
+  risk?: RiskService,
 ): FastifyPluginAsyncTypebox {
   return async function webAuthRoutes(app) {
     app.post('/v1/web/auth/register', {
       config: { rateLimit: {
         max: 5, timeWindow: '1 minute',
-        keyGenerator: (request) => loginRateKey(request.ip, request.body),
+        keyGenerator: (request) => loginRateKey(config.authSecret, request.ip, request.body),
       } },
       schema: {
-        body: Type.Intersect([CredentialsBody, Type.Object({ setupToken: Type.Optional(Type.String()) })]),
+        body: CredentialsBody,
         response: { 201: AccountResponse },
       },
     }, async (request, reply) => {
       assertTrustedOrigin(config, request.headers.origin)
-      if (config.registrationMode !== 'open' && !safeEqual(request.body.setupToken, config.setupToken)) {
+      // Hosted identities have an email-verification lifecycle and must use
+      // the dedicated flow. A persisted policy mistake must not reopen this
+      // generic username/password endpoint merely because it says public.
+      if (config.deploymentMode === 'hosted') {
+        throw new ApiError({
+          code: 'email_registration_required', message: 'Hosted registration must use email verification', statusCode: 403,
+        })
+      }
+      if (deployment?.canRegisterNormally() !== true) {
         throw new ApiError({ code: 'registration_closed', message: 'Registration is closed', statusCode: 403 })
       }
-      const account = await auth.registerAccount(request.body.login, request.body.password)
-      const session = await webSessions.create(account.id, sessionContext(request))
-      setSessionCookies(config, reply, session)
-      return reply.status(201).send({ account })
+      try {
+        await risk?.enforceIdentityAttempt({ action: 'registration', ip: request.ip, login: request.body.login })
+        const account = await auth.registerAccount(request.body.login, request.body.password)
+        const session = await webSessions.create(account.id, sessionContext(request))
+        setSessionCookies(config, reply, session)
+        await recordWebAuthRiskEvent(risk, request, 'authentication.registration', 'allowed', undefined, account.id)
+        return reply.status(201).send({ account })
+      } catch (error) {
+        await recordWebAuthRiskEvent(risk, request, 'authentication.registration', 'rejected', error, undefined)
+        throw error
+      }
     })
 
     app.post('/v1/web/auth/login', {
       config: { rateLimit: {
         max: 10, timeWindow: '1 minute',
-        keyGenerator: (request) => loginRateKey(request.ip, request.body),
+        keyGenerator: (request) => loginRateKey(config.authSecret, request.ip, request.body),
       } },
       schema: { body: CredentialsBody, response: { 200: AccountResponse } },
     }, async (request, reply) => {
       assertTrustedOrigin(config, request.headers.origin)
-      const account = await auth.authenticateAccount(request.body.login, request.body.password, request.body.totpCode)
-      const session = await webSessions.create(account.id, sessionContext(request))
-      setSessionCookies(config, reply, session)
-      return { account }
+      try {
+        await risk?.enforceIdentityAttempt({ action: 'login', ip: request.ip, login: request.body.login })
+        const account = await auth.authenticateAccount(request.body.login, request.body.password, request.body.totpCode)
+        const session = await webSessions.create(account.id, sessionContext(request), account.credentialEpoch)
+        setSessionCookies(config, reply, session)
+        await recordWebAuthRiskEvent(risk, request, 'authentication.login', 'allowed', undefined, account.id)
+        return { account }
+      } catch (error) {
+        await recordWebAuthRiskEvent(risk, request, 'authentication.login', 'rejected', error, undefined)
+        throw error
+      }
     })
 
     app.get('/v1/web/session', {
@@ -186,6 +212,22 @@ export function createWebAuthRoutes(
   }
 }
 
+async function recordWebAuthRiskEvent(
+  risk: RiskService | undefined,
+  request: { body: Static<typeof CredentialsBody>, id: string, ip: string, headers: { 'user-agent'?: string | string[] }, log: { warn: (value: unknown, message: string) => void } },
+  eventType: 'authentication.login' | 'authentication.registration',
+  outcome: 'allowed' | 'rejected',
+  error: unknown,
+  accountId: string | undefined,
+): Promise<void> {
+  if (risk === undefined) return
+  await risk.recordEvent({
+    eventType, login: request.body.login, requestId: request.id, ip: request.ip,
+    ...(typeof request.headers['user-agent'] === 'string' ? { userAgent: request.headers['user-agent'] } : {}),
+    accountId, outcome, reasonCode: error instanceof ApiError ? error.code : undefined,
+  }).catch((auditError: unknown) => request.log.warn({ err: auditError }, 'Failed to record authentication risk event'))
+}
+
 export async function requireWebSession(
   token: string | undefined,
   webSessions: WebSessionService,
@@ -202,7 +244,7 @@ export function requireCsrf(
   webSessions.verifyCsrf(session, cookie, typeof header === 'string' ? header : undefined)
 }
 
-function setSessionCookies(
+export function setSessionCookies(
   config: AppConfig,
   reply: FastifyReply,
   session: { sessionToken: string; csrfToken: string; expiresAt: Date },
@@ -230,7 +272,7 @@ function clearSessionCookies(
   reply.clearCookie(WEB_CSRF_COOKIE, options)
 }
 
-function assertTrustedOrigin(config: AppConfig, origin: string | undefined): void {
+export function assertTrustedOrigin(config: AppConfig, origin: string | undefined): void {
   if (origin === undefined) return
   if (origin !== config.publicBaseUrl
     && origin !== config.webPublicBaseUrl
@@ -240,20 +282,13 @@ function assertTrustedOrigin(config: AppConfig, origin: string | undefined): voi
   }
 }
 
-function safeEqual(value: string | undefined, expected: string): boolean {
-  if (value === undefined) return false
-  const left = Buffer.from(value)
-  const right = Buffer.from(expected)
-  return left.length === right.length && timingSafeEqual(left, right)
-}
-
-function sessionContext(request: { ip: string, headers: { 'user-agent'?: string | undefined } }) {
+export function sessionContext(request: { ip: string, headers: { 'user-agent'?: string | undefined } }) {
   return { ip: request.ip, ...(request.headers['user-agent'] === undefined ? {} : { userAgent: request.headers['user-agent'] }) }
 }
 
-function loginRateKey(ip: string, body: unknown): string {
+function loginRateKey(secret: string, ip: string, body: unknown): string {
   const login = typeof body === 'object' && body !== null && 'login' in body && typeof body.login === 'string'
     ? body.login.trim().toLowerCase()
     : 'unknown'
-  return `${ip}:${login}`
+  return `v1:${createHmac('sha256', secret).update(`auth-rate-key:${ip}:${login}`).digest('base64url')}`
 }

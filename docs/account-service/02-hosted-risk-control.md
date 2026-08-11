@@ -1,6 +1,6 @@
 # 02：官方托管风控与滥用防护技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；生产 Staff OIDC、风险策略与运营控制台移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 默认适用形态：`hosted`
 - 前置依赖：[00 共享基础](00-shared-foundation.md)；公开邮箱注册前需 [01 邮箱身份](01-hosted-email-identity.md)
@@ -91,7 +91,7 @@ risk_provider_events
   primary key(provider, provider_event_id)
 ```
 
-`subject_ref` 按 kind 校验：account/device 使用可验证内部 ID，identity/IP 使用带 `key_id` 的版本化 HMAC；current/previous secret 重叠避免轮换瞬间拆分限流桶。Active restriction 用 partial unique 或同事务合并，不能叠出不确定状态。Provider inbox 复用 00 durable job/lease。
+`subject_ref` 按 kind 校验：account/device 使用可验证内部 ID，identity/IP 使用带 `key_id` 的版本化 HMAC；current/previous secret 重叠避免轮换瞬间拆分限流桶。注册/登录 route 的 PostgreSQL rate bucket 已从原始 IP/login 组合改为版本化 HMAC，并以 IP prefix、identity、IP+identity 和客户端提交的 device ID 四个独立 bucket 共同判定，任一超过短窗口阈值即返回带 `Retry-After` 的 429；HMAC key rotation 双读仍待 PR-02B。Active restriction 用 partial unique 或同事务合并，不能叠出不确定状态。Provider inbox 复用 00 durable job/lease。
 
 不把每次成功同步都写成高基数永久事件。常规速率使用现有 rate-limit buckets 或按时间桶聚合；`risk_events` 保存拒绝、挑战、锁定、解锁和抽样成功事件，按数据治理计划设置保留期。
 
@@ -122,8 +122,8 @@ type EnforcementResult = 'allow' | 'challenge' | 'throttle' | 'read-only' | 'den
 
 ### 5.1 基础限流键
 
-- 注册：IP 前缀、邮箱域、邮箱哈希、全局。
-- 登录：IP 前缀、identity hash、`IP + identity`；成功后逐步衰减失败惩罚。
+- 注册：IP 前缀、邮箱域、邮箱哈希、全局；原生客户端另使用其提交的 device ID。
+- 登录：IP 前缀、identity hash、`IP + identity`；原生客户端另使用其提交的 device ID，成功后逐步衰减失败惩罚。
 - 找回：IP、identity hash、账号、provider recipient。
 - 设备 code：IP、user code hash、device ID。
 - Blob：账号、设备、并发上传数、分钟字节数。
@@ -195,6 +195,14 @@ RiskDecision 输出逐 operation scope，不能用“风险锁定通常允许 Pu
 客户端严格消费 account context 的 `sync.pull/sync.push/account.export/account.delete` action，保留 outbox、停止高频重试，限制解除或 revision 更新后恢复。
 
 ## 8. 管理与人工复核
+
+当前内部测试已提供下列独立 Staff API，均不接受客户 token 或 `accounts.isAdmin`：
+
+- `GET /v1/internal/staff/risk/accounts/:accountId/restrictions`：要求 `risk.read`，仅返回当前 active restriction。
+- `POST /v1/internal/staff/risk/accounts/:accountId/restrictions`：要求 `risk.manage`；长期、`deny`/`lock` 另要求 `risk.admin` 及 `step-up` 或 `phishing-resistant` Staff assertion，对相同 account/scope/action 在同一账户咨询锁内创建或更新。
+- `DELETE /v1/internal/staff/risk/restrictions/:restrictionId`：要求 `risk.manage` 与高保证 Staff assertion；解除长期、`deny`/`lock` 或 provider/automatic restriction 另要求 `risk.admin`。
+
+每次写入同步写入 append-only Staff 审计，并使用独立 `created_by_staff_id` / `revoked_by_staff_id` 归属字段。路由已消费新鲜 `step-up` 或 phishing-resistant Staff assertion；真实 OIDC edge、操作台 UI 与设备/identity/IP 主体处置仍未实现。
 
 一期管理页提供：
 

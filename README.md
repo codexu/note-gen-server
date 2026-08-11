@@ -11,12 +11,12 @@ apps/server  Fastify 同步与认证 API
 apps/web     Next.js + shadcn/ui 账号管理页面
 ```
 
-生产环境中 Web 静态导出后由 Fastify 同源托管，因此仍然只需要一个 NoteGen Server 容器。
+生产环境中 Web 静态导出后可由 Fastify 同源托管；本地开发时 API 与 Web 分别运行。
 
 当前项目已完成首个可部署的服务端基线，详细方案见：
 
 - [同步服务技术规格](docs/sync-server-spec.md)
-- [Docker 部署与运维](docs/operations.md)
+- [本地运行与运维](docs/operations.md)
 - [NoteGen 客户端接入协议](docs/client-protocol.md)
 - [NoteGen 接入与配置同步体验](docs/notegen-integration.md)
 - [部署后的个人验收用例](docs/self-test.md)
@@ -29,8 +29,7 @@ apps/web     Next.js + shadcn/ui 账号管理页面
 - Drizzle ORM
 - PostgreSQL
 - WebSocket
-- Docker Compose
-- 本地 Volume 与 S3-compatible 附件存储
+- 本地文件系统与 S3-compatible 附件存储
 
 ## 当前实现
 
@@ -40,7 +39,7 @@ apps/web     Next.js + shadcn/ui 账号管理页面
 - PostgreSQL/Drizzle 核心同步数据模型和版本化迁移
 - 存活、就绪检查与协议能力协商
 - 文件系统与 S3-compatible Blob Storage 适配器
-- Docker Compose 与非 root 运行镜像
+- 本地进程运行与环境变量配置
 
 - 封闭/开放注册、Argon2id 密码、JWT Access Token 与 Refresh Token 轮换
 - 设备会话、撤销和内部同步空间的账号隔离
@@ -64,6 +63,21 @@ apps/web     Next.js + shadcn/ui 账号管理页面
 
 ## 本地开发
 
+先启动本地 PostgreSQL 17，并创建应用数据库和拥有者。以下命令仅需在首次初始化时执行：
+
+```bash
+createuser notegen
+createdb -O notegen notegen
+```
+
+复制并填写本地配置。`DATABASE_URL`、`AUTH_SECRET` 与 `SETUP_TOKEN` 必须设置为自己的值：
+
+```bash
+cp .env.example .env
+```
+
+然后安装依赖并启动 API 与 Web：
+
 ```bash
 pnpm install
 pnpm dev
@@ -72,11 +86,7 @@ pnpm dev
 `pnpm dev` 会在启动服务端前自动执行尚未应用的数据库迁移。只有设置
 `MIGRATE_ON_START=false`，或需要单独排查迁移时，才需要手动运行 `pnpm db:migrate`。
 
-本地需要开放注册时，可以将配置传给 Turbo 启动的服务端：
-
-```bash
-REGISTRATION_MODE=open pnpm dev
-```
+本地完成首位管理员初始化后，可在 Web 后台的“实例运维 → 注册策略”中选择关闭、仅邀请或公开注册；该策略保存在数据库中，无需修改环境变量或重启服务。
 
 也可以分别启动：
 

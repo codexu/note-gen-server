@@ -33,6 +33,10 @@ export class ApiError extends Error {
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error: FastifyError | ApiError, request, reply) => {
     if (error instanceof ApiError) {
+      const retryAfter = error.details?.retryAfterSeconds
+      if (typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter >= 0) {
+        reply.header('retry-after', String(Math.ceil(retryAfter)))
+      }
       const body: ApiErrorBody = {
         code: error.code,
         message: error.message,

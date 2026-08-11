@@ -692,21 +692,15 @@ blob-data Docker Volume
 
 ### 18.2 配置
 
-配置仅来自环境变量或挂载文件，不把秘密提交到仓库。至少包括：
+启动配置和秘密来自环境变量或挂载文件，不把秘密提交到仓库。业务运行参数由管理员在 Web 后台持久化管理。启动配置至少包括：
 
 ```text
+NODE_ENV
 DATABASE_URL
 PUBLIC_BASE_URL
 AUTH_SECRET
-REGISTRATION_MODE
-BLOB_STORAGE_DRIVER
+SETUP_TOKEN
 BLOB_STORAGE_PATH
-MAX_OBJECT_BYTES
-MAX_BLOB_BYTES
-CHANGE_RETENTION_DAYS
-VERSION_RETENTION_DAYS
-TOMBSTONE_RETENTION_DAYS
-LOG_LEVEL
 ```
 
 ### 18.3 迁移
@@ -979,7 +973,7 @@ CRDT 适合高频并发文档，不适合替代附件、设置和普通记录的
 2. API Schema 使用 TypeBox，`/openapi.json` 是 HTTP 接口事实来源。
 3. 客户端内容加密采用 XChaCha20-Poly1305 envelope；服务端只验证密文哈希。
 4. 密钥封装支持 passphrase、recovery 和 device 三种 envelope；二维码配对属于客户端交互。
-5. 默认 change、历史和 tombstone 保留时间均为 90 天，可通过环境变量调整。
+5. 默认 change、历史和 tombstone 保留时间均为 90 天，由管理员在 Web 后台调整。
 6. 自托管首次注册使用 Setup Token，默认关闭公开注册。
 7. 文件系统和 S3-compatible Blob Storage Adapter 均已实现。
 8. PostgreSQL `LISTEN/NOTIFY` 已用于跨服务实例实时事件广播。

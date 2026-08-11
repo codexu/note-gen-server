@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { access, mkdir, open, readdir, rename, rm } from 'node:fs/promises'
+import { access, link, mkdir, open, readdir, rm } from 'node:fs/promises'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -53,7 +53,11 @@ export class FilesystemBlobStorage implements BlobStorage {
         output.once('finish', resolvePromise)
         output.once('error', reject)
       })
-      await rename(temporaryTarget, target)
+      // `rename` replaces an existing target on POSIX, which would violate the
+      // immutable ready-object contract. A hard-link publish is atomic within
+      // this filesystem and fails with EEXIST if another writer won the key.
+      await link(temporaryTarget, target)
+      await rm(temporaryTarget, { force: true })
       await this.abortUpload(storageKey, providerUploadId)
     } catch (error) {
       output.destroy()

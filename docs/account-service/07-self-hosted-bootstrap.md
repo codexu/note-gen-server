@@ -1,6 +1,6 @@
 # 07：自托管首次初始化技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；后续生产发布动作由 [13 生产上线准备](13-production-readiness.md) 统一编排）
 - 日期：2026-08-11
 - 适用形态：`self-hosted`
 - 前置依赖：[00 共享部署策略与能力基础](00-shared-foundation.md)
@@ -74,12 +74,11 @@ bootstrap_credentials
 
 ```text
 node dist/cli/setup.js status
-node dist/cli/setup.js create-admin --login <name>
 node dist/cli/setup.js issue-web-token --ttl 30m
-node dist/cli/setup.js doctor
+node dist/cli/setup.js repair-admin --login <name> --password-stdin --confirm=REPAIR_ADMIN
 ```
 
-- `create-admin` 从 TTY 安全读取密码或接受受限 secret file descriptor，不允许密码出现在命令行历史。
+- `repair-admin` 仅限 ready/self-hosted 且持久 `admin_repair_required=true` 的实例；密码必须从 stdin 读取，并要求显式确认字符串，不能出现在命令行历史。它不重新打开普通注册。
 - 容器非交互场景优先 issue 一次性 Web token。
 - CLI 使用同一 Registration/BootstrapService，不直接写表。
 

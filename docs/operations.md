@@ -2,38 +2,45 @@
 
 ## 启动
 
+确保本机 PostgreSQL 已启动。首次初始化时创建应用角色与数据库：
+
+```bash
+createuser notegen
+createdb -O notegen notegen
+```
+
 复制 `.env.example` 为 `.env`，至少修改：
 
-- `POSTGRES_PASSWORD`
 - `DATABASE_URL`
 - `AUTH_SECRET`
 - `SETUP_TOKEN`
 - `PUBLIC_BASE_URL`
-- `SERVER_NAME`
-- `CORS_ORIGINS`
-- `BACKUP_PATH`
 
 然后运行：
 
 ```bash
-docker compose up -d --build
-docker compose ps
+pnpm install
+pnpm dev
 curl --fail http://localhost:3789/health/ready
 ```
 
-可使用 `openssl rand -hex 32` 分别生成数据库密码、`AUTH_SECRET` 和 `SETUP_TOKEN`；十六进制密码可直接安全放入示例中的 PostgreSQL URL。
+可使用 `openssl rand -hex 32` 分别生成数据库密码、`AUTH_SECRET` 和 `SETUP_TOKEN`；十六进制数据库密码可直接安全放入 PostgreSQL URL。
 
-容器入口会先执行全部 Drizzle migration，成功后才启动 HTTP 服务。
+`pnpm dev` 会先执行全部 Drizzle migration，成功后才启动 HTTP 服务。
+
+实例名称、对象与附件大小上限、同步数据保留期、邮件默认语言、账号删除周期和完整 SMTP 配置由管理员在 Web 后台“实例运维”中维护，保存后立即生效。SMTP 密码使用 `AUTH_SECRET` 派生密钥加密保存，接口只返回是否已配置，不会回显。升级时服务会把旧版本 env 中的同名值一次性迁入数据库；迁移完成后继续修改这些 env 不会覆盖后台配置。
+
+监听地址、数据库连接、公开 URL、可信代理、认证密钥、部署模式以及 Blob 存储驱动仍属于启动配置，继续保留在 env。S3、托管模式和高级进程调优变量仍受服务端支持，但不再塞进面向普通自托管部署的 `.env.example`；只有实际使用对应部署形态时才需要设置。
 
 `PUBLIC_BASE_URL` 必须是客户端实际访问的 HTTPS 地址。首次启动会在 PostgreSQL 中生成稳定的 `instanceId`；它包含在数据库备份中，客户端用它识别服务器是否被意外重置。
 
-`DATABASE_URL` 中的密码必须与 `POSTGRES_PASSWORD` 一致；若密码包含 `@`、`:`、`/`、`?` 等 URL 保留字符，必须进行百分号编码。
+若 `DATABASE_URL` 中的密码包含 `@`、`:`、`/`、`?` 等 URL 保留字符，必须进行百分号编码。
 
 反向代理与 server 容器处于受信网络、且外部无法绕过代理直连时设置 `TRUST_PROXY=true`，这样登录限流才能按真实客户端 IP 生效。若服务端端口直接暴露公网，不要开启该选项。
 
 ## 首个账号
 
-默认 `REGISTRATION_MODE=closed`。打开服务器首页，切换到注册并填写部署时配置的 Setup Token；API 注册也可以继续使用 `X-Setup-Token`。数据库中的首个账号会自动成为系统管理员；已有部署升级时，如尚无管理员，则按创建时间选择最早账号。创建账号后应轮换 `SETUP_TOKEN`，并继续保持封闭注册。
+空实例默认仅允许使用部署时配置的 Setup Token 创建首位管理员；初始化完成后，注册策略由 Web 后台“实例运维”持久化管理，可选择关闭、仅邀请或公开注册。数据库中的首个账号会自动成为系统管理员；已有部署升级时，如尚无管理员，则按创建时间选择最早账号。创建账号后应轮换 `SETUP_TOKEN`。
 
 系统管理员可以在 Web 后台的“系统管理”中授予或移除其他账号的管理员权限、停用或恢复账号，并查看后台操作审计。停用使用独立的 `suspended_at` 状态，不会进入账号删除保留期；账号申请删除仍由 `disabled_at` 和维护任务处理。系统会阻止停用、降级或删除最后一个可用管理员。
 
@@ -43,7 +50,7 @@ curl --fail http://localhost:3789/health/ready
 
 登录、注册和设备授权限流计数保存在 PostgreSQL，多个服务实例共享同一限制窗口。定时维护使用 PostgreSQL advisory lock，确保同一时刻只有一个实例执行清理。
 
-同一个容器会在根路径提供账号管理 Web；`/v1/*`、`/health/*` 和 Web 使用同一域名。若设置 `WEB_ENABLED=false`，只关闭静态页面，不影响账号密码登录和同步 API。
+生产构建中，服务端可在根路径提供账号管理 Web；本地开发时 Web 默认运行在 `3790` 端口。若设置 `WEB_ENABLED=false`，只关闭静态页面，不影响账号密码登录和同步 API。
 
 自部署保持 `DEPLOYMENT_MODE=self-hosted`。运营官方服务器时设为 `hosted`，Web 会显示托管身份；同步协议、镜像和数据库结构不分叉。
 
@@ -68,42 +75,28 @@ sync.example.com {
 
 ## 多实例
 
-多个 server 容器共享同一个 PostgreSQL 时，实时事件通过 `LISTEN/NOTIFY` 广播，不需要 Redis。多实例部署必须同时满足：
+多个 server 进程共享同一个 PostgreSQL 时，实时事件通过 `LISTEN/NOTIFY` 广播，不需要 Redis。多实例部署必须同时满足：
 
 - 所有实例使用相同的 `AUTH_SECRET`、`PUBLIC_BASE_URL` 和数据库。
 - Blob 使用同一个 S3-compatible Bucket；本地文件系统 Volume 不适合跨主机扩容。
 - 反向代理支持普通负载均衡；WebSocket 不要求粘性会话。
 - migration 仍应作为部署前的单独步骤执行，避免所有副本同时承担升级工作。
 
-多实例发布时先用同版本镜像执行一次 `node dist/database/migrate.js`，再以 `MIGRATE_ON_START=false` 启动所有服务副本。单机 Compose 保持默认值 `true` 即可。
+多实例发布时先由一个实例执行迁移，再以 `MIGRATE_ON_START=false` 启动其余服务副本。单机本地开发保持默认值 `true` 即可。
 
 ## 备份
 
-系统管理接口支持创建 PostgreSQL custom-format 备份，并通过后台任务查询进度：
+旧的网页备份接口和 `scripts/backup.sh` 已停用。它们只能生成数据库 dump 或普通 Blob 拷贝，缺少统一 manifest、认证签名、加密、版本固定与离线恢复预检；不得把该类文件标记为可恢复备份，也不得为新备份继续使用它们。
 
-- `POST /v1/web/admin/backups`：创建备份任务。
-- `GET /v1/web/admin/jobs/:jobId`：查询任务状态。
-- `GET /v1/web/admin/backups`：查看最近备份。
-- `GET /v1/web/admin/backups/:backupId/download`：下载备份。
-- `DELETE /v1/web/admin/backups/:backupId`：删除备份。
-
-服务运行环境需要安装与 PostgreSQL 兼容的 `pg_dump`，备份写入 `BACKUP_PATH`。数据库备份不包含文件系统 Blob，Blob 仍需独立快照。
-
-默认文件系统 Blob 后端可使用：
-
-```bash
-scripts/backup.sh /absolute/path/to/backup
-```
-
-脚本拒绝覆盖非空目录，并在单机 Compose 部署中短暂停止 server 容器，以获得 PostgreSQL dump 与本地 Blob 的一致视图；结束或异常退出时会恢复原本正在运行的服务。备份包含 custom dump、加密 Blob、UTC 时间和数据库 dump 校验和。
-
-S3 或多实例部署不能依赖此单机脚本获得全局停写，应使用维护窗口或外部编排停止全部写入实例，配合对象存储版本/快照能力和 PostgreSQL dump。
+备份与恢复仅按 [账号服务备份规格](account-service/10-self-hosted-backup-restore.md) 的统一离线流程执行。当前已提供 run/drill/restore-marker 数据模型、启动时 credential epoch fence、bootstrap reissue guard，以及只读的 detached-signature/trust/artifact 校验器；统一 artifact runner、加密、Blob snapshot 与 offline restore CLI 尚在交付中，因此生产部署者需要继续使用经过本地审计的外部灾备流程，并明确其未获得本项目的 verified-backup 认定。
 
 ## 恢复
 
-恢复会覆盖实例数据，因此不提供自动执行的无确认脚本。标准流程：
+恢复会覆盖实例数据，因此不提供自动执行的无确认脚本。统一离线恢复工具交付前，不要按历史步骤直接覆盖运行中的实例；它们没有写入 restore marker，无法保证旧凭据、旧设备与旧客户端被 fencing。历史 artifact 只能在隔离副本中由运维人员人工取证。
 
-1. 停止 `server` 容器并确认备份目录。
+统一工具的目标流程将是：
+
+1. 停止 `server` 进程并确认备份目录。
 2. 对当前 PostgreSQL 和 Blob Volume 再做一次应急备份。
 3. 使用 `pg_restore --clean --if-exists` 恢复 `database.dump`。
 4. 将备份的 `blobs` 内容恢复到 Blob Volume。
@@ -114,26 +107,31 @@ S3 或多实例部署不能依赖此单机脚本获得全局停写，应使用�
 
 ## 手动维护
 
-后台每小时自动执行一次小批量维护，也可在容器中手动执行：
+升级或统一备份进入维护窗口时，可从运行 server 的本机终端显式切换全实例写屏障。`read_only` 拒绝所有业务变更但允许 Access refresh rotation；`write_drain` 连 refresh 也拒绝。两者都会让 HTTP 变更请求返回 `503 server_maintenance` 与 `Retry-After`，并暂停定时清理任务。命令有固定 confirmation，避免脚本误切换：
 
 ```bash
-docker compose exec server node dist/cli/maintenance.js
+pnpm --filter @notegen/server maintenance:mode -- status
+pnpm --filter @notegen/server maintenance:mode -- enable --mode write_drain --reason 'pre-upgrade' --confirm ENABLE_MAINTENANCE
+pnpm --filter @notegen/server maintenance:mode -- disable --confirm DISABLE_MAINTENANCE
+```
+
+这是维护围栏的初始切片，尚未提供跨实例 ack、在途 Blob lease 计数或 Web 管理入口。realtime `document.update` 会在下一条可变消息时收到 `server.maintenance` 后关闭；尚未维护状态变更时主动枚举并断开所有已连接 WebSocket。不要把 `write_drain` 的当前状态误解为已完成完整 backup/upgrade drain。
+
+后台每小时自动执行一次小批量维护，也可在本机手动执行：
+
+```bash
+pnpm --filter @notegen/server maintenance
 ```
 
 维护任务包括：过期 Web Session、设备授权、Bootstrap/分片会话、超过 7 天的已完成上传会话、change log、非当前历史版本、幂等操作记录、墓碑、无引用 Blob、到期 Workspace 和已停用账号清理。
 
-`VERSION_RETENTION_DAYS` 不能小于 `CHANGE_RETENTION_DAYS`，否则保留的 change 可能失去对应版本；服务启动时会拒绝这种配置。
+“版本保留天数”不能小于“变更保留天数”，否则保留的 change 可能失去对应版本；管理后台会拒绝这种配置。
 
-软删除 Workspace 在 `TOMBSTONE_RETENTION_DAYS` 内可以恢复；到期后维护任务先删除物理 Blob，再级联删除数据库记录。同一进程不会并发执行两轮维护。
+软删除 Workspace 在后台配置的“删除标记保留天数”内可以恢复；到期后维护任务先删除物理 Blob，再级联删除数据库记录。同一进程不会并发执行两轮维护。
 
 ## 升级
 
-```bash
-scripts/backup.sh /absolute/path/to/pre-upgrade-backup
-docker compose pull
-docker compose up -d --build
-docker compose logs -f server
-```
+停止本机服务后，更新依赖、执行迁移并按你的进程管理方式重新启动。统一备份 runner 交付前，请使用经本地审计的外部灾备流程。
 
 若数据库 Schema 与服务端版本不兼容，服务不会进入 ready 状态。不要跳过 migration 或手工修改 Drizzle journal。
 
@@ -150,8 +148,8 @@ docker compose logs -f server
 
 - `/v1/capabilities` 中的 `publicBaseUrl`、`serverName` 和协议范围正确。
 - 外部 HTTPS 与 WSS 均可用，证书链完整。
-- `AUTH_SECRET`、数据库密码、Setup Token 和 S3 凭据来自秘密管理，不写入 Compose 文件。
-- `REGISTRATION_MODE=closed`，首个账号创建后已经轮换 Setup Token。
+- `AUTH_SECRET`、数据库密码、Setup Token 和 S3 凭据来自秘密管理，不写入版本控制文件。
+- 首位管理员已完成初始化，Setup Token 已轮换；日常注册策略已在“实例运维”中确认。
 - PostgreSQL 与 Blob 都有独立备份，并完成过一次恢复抽查。
 - Prometheus 已抓取 `/metrics`，日志和磁盘容量有告警。
 - 使用 NoteGen 新设备完成登录、解锁、bootstrap、Push、附件续传和设备撤销验证。

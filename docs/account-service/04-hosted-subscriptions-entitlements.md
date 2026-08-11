@@ -1,6 +1,6 @@
 # 04：官方托管订阅、计费与权益技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；真实 BillingProvider、商户主体、checkout 与 webhook 上线移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`hosted`；`self-hosted` 不注册计费路由
 - 前置依赖：[00 共享基础](00-shared-foundation.md)、[01 邮箱身份](01-hosted-email-identity.md)、[02 风控](02-hosted-risk-control.md)、[03 用量与配额](03-hosted-usage-quotas.md)；上线前完成 05 Pilot Gate，任何真实付款前再完成 05D billing 删除/fencing handler
@@ -34,7 +34,7 @@
 
 ## 3. 供应商决策门
 
-实现前必须选择一个首发 BillingProvider，并记录：可服务地区、商户主体、税务/发票职责、退款/争议能力、Webhook 重放、客户门户、数据区域和费用。支付必须使用 provider-hosted redirect/portal；即使 NoteGen 不接触卡号，也需记录 PCI shared-responsibility/适用 SAQ 评估、provider 尽调和年度合规复核，不能宣称“完全不在 PCI 范围”。核心规格保持 provider-neutral：
+当前只允许内部测试：`BILLING_PROVIDER=mock`、`BILLING_PROVIDER_ENVIRONMENT=test`，且 merchant entity 标记为 `internal-test-only`。mock 不创建真实 customer、checkout 或付款；`billing.subscription` capability 保持关闭。生产实现前仍必须选择一个首发 BillingProvider，并记录可服务地区、商户主体、税务/发票职责、退款/争议能力、Webhook 重放、客户门户、数据区域和费用。支付必须使用 provider-hosted redirect/portal；即使 NoteGen 不接触卡号，也需记录 PCI shared-responsibility/适用 SAQ 评估、provider 尽调和年度合规复核，不能宣称“完全不在 PCI 范围”。核心规格保持 provider-neutral：
 
 ```ts
 interface BillingProvider {

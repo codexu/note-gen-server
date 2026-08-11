@@ -5,6 +5,7 @@ import {
   CircleCheckIcon,
   HistoryIcon,
   LaptopIcon,
+  LockKeyholeIcon,
   ScrollTextIcon,
   ServerIcon,
   ShieldCheckIcon,
@@ -36,10 +37,15 @@ import {
   ItemTitle,
 } from "@/components/ui/item"
 import { Spinner } from "@/components/ui/spinner"
+import { Skeleton } from "@/components/ui/skeleton"
+import { ThemeToggle } from "@/components/theme-toggle"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   ContentBrowser, type ContentStatus, type PrimaryContentKind,
 } from "@/components/content-browser"
+import { ServiceCenter } from "@/components/service-center"
+import { OperationsCenter } from "@/components/operations-center"
+import { DeviceConnection } from "@/components/device-connection"
 import {
   apiRequest,
   isApiRequestError,
@@ -63,6 +69,7 @@ import {
   type WebWorkspaceKey,
 } from "@/lib/api"
 import { formatRelativeTime as formatDate } from "@/lib/relative-time"
+import { cn } from "@/lib/utils"
 import {
   decodeWorkspaceObject, unlockManagedWorkspaceKeys, type DecodedSyncObject,
 } from "@/lib/workspace-content"
@@ -89,7 +96,11 @@ export function AccountPortal() {
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
   const [deletingObjectId, setDeletingObjectId] = useState<string | null>(null)
   const [creatingTestData, setCreatingTestData] = useState(false)
-  const [section, setSection] = useState<AdminSection>("overview")
+  const [section, setSection] = useState<AdminSection>(() => (
+    typeof window !== "undefined" && window.location.pathname.startsWith("/connect")
+      ? "connect"
+      : "overview"
+  ))
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null)
   const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([])
   const [adminAccountTotal, setAdminAccountTotal] = useState(0)
@@ -458,24 +469,48 @@ export function AccountPortal() {
 
   if (loading) {
     return (
-      <div className="flex min-h-svh items-center justify-center">
-        <Spinner />
-      </div>
+      <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:p-10">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-10 w-56" />
+          <Skeleton className="h-6 w-20 rounded-full" />
+        </div>
+        <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+          <Skeleton className="min-h-105 rounded-2xl" />
+          <Skeleton className="min-h-105 rounded-2xl" />
+        </div>
+      </main>
     )
   }
 
   if (!account) {
     return (
-      <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:p-10">
+      <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:justify-center md:p-10">
         <LoginHeader capabilities={capabilities} />
         {error ? <ErrorAlert message={error} /> : null}
-        <AuthCard
-          busy={busy}
-          registrationMode={capabilities?.registrationMode ?? "closed"}
-          setBusy={setBusy}
-          onAuthenticated={handleAuthenticated}
-          onError={setError}
-        />
+        <div className="grid items-stretch gap-6 lg:grid-cols-[1.05fr_0.95fr]">
+          <Card className="hidden justify-between bg-primary text-primary-foreground lg:flex">
+            <CardHeader>
+              <Badge className="w-fit" variant="secondary">NoteGen Sync</Badge>
+              <CardTitle className="mt-6 text-3xl font-semibold tracking-tight">让同步保持清晰、可控。</CardTitle>
+              <CardDescription className="max-w-md text-primary-foreground/75">
+                在这里管理账号、设备和同步空间。敏感操作始终由服务器再次验证，而不只依赖页面状态。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              <LoginBenefit icon={ShieldCheckIcon} title="独立设备会话" description="每台设备都可以单独查看和撤销。" />
+              <LoginBenefit icon={LockKeyholeIcon} title="加密状态可见" description="托管与端到端加密工作区都会明确标识。" />
+              <LoginBenefit icon={ScrollTextIcon} title="同步记录可追溯" description="查看最近同步活动，不暴露内容秘密。" />
+            </CardContent>
+          </Card>
+          <AuthCard
+            busy={busy}
+            registrationMode={capabilities?.registrationMode ?? "closed"}
+            deploymentMode={capabilities?.deploymentMode ?? "self-hosted"}
+            setBusy={setBusy}
+            onAuthenticated={handleAuthenticated}
+            onError={setError}
+          />
+        </div>
       </main>
     )
   }
@@ -491,9 +526,22 @@ export function AccountPortal() {
       busy={busy}
       onSectionChange={setSection}
       onLogout={() => void handleLogout()}
+      onRefresh={() => {
+        if (section === "admin" && account.isAdmin) {
+          void loadAdminData()
+          return
+        }
+        if (section === "content") {
+          void loadContent()
+          return
+        }
+        void loadDashboardData()
+      }}
     >
       {error ? <ErrorAlert message={error} /> : null}
       {section === "overview" ? <OverviewSection overview={overview} /> : null}
+      {section === "services" ? <ServiceCenter /> : null}
+      {section === "operations" && account.isAdmin ? <OperationsCenter /> : null}
       {section === "content" ? (
         <ContentBrowser
           workspaces={workspaces}
@@ -550,6 +598,7 @@ export function AccountPortal() {
           onRevoke={(id) => void handleRevokeDevice(id)}
         />
       ) : null}
+      {section === "connect" ? <DeviceConnection embedded /> : null}
       {section === "security" ? <PasswordManagement initiallyEnabled={account.totpEnabled} /> : null}
       {section === "admin" && account.isAdmin ? (
         <SystemManagement
@@ -605,9 +654,19 @@ function LoginHeader({ capabilities }: { capabilities: ServerCapabilities | null
           <p className="text-sm text-muted-foreground">登录同步管理后台</p>
         </div>
       </div>
-      <Badge variant="secondary">
-        {capabilities?.deploymentMode === "hosted" ? "官方托管" : "自托管"}
-      </Badge>
+      <div className="flex items-center gap-1">
+        {capabilities ? (
+          <>
+            <Badge variant="secondary">
+              {capabilities.deploymentMode === "hosted" ? "官方托管" : "自托管"}
+            </Badge>
+            <Badge variant="outline">
+              {capabilities.registrationMode === "open" ? "开放注册" : "关闭注册"}
+            </Badge>
+          </>
+        ) : null}
+        <ThemeToggle />
+      </div>
     </header>
   )
 }
@@ -622,10 +681,32 @@ function ErrorAlert({ message }: { message: string }) {
   )
 }
 
+function LoginBenefit({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: typeof ShieldCheckIcon
+  title: string
+  description: string
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-xl bg-primary-foreground/10 p-4">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary-foreground/15">
+        <Icon />
+      </span>
+      <div className="flex flex-col gap-0.5">
+        <p className="font-medium">{title}</p>
+        <p className="text-sm text-primary-foreground/75">{description}</p>
+      </div>
+    </div>
+  )
+}
+
 function OverviewSection({ overview }: { overview: SyncOverview | null }) {
   return (
     <>
-      <Card>
+      <Card className="bg-card/90 shadow-sm">
         <CardHeader>
           <CardTitle>同步概览</CardTitle>
           <CardDescription>汇总当前账号的同步对象、附件、序列和加密状态。</CardDescription>
@@ -1544,12 +1625,14 @@ async function downloadAdminExport(scope: "accounts" | "workspaces" | "devices" 
 function AuthCard({
   busy,
   registrationMode,
+  deploymentMode,
   setBusy,
   onAuthenticated,
   onError,
 }: {
   busy: boolean
   registrationMode: "open" | "closed"
+  deploymentMode: "hosted" | "self-hosted"
   setBusy: (value: boolean) => void
   onAuthenticated: (account: Account) => Promise<void>
   onError: (message: string) => void
@@ -1559,12 +1642,34 @@ function AuthCard({
   const [password, setPassword] = useState("")
   const [setupToken, setSetupToken] = useState("")
   const [totpCode, setTotpCode] = useState("")
+  const [notice, setNotice] = useState("")
+  const canRegister = deploymentMode === "self-hosted" || registrationMode === "open"
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setBusy(true)
     onError("")
+    setNotice("")
     try {
+      if (mode === "register" && deploymentMode === "hosted") {
+        await apiRequest("/v1/web/auth/register/email", {
+          method: "POST",
+          body: JSON.stringify({ email: login, password }),
+        })
+        setPassword("")
+        setNotice("验证邮件已进入内部测试投递流程。验证完成后即可登录。")
+        return
+      }
+      if (mode === "register" && deploymentMode === "self-hosted" && setupToken.trim()) {
+        const result = await apiRequest<{ account: Account }>("/v1/setup/complete", {
+          method: "POST",
+          body: JSON.stringify({ login, password, token: setupToken.trim() }),
+        })
+        setPassword("")
+        setSetupToken("")
+        await onAuthenticated(result.account)
+        return
+      }
       const body = mode === "register"
         ? { login, password, ...(setupToken.trim() ? { setupToken: setupToken.trim() } : {}) }
         : { login, password, ...(totpCode.trim() ? { totpCode: totpCode.trim() } : {}) }
@@ -1584,22 +1689,26 @@ function AuthCard({
   }
 
   return (
-    <Card className="mx-auto w-full max-w-md">
+    <Card className="mx-auto w-full max-w-md bg-card/90 shadow-sm lg:mx-0 lg:max-w-none">
       <CardHeader>
         <CardTitle>连接你的同步账号</CardTitle>
-        <CardDescription>同一账号可连接多个 NoteGen 设备。</CardDescription>
+        <CardDescription>
+          {deploymentMode === "hosted" && !canRegister
+            ? "当前官方托管测试实例暂未开放注册。"
+            : "同一账号可连接多个 NoteGen 设备。账号密码不会用于解密端到端加密工作区。"}
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <Tabs value={mode} onValueChange={(value) => setMode(value as AuthMode)}>
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className={cn("grid w-full", canRegister ? "grid-cols-2" : "grid-cols-1")}>
             <TabsTrigger value="login">登录</TabsTrigger>
-            <TabsTrigger value="register">注册</TabsTrigger>
+            {canRegister ? <TabsTrigger value="register">注册</TabsTrigger> : null}
           </TabsList>
           <TabsContent value={mode}>
             <form onSubmit={handleSubmit}>
               <FieldGroup>
                 <Field>
-                  <FieldLabel htmlFor="login">账号</FieldLabel>
+                  <FieldLabel htmlFor="login">{deploymentMode === "hosted" ? "邮箱" : "账号"}</FieldLabel>
                   <Input
                     id="login"
                     value={login}
@@ -1621,7 +1730,7 @@ function AuthCard({
                   />
                   <FieldDescription>至少 8 个字符，仅用于账号登录；默认同步无需另设加密口令。</FieldDescription>
                 </Field>
-                {mode === "register" && registrationMode === "closed" ? (
+                {mode === "register" && deploymentMode === "self-hosted" && registrationMode === "closed" ? (
                   <Field>
                     <FieldLabel htmlFor="setup-token">Setup Token</FieldLabel>
                     <Input
@@ -1631,7 +1740,7 @@ function AuthCard({
                       onChange={(event) => setSetupToken(event.target.value)}
                       autoComplete="off"
                     />
-                    <FieldDescription>开放注册无需填写；封闭注册由服务器管理员提供。</FieldDescription>
+                    <FieldDescription>首次创建管理员时填写 `.env` 中的 Setup Token；初始化完成后此令牌立即失效。</FieldDescription>
                   </Field>
                 ) : null}
                 {mode === "login" ? (
@@ -1640,6 +1749,13 @@ function AuthCard({
                     <Input id="totp-code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} />
                     <FieldDescription>账号启用双因素认证后填写验证器中的 6 位数字。</FieldDescription>
                   </Field>
+                ) : null}
+                {notice ? (
+                  <Alert>
+                    <CircleCheckIcon />
+                    <AlertTitle>已提交</AlertTitle>
+                    <AlertDescription>{notice}</AlertDescription>
+                  </Alert>
                 ) : null}
                 <Field>
                   <Button type="submit" size="lg" disabled={busy}>
@@ -1727,6 +1843,7 @@ function auditActionLabel(action: string): string {
     "device.admin-revoke": "管理员撤销设备",
     "data.export": "导出后台数据",
     "audit.cleanup": "清理历史审计",
+    "runtime-configuration.update": "更新运行配置",
   }
   return labels[action] ?? action
 }

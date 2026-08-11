@@ -3,30 +3,36 @@ import { and, asc, desc, eq, gt, isNull, lt, or, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
 import { blobUploadParts, blobUploads, blobs } from '../database/schema.js'
 import { ApiError } from '../errors.js'
+import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
 import type { BlobStorage } from '../storage/blob-storage.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import { BLOB_COMPLETION_LEASE_MS } from './constants.js'
+import type { UsageService } from '../usage/service.js'
 
 export class BlobService {
   constructor(
     private readonly database: DatabaseContext,
     private readonly workspaces: WorkspaceService,
     private readonly storage: BlobStorage,
-    private readonly maxBlobBytes: number,
+    private readonly maxBlobBytes: number | (() => number),
     private readonly partBytes: number,
+    private readonly usage?: UsageService,
+    private readonly storageLimitResolver?: (accountId: string) => Promise<bigint | null>,
+    private readonly syncEpoch?: string,
   ) {}
 
   async createUpload(
     accountId: string,
     workspaceId: string,
-    input: { blobId: string, expectedSize: string, ciphertextHash: string },
+    input: { blobId: string, expectedSize: string, ciphertextHash: string, expectedSyncEpoch?: string },
   ) {
+    this.#assertExpectedSyncEpoch(input.expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const expectedSize = parseSize(input.expectedSize)
     if (expectedSize === 0n) {
       throw new ApiError({ code: 'blob_empty', message: 'Blob must contain at least one byte', statusCode: 400 })
     }
-    if (expectedSize > BigInt(this.maxBlobBytes)) {
+    if (expectedSize > BigInt(this.currentMaxBlobBytes())) {
       throw new ApiError({ code: 'blob_too_large', message: 'Blob exceeds the configured limit', statusCode: 413 })
     }
     const [existing] = await this.database.db.select().from(blobs).where(and(
@@ -72,13 +78,23 @@ export class BlobService {
       if (stale !== undefined) {
         await this.storage.abortUpload(stale.storageKey, stale.providerUploadId).catch(() => undefined)
         await this.database.db.delete(blobUploads).where(eq(blobUploads.id, stale.id))
+        if (stale.usageReservationId !== null) await this.usage?.releaseReservation(stale.usageReservationId)
       }
     }
 
     const storageKey = `${workspaceId}/${input.blobId.slice(0, 2)}/${input.blobId}`
-    const providerUploadId = await this.storage.beginUpload(storageKey)
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
+    const storageLimit = this.storageLimitResolver === undefined ? null : await this.storageLimitResolver(accountId)
+    const reservation = this.usage === undefined ? undefined : await this.usage.reserveBlob({
+      accountId, workspaceId, sourceId: input.blobId,
+      requestHash: blobReservationRequestHash(input), bytes: expectedSize, storageLimit, expiresAt,
+    })
+    let providerUploadId: string | undefined
     try {
+      const startedProviderUploadId = await this.storage.beginUpload(storageKey)
+      providerUploadId = startedProviderUploadId
       const [upload] = await this.database.db.transaction(async (tx) => {
+        await assertAccountWriteAllowedInTransaction(tx, accountId)
         await tx.insert(blobs).values({
           workspaceId, blobId: input.blobId, size: expectedSize,
           ciphertextHash: input.ciphertextHash, storageKey, state: 'uploading',
@@ -90,11 +106,14 @@ export class BlobService {
           },
         })
         return tx.insert(blobUploads).values({
-          workspaceId, blobId: input.blobId, storageKey, providerUploadId,
-          expectedSize, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          workspaceId, blobId: input.blobId, storageKey, providerUploadId: startedProviderUploadId,
+          expectedSize, expiresAt,
+          ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+          ...(reservation === undefined ? {} : { usageReservationId: reservation.reservationId }),
         }).returning({ id: blobUploads.id, expiresAt: blobUploads.expiresAt })
       })
       if (upload === undefined) throw new Error('Blob upload insert returned no row')
+      if (reservation !== undefined) await this.usage?.markExternalStarted(reservation.reservationId)
       return {
         alreadyExists: false,
         resumed: false,
@@ -105,7 +124,8 @@ export class BlobService {
         expiresAt: upload.expiresAt,
       }
     } catch (error) {
-      await this.storage.abortUpload(storageKey, providerUploadId).catch(() => undefined)
+      if (providerUploadId !== undefined) await this.storage.abortUpload(storageKey, providerUploadId).catch(() => undefined)
+      if (reservation?.created === true) await this.usage?.releaseReservation(reservation.reservationId)
       if (databaseErrorCode(error) === '23505') {
         throw new ApiError({
           code: 'blob_upload_raced',
@@ -116,6 +136,10 @@ export class BlobService {
       }
       throw error
     }
+  }
+
+  private currentMaxBlobBytes(): number {
+    return typeof this.maxBlobBytes === 'function' ? this.maxBlobBytes() : this.maxBlobBytes
   }
 
   async writePart(
@@ -129,7 +153,11 @@ export class BlobService {
     if (data.byteLength === 0 || data.byteLength > this.partBytes) {
       throw new ApiError({ code: 'blob_part_invalid', message: 'Blob part size is invalid', statusCode: 400 })
     }
+    await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+    })
     const upload = await this.#getActiveUpload(workspaceId, uploadId)
+    this.#assertUploadEpoch(upload.syncEpoch)
     const expectedPartSize = partSize(upload.expectedSize, this.partBytes, partNumber)
     if (expectedPartSize === null || BigInt(data.byteLength) !== expectedPartSize) {
       throw new ApiError({
@@ -144,24 +172,29 @@ export class BlobService {
       })
     }
     const etag = await this.storage.writePart(upload.storageKey, upload.providerUploadId, partNumber, data)
-    await this.database.db.insert(blobUploadParts).values({
-      uploadId, partNumber, size: BigInt(data.byteLength), etag,
-    }).onConflictDoUpdate({
-      target: [blobUploadParts.uploadId, blobUploadParts.partNumber],
-      set: { size: BigInt(data.byteLength), etag },
+    const received = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      await tx.insert(blobUploadParts).values({
+        uploadId, partNumber, size: BigInt(data.byteLength), etag,
+      }).onConflictDoUpdate({
+        target: [blobUploadParts.uploadId, blobUploadParts.partNumber],
+        set: { size: BigInt(data.byteLength), etag },
+      })
+      const [sum] = await tx.select({
+        received: sql<bigint>`coalesce(sum(${blobUploadParts.size}), 0)`,
+      }).from(blobUploadParts).where(eq(blobUploadParts.uploadId, uploadId))
+      const total = BigInt(sum?.received ?? 0)
+      await tx.update(blobUploads).set({ receivedSize: total }).where(eq(blobUploads.id, uploadId))
+      return total
     })
-    const [sum] = await this.database.db.select({
-      received: sql<bigint>`coalesce(sum(${blobUploadParts.size}), 0)`,
-    }).from(blobUploadParts).where(eq(blobUploadParts.uploadId, uploadId))
-    const received = BigInt(sum?.received ?? 0)
-    await this.database.db.update(blobUploads).set({ receivedSize: received })
-      .where(eq(blobUploads.id, uploadId))
     return { partNumber, etag, receivedSize: received.toString() }
   }
 
-  async complete(accountId: string, workspaceId: string, uploadId: string) {
+  async complete(accountId: string, workspaceId: string, uploadId: string, expectedSyncEpoch?: string) {
+    this.#assertExpectedSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const existing = await this.#getUpload(workspaceId, uploadId)
+    this.#assertUploadEpoch(existing.syncEpoch)
     if (existing.completedAt !== null) {
       const blob = await this.get(accountId, workspaceId, existing.blobId)
       return { blobId: blob.blobId, size: blob.size.toString(), ciphertextHash: blob.ciphertextHash }
@@ -172,15 +205,19 @@ export class BlobService {
     }
     const claimedAt = new Date()
     const staleBefore = new Date(claimedAt.getTime() - BLOB_COMPLETION_LEASE_MS)
-    const [upload] = await this.database.db.update(blobUploads).set({ completingAt: claimedAt }).where(and(
-      eq(blobUploads.id, uploadId),
-      eq(blobUploads.workspaceId, workspaceId),
-      isNull(blobUploads.completedAt),
-      or(
-        and(isNull(blobUploads.completingAt), gt(blobUploads.expiresAt, claimedAt)),
-        lt(blobUploads.completingAt, staleBefore),
-      ),
-    )).returning()
+    const upload = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      const [claimed] = await tx.update(blobUploads).set({ completingAt: claimedAt }).where(and(
+        eq(blobUploads.id, uploadId),
+        eq(blobUploads.workspaceId, workspaceId),
+        isNull(blobUploads.completedAt),
+        or(
+          and(isNull(blobUploads.completingAt), gt(blobUploads.expiresAt, claimedAt)),
+          lt(blobUploads.completingAt, staleBefore),
+        ),
+      )).returning()
+      return claimed
+    })
     if (upload === undefined) {
       const current = await this.#getUpload(workspaceId, uploadId)
       if (current.completedAt !== null) {
@@ -225,9 +262,15 @@ export class BlobService {
             eq(blobs.workspaceId, workspaceId), eq(blobs.blobId, upload.blobId),
           ))
         })
+        if (upload.usageReservationId !== null) await this.usage?.releaseReservation(upload.usageReservationId)
         throw new ApiError({ code: 'blob_hash_mismatch', message: 'Completed blob hash does not match', statusCode: 422 })
       }
       await this.database.db.transaction(async (tx) => {
+        await assertAccountWriteAllowedInTransaction(tx, accountId)
+        if (upload.usageReservationId !== null) {
+          if (this.usage === undefined) throw new Error('Blob upload has a usage reservation but no usage service is configured')
+          await this.usage.commitBlobReservation(tx, upload.usageReservationId, total)
+        }
         await tx.update(blobs).set({ state: 'ready', updatedAt: new Date() }).where(and(
           eq(blobs.workspaceId, workspaceId), eq(blobs.blobId, upload.blobId),
         ))
@@ -252,6 +295,20 @@ export class BlobService {
     return blob
   }
 
+  #assertExpectedSyncEpoch(expected: string | undefined): void {
+    if (expected !== undefined && this.syncEpoch !== undefined && expected !== this.syncEpoch) {
+      throw new ApiError({ code: 'sync_epoch_changed', message: 'Server restore epoch changed; re-bootstrap before writing', statusCode: 409 })
+    }
+  }
+
+  #assertUploadEpoch(epoch: string | null): void {
+    // Null is a pre-fencing upload and remains compatible during additive
+    // rollout. Bound sessions, however, must never cross a restored epoch.
+    if (epoch !== null && this.syncEpoch !== undefined && epoch !== this.syncEpoch) {
+      throw new ApiError({ code: 'sync_epoch_changed', message: 'Blob upload belongs to a previous server epoch', statusCode: 409 })
+    }
+  }
+
   async uploadStatus(accountId: string, workspaceId: string, uploadId: string) {
     await this.workspaces.assertOwned(accountId, workspaceId)
     const upload = await this.#getUpload(workspaceId, uploadId)
@@ -273,11 +330,20 @@ export class BlobService {
     return { blob, stream: await this.storage.openReadStream(blob.storageKey, range) }
   }
 
+  async recordEgress(accountId: string, workspaceId: string, blobId: string, bytes: bigint, requestId: string): Promise<void> {
+    await this.usage?.recordBlobEgress({ accountId, workspaceId, blobId, bytes, requestId })
+  }
+
+  async recordIngress(accountId: string, workspaceId: string, uploadId: string, partNumber: number, bytes: bigint, requestId: string): Promise<void> {
+    await this.usage?.recordBlobIngress({ accountId, workspaceId, uploadId, partNumber, bytes, requestId })
+  }
+
   async abort(accountId: string, workspaceId: string, uploadId: string): Promise<void> {
     await this.workspaces.assertOwned(accountId, workspaceId)
     const upload = await this.#getActiveUpload(workspaceId, uploadId)
     await this.storage.abortUpload(upload.storageKey, upload.providerUploadId)
     await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       await tx.delete(blobUploads).where(eq(blobUploads.id, uploadId))
       const [remaining] = await tx.select({ id: blobUploads.id }).from(blobUploads).where(and(
         eq(blobUploads.workspaceId, workspaceId), eq(blobUploads.blobId, upload.blobId),
@@ -289,6 +355,7 @@ export class BlobService {
         ))
       }
     })
+    if (upload.usageReservationId !== null) await this.usage?.releaseReservation(upload.usageReservationId)
   }
 
   async #getActiveUpload(workspaceId: string, uploadId: string) {
@@ -349,6 +416,10 @@ function assertBlobIdentity(
       statusCode: 409,
     })
   }
+}
+
+function blobReservationRequestHash(input: { blobId: string, expectedSize: string, ciphertextHash: string }): string {
+  return createHash('sha256').update(`${input.blobId}\0${input.expectedSize}\0${input.ciphertextHash}`).digest('hex')
 }
 
 async function hashStream(stream: NodeJS.ReadableStream): Promise<string> {

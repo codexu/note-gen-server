@@ -1,6 +1,6 @@
 # 05：官方托管合规与数据治理技术规格
 
-- 状态：Draft，需要法律/隐私评审
+- 状态：已完成（内部测试范围；地域政策、法律 hold 审批主体、外部删除账本与恢复演练移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 默认适用形态：`hosted`
 - 前置依赖：[00 共享基础](00-shared-foundation.md)；Pilot Gate（05A、05B、05C 最小访问、05D identity/sync/blob 删除 + 外部 deletion ledger/restore barrier/drill）是任何 hosted 真实用户前置，账单删除扩展需 [04 订阅权益](04-hosted-subscriptions-entitlements.md)
@@ -9,6 +9,8 @@
 ## 1. 边界声明
 
 本文是工程规格，不是法律意见。适用地区、处理依据、法定时限、税务记录和具体保留期必须由专业顾问及实际运营主体确认。代码使用可配置策略和版本化文档，不能把未确认的法定数字写死。
+
+当前档位固定为内部测试：`HOSTED_DATA_REGION=local-internal-test`、删除冷静期 30 天、工程数据保留期 90 天，legal hold 审批主体为 `platform-admin`。这些仅用于删除/恢复演练，不构成对外隐私承诺，也不允许开启 hosted 真实用户注册或数据请求 capability。
 
 ## 2. 目标
 
@@ -151,12 +153,21 @@ deletion_ledger
 
 `deletion_ledger` 位于与普通应用备份隔离、同样受灾备保护的受控存储中，或在恢复后从不可变外部副本重放。`subject_hash` 使用 instance scope + 稳定 account UUID 的版本化 HMAC，不能基于邮箱；它是可关联的 pseudonymous 高敏记录，按可能属于个人数据保护，不能断言“不是 PII”。收据是工程处理记录，不宣称法律意义上的不可争议证明。`account_deletion_fences.account_uuid` 同样按高敏 pseudonymous 标识登记保留策略；它故意不带 FK，账号业务行删除后仍作为异步写屏障，并最终由 deletion ledger/恢复屏障继续阻止主体复活。
 
+内部测试中 `deletion_ledger_outbox` 先持久化投递意图，再写入 `DELETION_LEDGER_PATH` 下 create-exclusive、按 idempotency key 命名的 receipt 文件；文件已写而数据库尚未确认时重试会验证完全相同的内容并收敛，只有 outbox delivered 才完成 case/fence。它不满足生产不可变/跨灾害域保证，生产必须替换为受控外部存储适配器。
+
+Hosted 配置会拒绝将 `DELETION_LEDGER_PATH` 规范化后指向 filesystem Blob 或 backup 路径；内部演练也不能把 receipt 与同一清理生命周期混放。
+
+receipt replay 会校验文件名与 idempotency key、receipt hash 与本地 ledger 的 case/time/generation/LSN/hash 一致；任何解析或冲突错误都在 Hosted HTTP socket 绑定前 fail-closed，不把损坏账本当作“没有已删除主体”。
+
+迁移会把早期仅有本地 ledger 的 completed case 回退为 `purging` 并生成待投递 outbox；这比错误宣称已有外部收据更安全，maintenance 重放成功后才再次完成。Hosted 服务在绑定 HTTP socket 前会读取 receipt store：与恢复快照中账户 UUID 的 HMAC 匹配时，先重建删除 fence、禁用账户、撤销 bearer/device 凭据并 tombstone Workspace，再复用既有 purge handler；已 delivered 的收据不会再次外部投递。
+
 ## 6. 政策接受
 
 - 注册页面显示当前政策版本并记录明确接受；预勾选无效。
 - `content_ref` 指向不可变原始字节/对象；按版本化 canonicalization 计算 hash，保证未来可还原当时呈现版本。Acceptance 只能记录“系统呈现该版本且用户执行 affirmative action”，不能证明用户实际阅读或替代法律评审。
 - `account_id` 外键使用 `ON DELETE SET NULL`；`subject_hash` 和当时的最小主体快照让账号删除后仍能保留接受记录，但不得保存可重新建立账号的邮箱明文。
 - `requires_reacceptance` 的新版本通过账号上下文返回 restriction；用户可先导出/删除，其他新写入可按政策暂停。
+- 当前内部测试实现将未接受的强制政策投射为 `policy_reacceptance_required`，在 account context 中 deny `sync.push`/`blob.upload`，并以服务端 preHandler 阻止 Sync command、全部非 DELETE 的 Workspace（含 key/recovery）写入与 Blob upload；DELETE 保持可用。后续仍需收敛为完整 OperationPolicy enforcement。
 - 未登录公开页面始终可查看当前及必要历史政策。
 - 客户端浏览器授权遇到 reacceptance 时转到 Web 完成，不在原生客户端复制法律文案。
 
@@ -286,14 +297,21 @@ POST /v1/web/admin/compliance/requests/:id/action
 - 同 idempotency key 不同 request hash 冲突；已删除/无法登录主体进入独立 identity check。
 - E2EE 导出不会请求/记录明文 key；managed 导出口令重包仅在浏览器端完成。
 - 删除在每个 handler 前后模拟进程退出，最终一次完成且不提前出具工程收据。
+- `scheduled → purging → completed` 每一跳均可在崩溃后重入；purging 只能在 workspace/blob handler 已完成且无 active hold 时进入，purge manifest/ref/hash 必须在 support 内容、identity 行删除前持久化，step idempotency key 不因重试改变。
 - purge manifest 在 DB 行删除前固化；Blob/external 删除失败仍保留定位信息，多个 hold scope 正确合并。
-- legal hold 创建/释放与每个外部删除 handler 并发时按 subject lock/hold revision 串行化，不会在旧 snapshot 下误删。
+- legal hold 创建/释放只接受独立 Staff realm 的 `legal_hold.manage + legal_hold.approve`，不接受客户 `accounts.isAdmin`；与每个外部删除 handler 并发时按 subject lock/hold revision 串行化，不会在旧 snapshot 下误删。
 - cooling-off/purging/completed 期间，旧 generation job、晚到 Webhook 和 provider 取消回调都不能重建主体数据；quiet-window 扫描未收敛时不得 completed。
+- 删除事务与已认证的晚到写入并发时，workspace 创建/密钥变更/删除恢复、legacy 与 durable sync、durable bootstrap、blob 分片与完成、support 创建和回复都在各自提交事务中重查 subject fence；删除先提交后，写请求必须稳定拒绝且不得留下领域行。
 - cooling-off 可取消，purging 开始后不可恢复。
+- Web step-up 与兼容原生 `DELETE /v1/account` 都必须在同一 deletion transaction 执行 authentication risk restriction；deny/lock/review 时不创建 case、不禁用账号、不撤销任何凭据。
+- deletion cancel 不受该 restriction 阻断，且取消后仍不能恢复删除前的 Web Session、refresh token、device authorization 或 pairing。
+- Hosted 内部测试的 legal hold 仅通过独立 Staff session 的 `POST /v1/internal/staff/compliance/accounts/:accountId/legal-holds` 与 `POST /v1/internal/staff/compliance/legal-holds/:holdId/release` 操作；路由不建立 Staff session，要求 `step-up` 或 `phishing-resistant` assertion，并由服务层重复核验 `legal_hold.manage + legal_hold.approve`。
 - legal hold 只暂停 scope 内数据，释放后任务继续；无权限者无法创建/释放。
 - 账号删除后审计仍在但 PII 已按规则匿名化。
-- 从删除前备份恢复后，deletion ledger 阻止已删账号复活。
+- 从删除前备份恢复后，deletion ledger 阻止已删账号复活；启动期 replay 必须发生在 HTTP 监听之前。
 - ledger 外部写/本地 complete 任一侧崩溃可 reconcile，backup generation/LSN barrier 可比较。
+- deletion ledger 的 `minimum_backup_generation` 必须等于完成时最大 ready backup generation 加一；早于该 generation 的备份只能在外部 ledger replay 后作为恢复输入，不能被宣称为 post-deletion baseline。
+- `doctor` 对 completed case 缺 delivered ledger receipt、delivered receipt 缺 completed case、或本地 ledger 缺 replay outbox 返回 blocking；purging 缺 manifest、pending receipt delivery 或 completed case 留有未完成 step 返回 warning，避免把中断的 deletion 误判为已完成。
 - KMS current/previous key、故障和恢复路径均验证，E2EE 行为不变。
 
 ## 15. 上线、回滚与验收

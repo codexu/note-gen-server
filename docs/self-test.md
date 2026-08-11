@@ -49,12 +49,15 @@
 - 服务端已启动，且 `/health/ready` 返回 200。
 - 封闭注册模式下，知道当前部署的 `SETUP_TOKEN`。
 
-本地 Docker 部署可以先执行：
+本地 PostgreSQL 部署可以先执行：
 
 ```bash
+createuser notegen
+createdb -O notegen notegen
 cp .env.example .env
 # 编辑 .env，至少设置 POSTGRES_PASSWORD、DATABASE_URL、AUTH_SECRET、SETUP_TOKEN 和 PUBLIC_BASE_URL
-docker compose up -d --build
+pnpm install
+pnpm dev
 curl --fail http://127.0.0.1:3789/health/ready
 ```
 
@@ -108,23 +111,22 @@ pnpm test:self
 
 | 现象 | 检查项 |
 |---|---|
-| `fetch failed` | 地址、端口、防火墙、HTTPS 证书和容器状态 |
+| `fetch failed` | 地址、端口、防火墙、HTTPS 证书和服务进程状态 |
 | `registration_closed` | 是否传入与服务端一致的 `SELF_TEST_SETUP_TOKEN` |
-| `/health/ready` 返回 503 | PostgreSQL、Blob Volume/S3 和 migration 日志 |
+| `/health/ready` 返回 503 | PostgreSQL、Blob 目录/S3 和 migration 日志 |
 | WebSocket 超时 | 反向代理是否支持 Upgrade，是否对事件接口启用了缓冲 |
 | `instanceId` 与客户端记录不一致 | 数据库是否被重置、恢复错备份或指向了另一套部署 |
 
-查看 Docker 日志：
+查看本地服务日志：
 
 ```bash
-docker compose ps
-docker compose logs --tail=200 server
+pnpm dev:server
 ```
 
 测试失败时，脚本会保留已经产生的数据，方便排查。测试账号名称以 `self-test-` 开头，可在确认问题后清理。
 
 ## 相关文档
 
-- [Docker 部署与运维](operations.md)
+- [本地运行与运维](operations.md)
 - [NoteGen 客户端接入协议](client-protocol.md)
 - [NoteGen 接入与配置同步体验](notegen-integration.md)

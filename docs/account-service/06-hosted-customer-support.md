@@ -1,6 +1,6 @@
 # 06：官方托管客服与运营支持技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；生产 Staff OIDC、独立 origin/ACL、console 与外部工单适配器移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`hosted`
 - 前置依赖：[00 共享 Staff/step-up 基础](00-shared-foundation.md)、[01 邮箱身份](01-hosted-email-identity.md)、[05A/B 数据治理基线](05-hosted-compliance.md)；06B 面向真实用户开放前硬依赖 05D deletion fence/handler
@@ -210,7 +210,7 @@ POST /v1/web/support/cases/:id/diagnostics
 DELETE /v1/web/support/cases/:id/diagnostics/:grantId
 ```
 
-Staff：使用独立 `/internal/support/*` origin/audience，不与公开客户 token 混用。生产边界可由独立部署或反向代理 ACL 保护。
+Staff：内部测试端点为 `GET /v1/internal/staff/support/cases`、`GET /v1/internal/staff/support/cases/:id`、`POST /v1/internal/staff/support/cases/:id/messages`、`POST /v1/internal/staff/support/cases/:id/notes` 和 `PUT /v1/internal/staff/support/cases/:id/assignment`，只接受由独立 Staff identity edge 建立的 opaque `x-staff-session-id`；route 会每次重查 session、principal 和 permission，且日志脱敏该 header。领取只能归属当前 Staff；释放只能释放本人当前归属，跨 Staff 转派留待 support-admin 工作流。内部备注不会改变客户可见状态或最后回复时间，客户 API 永远过滤 `visibility=internal`。读取/回复/备注/领取 audit 带 request ID、staff actor、动作、目标和计数/可见性 metadata，不带正文、邮箱或 session。它不提供 assertion/session 签发，客户 Cookie、客户 access token 和 `accounts.isAdmin` 均不能满足该边界。生产使用独立 `/internal/support/*` origin/audience，并由独立部署或反向代理 ACL 保护。
 
 NoteGen 客户端提供“获取帮助”：只打开 capabilities 声明且验证同源的账号 Web。Support context token 使用随机 opaque 值、服务端只存哈希，短 TTL/一次性消费，并绑定 audience、instance/account/device 与字段 allowlist；“不含内容秘密”不代表无需保护。用户预览确认后才上传诊断。自托管则打开部署者配置且经过 URL 校验的支持地址，不误导为官方 SLA。
 
@@ -245,6 +245,9 @@ NoteGen 客户端提供“获取帮助”：只打开 capabilities 声明且验�
 - provider inbound/outbound echo 不循环；伪造跨账号 case link 在创建和聚合两处均被拒绝。
 - staff 不能签发客户 session 或浏览 managed/E2EE 内容。
 - 人工 entitlement、会话撤销、风险解除必须关联 case/reason 并有完整审计。
+- 未获得 `support.read` 的 Staff 无法列出或读取 case；仅有 read 的 Staff 无法追加回复；角色撤销或过期后立即拒绝。
+- Staff 回复以 `(caseId, staffId, idempotencyKey)` 幂等；同 key 不同正文冲突；成功回复与 `support.case.reply` audit event 在同一事务提交。
+- Staff 读取 case/queue 仅记录 staff actor、动作、目标和计数 metadata，不记录消息正文、客户邮箱、token 或解密后的 support 内容。
 
 ## 14. 上线、回滚与验收
 

@@ -4,11 +4,14 @@ import type { TokenService } from '../auth/tokens.js'
 import type { AuthService } from '../auth/service.js'
 import type { ChangeNotifier } from '../sync/types.js'
 import type { WorkspaceService } from '../workspaces/service.js'
+import type { MaintenanceCoordinator } from '../maintenance/coordinator.js'
+import { ApiError } from '../errors.js'
 
 interface AuthenticateMessage {
   type: 'authenticate'
   accessToken: string
   workspaceIds: string[]
+  expectedSyncEpoch?: string
 }
 
 interface PresenceUpdateMessage {
@@ -62,6 +65,8 @@ export function createEventRoutes(
   auth: AuthService,
   workspaces: WorkspaceService,
   notifier: ChangeNotifier,
+  maintenance?: MaintenanceCoordinator,
+  syncEpoch?: string,
 ): FastifyPluginAsyncTypebox {
   const presenceRooms = new Map<string, Set<PresenceConnection>>()
   return async function eventRoutes(app) {
@@ -111,6 +116,7 @@ export function createEventRoutes(
           try {
             const message = parseRealtimeMessage(raw)
             if (message.type === 'document.update') {
+              await assertRealtimeMutationAllowed(maintenance, currentSocket)
               relayDocumentUpdate(message, presenceConnection, presenceRooms)
             } else if (message.type === 'document.subscribe'
               || message.type === 'document.unsubscribe') {
@@ -118,15 +124,21 @@ export function createEventRoutes(
             } else {
               handlePresenceMessage(message, presenceConnection, presenceRooms)
             }
-          } catch {
+          } catch (error) {
+            if (error instanceof ApiError && error.code === 'server_maintenance') return
             currentSocket.close(1008, 'Invalid realtime message')
           }
           return
         }
         try {
           const message = parseAuthenticateMessage(raw)
+          if (message.expectedSyncEpoch !== undefined && syncEpoch !== undefined && message.expectedSyncEpoch !== syncEpoch) {
+            currentSocket.send(JSON.stringify({ type: 'sync.epoch-changed', code: 'sync_epoch_changed', retryable: false }))
+            currentSocket.close(1008, 'Sync epoch changed')
+            return
+          }
           const claims = await tokens.verifyAccessToken(message.accessToken)
-          await auth.assertDeviceActive(claims.accountId, claims.deviceId)
+          await auth.assertDeviceActive(claims.accountId, claims.deviceId, claims.credentialEpoch, claims.instanceAuthEpoch, claims.issuedAt)
           const uniqueWorkspaceIds = [...new Set(message.workspaceIds)]
           if (uniqueWorkspaceIds.length > 100) throw new Error('Too many workspace subscriptions')
           await Promise.all(uniqueWorkspaceIds.map((id) => workspaces.assertOwned(claims.accountId, id)))
@@ -170,19 +182,38 @@ export function createEventRoutes(
   }
 }
 
+async function assertRealtimeMutationAllowed(maintenance: MaintenanceCoordinator | undefined, socket: WebSocket): Promise<void> {
+  if (maintenance === undefined) return
+  try {
+    await maintenance.requireMutationAllowed('/v1/sync/events')
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'server_maintenance') {
+      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({
+        type: 'server.maintenance', code: error.code, retryable: error.retryable, details: error.details,
+      }))
+      socket.close(1013, 'Server maintenance')
+    }
+    throw error
+  }
+}
+
 function parseAuthenticateMessage(raw: RawData): AuthenticateMessage {
   const value: unknown = JSON.parse(raw.toString())
   if (typeof value !== 'object' || value === null) throw new Error('Message must be an object')
   const candidate = value as Record<string, unknown>
   if (candidate.type !== 'authenticate' || typeof candidate.accessToken !== 'string'
     || !Array.isArray(candidate.workspaceIds)
-    || !candidate.workspaceIds.every((id) => typeof id === 'string')) {
+    || !candidate.workspaceIds.every((id) => typeof id === 'string')
+    || (candidate.expectedSyncEpoch !== undefined
+      && (typeof candidate.expectedSyncEpoch !== 'string'
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.expectedSyncEpoch)))) {
     throw new Error('Authentication message is invalid')
   }
   return {
     type: 'authenticate',
     accessToken: candidate.accessToken,
     workspaceIds: candidate.workspaceIds,
+    ...(candidate.expectedSyncEpoch === undefined ? {} : { expectedSyncEpoch: candidate.expectedSyncEpoch as string }),
   }
 }
 

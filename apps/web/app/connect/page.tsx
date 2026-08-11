@@ -1,5 +1,5 @@
-import { DeviceConnection } from "@/components/device-connection"
+import { AccountPortal } from "@/components/account-portal"
 
 export default function ConnectPage() {
-  return <DeviceConnection />
+  return <AccountPortal />
 }

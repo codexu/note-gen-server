@@ -1,13 +1,17 @@
+import { createHash } from 'node:crypto'
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
 import { devices, objects, workspaceKeyEnvelopes, workspaceKeys, workspaces } from '../database/schema.js'
 import { ApiError } from '../errors.js'
+import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
 import type { ChangeNotifier } from '../sync/types.js'
+import type { UsageService } from '../usage/service.js'
 
 export interface CreateWorkspaceInput {
   nameCiphertext: string
   keyVersion: number
   envelopes: KeyEnvelopeInput[]
+  idempotencyKey?: string
 }
 
 export interface KeyEnvelopeInput {
@@ -24,32 +28,64 @@ export class WorkspaceService {
   constructor(
     private readonly database: DatabaseContext,
     private readonly notifier: ChangeNotifier,
+    private readonly usage?: UsageService,
+    private readonly workspaceLimitResolver?: (accountId: string) => Promise<bigint | null>,
   ) {}
 
-  async create(accountId: string, input: CreateWorkspaceInput) {
+  async create(accountId: string, input: CreateWorkspaceInput): Promise<{ id: string, createdAt: Date, latestSequence: string, nameCiphertext: string, created: boolean }> {
     validateKeyEnvelopes(input.envelopes, true)
     await this.#validateDeviceRecipients(accountId, input.envelopes)
+    const workspaceLimit = await this.#workspaceLimit(accountId)
+    const requestHash = input.idempotencyKey === undefined ? undefined : workspaceCreationHash(input)
     const created = await this.database.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`)
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      if (input.idempotencyKey !== undefined) {
+        const [existing] = await tx.select({
+          id: workspaces.id, createdAt: workspaces.createdAt, latestSequence: workspaces.latestSequence,
+          nameCiphertext: workspaces.nameCiphertext, creationRequestHash: workspaces.creationRequestHash,
+        }).from(workspaces).where(and(
+          eq(workspaces.accountId, accountId), eq(workspaces.creationIdempotencyKey, input.idempotencyKey),
+        )).limit(1)
+        if (existing !== undefined) {
+          if (existing.creationRequestHash !== requestHash) {
+            throw new ApiError({ code: 'idempotency_conflict', message: 'Workspace creation key was reused with different input', statusCode: 409 })
+          }
+          return { ...existing, latestSequence: existing.latestSequence.toString(), created: false }
+        }
+      }
       const [currentDefault] = await tx.select({ id: workspaces.id }).from(workspaces).where(and(
         eq(workspaces.accountId, accountId),
         eq(workspaces.isDefault, true),
         isNull(workspaces.deletedAt),
       )).limit(1)
+      await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
       const [workspace] = await tx.insert(workspaces).values({
         accountId,
         nameCiphertext: input.nameCiphertext,
         isDefault: currentDefault === undefined,
+        ...(input.idempotencyKey === undefined ? {} : {
+          creationIdempotencyKey: input.idempotencyKey,
+          creationRequestHash: requestHash,
+        }),
       }).returning({ id: workspaces.id, createdAt: workspaces.createdAt })
       if (workspace === undefined) throw new Error('Workspace insert returned no row')
       await tx.insert(workspaceKeys).values({ workspaceId: workspace.id, keyVersion: input.keyVersion })
       await tx.insert(workspaceKeyEnvelopes).values(input.envelopes.map((envelope) => ({
         workspaceId: workspace.id, keyVersion: input.keyVersion, ...envelope,
       })))
-      return { ...workspace, latestSequence: '0', nameCiphertext: input.nameCiphertext }
+      return { ...workspace, latestSequence: '0', nameCiphertext: input.nameCiphertext, created: true }
     })
-    await this.#publishWorkspaceListChanged(accountId)
+    if (created.created) await this.#publishWorkspaceListChanged(accountId)
     return created
+  }
+
+  async getCreationRequest(accountId: string, idempotencyKey: string): Promise<{ id: string, createdAt: Date } | undefined> {
+    const [workspace] = await this.database.db.select({ id: workspaces.id, createdAt: workspaces.createdAt })
+      .from(workspaces).where(and(
+        eq(workspaces.accountId, accountId), eq(workspaces.creationIdempotencyKey, idempotencyKey),
+      )).limit(1)
+    return workspace
   }
 
   async getOrCreateManagedDefault(accountId: string, input: {
@@ -71,8 +107,10 @@ export class WorkspaceService {
         statusCode: 400,
       })
     }
+    const workspaceLimit = await this.#workspaceLimit(accountId)
     const result = await this.database.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`)
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [existing] = await tx.select({
         id: workspaces.id,
         createdAt: workspaces.createdAt,
@@ -100,6 +138,8 @@ export class WorkspaceService {
           created: false,
         }
       }
+
+      await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
 
       const [workspace] = await tx.insert(workspaces).values({
         accountId,
@@ -407,7 +447,10 @@ export class WorkspaceService {
       kdfSalt: workspaceKeyEnvelopes.kdfSalt,
       kdfParams: workspaceKeyEnvelopes.kdfParams,
       createdAt: workspaceKeyEnvelopes.createdAt,
-    }).from(workspaceKeyEnvelopes).where(eq(workspaceKeyEnvelopes.workspaceId, workspaceId))
+    }).from(workspaceKeyEnvelopes).where(and(
+      eq(workspaceKeyEnvelopes.workspaceId, workspaceId),
+      eq(workspaceKeyEnvelopes.status, 'active'),
+    ))
     return keys.map((key) => ({
       ...key,
       envelopes: envelopes.filter((envelope) => envelope.keyVersion === key.keyVersion),
@@ -420,6 +463,7 @@ export class WorkspaceService {
     await this.#validateDeviceRecipients(accountId, input.envelopes)
     try {
       const key = await this.database.db.transaction(async (tx) => {
+        await assertAccountWriteAllowedInTransaction(tx, accountId)
         const [key] = await tx.insert(workspaceKeys).values({
           workspaceId, keyVersion: input.keyVersion,
         }).returning({ keyVersion: workspaceKeys.keyVersion, createdAt: workspaceKeys.createdAt })
@@ -444,9 +488,12 @@ export class WorkspaceService {
     validateKeyEnvelopes([envelope], false)
     await this.#validateDeviceRecipients(accountId, [envelope])
     try {
-      const [created] = await this.database.db.insert(workspaceKeyEnvelopes).values({
-        workspaceId, keyVersion, ...envelope,
-      }).returning()
+      const [created] = await this.database.db.transaction(async (tx) => {
+        await assertAccountWriteAllowedInTransaction(tx, accountId)
+        return await tx.insert(workspaceKeyEnvelopes).values({
+          workspaceId, keyVersion, ...envelope,
+        }).returning()
+      })
       if (created === undefined) throw new Error('Workspace key envelope insert returned no row')
       await this.#publishKeysChanged(workspaceId, keyVersion)
       return created
@@ -460,6 +507,56 @@ export class WorkspaceService {
       }
       throw error
     }
+  }
+
+  async replaceRecoveryEnvelope(
+    accountId: string,
+    workspaceId: string,
+    keyVersion: number,
+    envelope: KeyEnvelopeInput,
+    idempotencyKey: string,
+  ): Promise<{ id: string, status: 'active', created: boolean }> {
+    await this.assertOwned(accountId, workspaceId)
+    if (envelope.type !== 'recovery' || envelope.recipientId !== null || envelope.kdfSalt !== null || envelope.kdfParams !== null) {
+      throw new ApiError({ code: 'recovery_envelope_invalid', message: 'Recovery envelope must be a recipient-free recovery key', statusCode: 400 })
+    }
+    validateKeyEnvelopes([envelope], false)
+    const requestHash = createHash('sha256').update(JSON.stringify({
+      wrappedKey: envelope.wrappedKey, kdfSalt: envelope.kdfSalt, kdfParams: envelope.kdfParams,
+    })).digest('base64url')
+    const result = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      const [previous] = await tx.select({
+        id: workspaceKeyEnvelopes.id,
+        replacementRequestHash: workspaceKeyEnvelopes.replacementRequestHash,
+      }).from(workspaceKeyEnvelopes).where(and(
+        eq(workspaceKeyEnvelopes.workspaceId, workspaceId),
+        eq(workspaceKeyEnvelopes.keyVersion, keyVersion),
+        eq(workspaceKeyEnvelopes.replacementIdempotencyKey, idempotencyKey),
+      )).limit(1)
+      if (previous !== undefined) {
+        if (previous.replacementRequestHash !== requestHash) {
+          throw new ApiError({ code: 'idempotency_conflict', message: 'Recovery replacement key was reused with different input', statusCode: 409 })
+        }
+        return { id: previous.id, status: 'active' as const, created: false }
+      }
+      const [key] = await tx.select({ keyVersion: workspaceKeys.keyVersion }).from(workspaceKeys).where(and(
+        eq(workspaceKeys.workspaceId, workspaceId), eq(workspaceKeys.keyVersion, keyVersion),
+      )).limit(1)
+      if (key === undefined) throw new ApiError({ code: 'key_version_not_found', message: 'Key version not found', statusCode: 404 })
+      await tx.update(workspaceKeyEnvelopes).set({ status: 'revoked', revokedAt: new Date() }).where(and(
+        eq(workspaceKeyEnvelopes.workspaceId, workspaceId), eq(workspaceKeyEnvelopes.keyVersion, keyVersion),
+        eq(workspaceKeyEnvelopes.type, 'recovery'), eq(workspaceKeyEnvelopes.status, 'active'),
+      ))
+      const [created] = await tx.insert(workspaceKeyEnvelopes).values({
+        workspaceId, keyVersion, ...envelope, replacementIdempotencyKey: idempotencyKey,
+        replacementRequestHash: requestHash,
+      }).returning({ id: workspaceKeyEnvelopes.id })
+      if (created === undefined) throw new Error('Recovery envelope insert returned no row')
+      return { id: created.id, status: 'active' as const, created: true }
+    })
+    if (result.created) await this.#publishKeysChanged(workspaceId, keyVersion)
+    return result
   }
 
   async enableEndToEndEncryption(
@@ -478,6 +575,7 @@ export class WorkspaceService {
       })
     }
     await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [key] = await tx.select({ keyVersion: workspaceKeys.keyVersion }).from(workspaceKeys).where(and(
         eq(workspaceKeys.workspaceId, workspaceId),
         eq(workspaceKeys.keyVersion, keyVersion),
@@ -517,6 +615,7 @@ export class WorkspaceService {
     }
 
     await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [workspace] = await tx.select({ isDefault: workspaces.isDefault }).from(workspaces).where(and(
         eq(workspaces.id, workspaceId),
         eq(workspaces.accountId, accountId),
@@ -559,14 +658,20 @@ export class WorkspaceService {
     options: { allowDefault?: boolean } = {},
   ): Promise<void> {
     await this.assertOwned(accountId, workspaceId)
-    const [removed] = await this.database.db.update(workspaces)
-      .set({ deletedAt: new Date(), updatedAt: new Date() })
-      .where(and(
-        eq(workspaces.id, workspaceId),
-        eq(workspaces.accountId, accountId),
-        ...(options.allowDefault === false ? [eq(workspaces.isDefault, false)] : []),
-      ))
-      .returning({ id: workspaces.id })
+    const removed = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      const [current] = await tx.select({ id: workspaces.id, deletedAt: workspaces.deletedAt }).from(workspaces)
+        .where(and(eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId),
+          ...(options.allowDefault === false ? [eq(workspaces.isDefault, false)] : [])))
+        .limit(1).for('update')
+      if (current === undefined) return undefined
+      if (current.deletedAt === null) {
+        await tx.update(workspaces).set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(eq(workspaces.id, workspaceId))
+        await this.usage?.releaseWorkspace(tx, accountId)
+      }
+      return current
+    })
     if (removed === undefined) {
       throw new ApiError({
         code: 'workspace_default_delete_forbidden',
@@ -583,11 +688,20 @@ export class WorkspaceService {
   async restore(accountId: string, workspaceId: string): Promise<void> {
     let restored: { id: string } | undefined
     try {
-      [restored] = await this.database.db.update(workspaces).set({
-        deletedAt: null,
-        updatedAt: new Date(),
-      }).where(and(eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId)))
-        .returning({ id: workspaces.id })
+      const workspaceLimit = await this.#workspaceLimit(accountId)
+      restored = await this.database.db.transaction(async (tx) => {
+        await assertAccountWriteAllowedInTransaction(tx, accountId)
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`notegen-workspace-lifecycle:${workspaceId}`}))`)
+        const [current] = await tx.select({ id: workspaces.id, deletedAt: workspaces.deletedAt }).from(workspaces)
+          .where(and(eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId))).limit(1).for('update')
+        if (current === undefined) return undefined
+        if (current.deletedAt !== null) {
+          await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
+          await tx.update(workspaces).set({ deletedAt: null, updatedAt: new Date() })
+            .where(eq(workspaces.id, workspaceId))
+        }
+        return current
+      })
     } catch (error) {
       if (databaseErrorCode(error) === '23505') {
         throw new ApiError({
@@ -611,6 +725,10 @@ export class WorkspaceService {
     await this.notifier.publish({
       type: 'workspace.keys-changed', workspaceId, keyVersion,
     }).catch(() => undefined)
+  }
+
+  async #workspaceLimit(accountId: string): Promise<bigint | null> {
+    return this.workspaceLimitResolver === undefined ? null : await this.workspaceLimitResolver(accountId)
   }
 
   async #publishWorkspaceListChanged(accountId: string): Promise<void> {
@@ -695,6 +813,20 @@ function validateKeyEnvelopes(
     }
     recipients.add(recipient)
   }
+}
+
+function workspaceCreationHash(input: CreateWorkspaceInput): string {
+  return createHash('sha256').update(JSON.stringify({
+    nameCiphertext: input.nameCiphertext,
+    keyVersion: input.keyVersion,
+    envelopes: input.envelopes.map((envelope) => ({
+      type: envelope.type,
+      recipientId: envelope.recipientId,
+      wrappedKey: envelope.wrappedKey,
+      kdfSalt: envelope.kdfSalt,
+      kdfParams: envelope.kdfParams,
+    })),
+  })).digest('base64url')
 }
 
 function databaseErrorCode(error: unknown): string | undefined {

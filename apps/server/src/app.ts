@@ -10,7 +10,13 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import { Type } from '@sinclair/typebox'
 import type { AppConfig } from './config.js'
-import { registerErrorHandler } from './errors.js'
+import { ApiError, registerErrorHandler } from './errors.js'
+import { requireAuth } from './auth/http-auth.js'
+import { createAccountContextRoutes } from './routes/account-context.js'
+import { createSetupRoutes } from './routes/setup.js'
+import { createInvitationRoutes } from './routes/invitations.js'
+import { createComplianceRoutes } from './routes/compliance.js'
+import { createBillingRoutes } from './routes/billing.js'
 import { createCapabilitiesRoutes } from './routes/capabilities.js'
 import { createHealthRoutes } from './routes/health.js'
 import { createAuthRoutes } from './routes/auth.js'
@@ -22,9 +28,16 @@ import { createBlobRoutes } from './routes/blobs.js'
 import type { ServiceDependencies } from './services.js'
 import { registerMetrics } from './observability/metrics.js'
 import { createWebAuthRoutes } from './routes/web-auth.js'
+import { createWebEmailRoutes } from './routes/web-email.js'
 import { createDeviceAuthorizationRoutes } from './routes/device-authorizations.js'
 import { createDevicePairingRoutes } from './routes/device-pairings.js'
 import { createWebAdminRoutes } from './routes/web-admin.js'
+import { createSupportRoutes } from './routes/support.js'
+import { createMailAdminRoutes } from './routes/mail-admin.js'
+import { createStaffSupportRoutes } from './routes/staff-support.js'
+import { createStaffLegalHoldRoutes } from './routes/staff-legal-holds.js'
+import { createStaffBillingRoutes } from './routes/staff-billing.js'
+import { createStaffRiskRoutes } from './routes/staff-risk.js'
 import { isAllowedDevelopmentWebOrigin } from './development-origin.js'
 import { createPostgresRateLimitStore } from './observability/postgres-rate-limit-store.js'
 import type { DatabaseContext } from './database/client.js'
@@ -40,13 +53,19 @@ export async function buildApp(
         paths: [
           'req.headers.authorization',
           'req.headers["x-setup-token"]',
+          'req.headers["x-step-up-token"]',
+          'req.headers["x-staff-session-id"]',
           'req.body.password',
+          'req.body.smtpPassword',
           'req.body.currentPassword',
           'req.body.newPassword',
           'req.body.refreshToken',
           'req.body.setupToken',
+          'req.body.token',
+          'req.body.cancelToken',
           'req.body.deviceCode',
           'req.body.pairingToken',
+          'req.body.recipient',
           'req.body.ciphertext',
           'req.body.wrappedKey',
           'req.body.managedKey',
@@ -80,7 +99,7 @@ export async function buildApp(
     credentials: config.corsOrigins.length > 0 || config.nodeEnv === 'development',
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
-      'authorization', 'content-type', 'x-request-id', 'x-setup-token', 'x-csrf-token', 'range',
+      'authorization', 'content-type', 'x-request-id', 'x-setup-token', 'x-step-up-token', 'x-staff-session-id', 'x-csrf-token', 'range',
     ],
     exposedHeaders: [
       'accept-ranges', 'content-length', 'content-range', 'retry-after',
@@ -106,6 +125,45 @@ export async function buildApp(
   await app.register(websocket, { options: { maxPayload: 4 * 1024 * 1024 } })
   registerMetrics(app, config)
   registerErrorHandler(app)
+  app.addHook('onRequest', async (request) => {
+    const safetyFailure = dependencies.deployment?.getSafetyFailure()
+    if (safetyFailure !== undefined && request.url.split('?')[0] !== '/health/live' && request.url.split('?')[0] !== '/health/ready') {
+      throw new ApiError({
+        code: 'startup_safety_gate_closed', message: 'Instance startup safety gate is closed', statusCode: 503,
+        retryable: false, details: { reason: safetyFailure },
+      })
+    }
+    if (dependencies.maintenanceCoordinator !== undefined) {
+      await dependencies.maintenanceCoordinator.requireServingAllowed(request.url.split('?')[0])
+    }
+  })
+  app.addHook('preHandler', async (request) => {
+    const path = request.url.split('?')[0]
+    if (dependencies.maintenanceCoordinator !== undefined && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+      await dependencies.maintenanceCoordinator.requireMutationAllowed(path)
+    }
+  })
+  app.addHook('preHandler', async (request) => {
+    if (dependencies.tokens === undefined || dependencies.auth === undefined) return
+    const path = request.url.split('?')[0]
+    // All Workspace mutations create or alter sync-domain state, including
+    // key envelopes and recovery material. Do not limit the policy/risk gate
+    // to the newest durable-command route: an older client could otherwise
+    // write through another Workspace endpoint while sync.push is denied.
+    const isWorkspaceWrite = path.startsWith('/v1/workspaces')
+    const isDomainMutation = ['POST', 'PUT', 'PATCH'].includes(request.method)
+    const isPolicyGatedWrite = isDomainMutation
+      && (isWorkspaceWrite || path.includes('/sync/commands') || path.includes('/blobs/uploads'))
+    if (!isPolicyGatedWrite) return
+    const claims = await requireAuth(request, dependencies.tokens, dependencies.auth)
+    if (dependencies.compliance !== undefined) {
+      const missingPolicies = await dependencies.compliance.requiredReacceptance(claims.accountId)
+      if (missingPolicies.length > 0) {
+        throw new ApiError({ code: 'policy_reacceptance_required', message: 'Accept the current policies before creating or modifying synced data', statusCode: 423, details: { policyDocumentIds: missingPolicies } })
+      }
+    }
+    if (dependencies.risk !== undefined) await dependencies.risk.enforceAccount(claims.accountId, path.includes('/blobs/uploads') ? 'blob' : 'sync_write')
+  })
   const ErrorResponse = Type.Object({
     code: Type.String(),
     message: Type.String(),
@@ -129,6 +187,7 @@ export async function buildApp(
       415: ErrorResponse,
       416: ErrorResponse,
       422: ErrorResponse,
+      423: ErrorResponse,
       428: ErrorResponse,
       429: ErrorResponse,
       500: ErrorResponse,
@@ -138,11 +197,47 @@ export async function buildApp(
   })
   await app.register(createHealthRoutes(dependencies))
   await app.register(createCapabilitiesRoutes(config, dependencies))
+  if (config.deploymentMode === 'self-hosted'
+    && dependencies.bootstrap !== undefined && dependencies.deployment !== undefined && dependencies.webSessions !== undefined) {
+    await app.register(createSetupRoutes(config, dependencies.bootstrap, dependencies.deployment, dependencies.webSessions))
+  }
+  if (dependencies.invitations !== undefined && dependencies.webSessions !== undefined && dependencies.stepUps !== undefined && dependencies.auth !== undefined) {
+    await app.register(createInvitationRoutes(config, dependencies.invitations, dependencies.webSessions, dependencies.stepUps, dependencies.auth))
+  }
+  if (dependencies.compliance !== undefined && dependencies.webSessions !== undefined) {
+    await app.register(createComplianceRoutes(config, dependencies.compliance, dependencies.webSessions, dependencies.deletion, dependencies.stepUps))
+  }
+  if (dependencies.support !== undefined && dependencies.webSessions !== undefined
+    && dependencies.capabilities?.resolvePublic()['support.cases'] === true) {
+    await app.register(createSupportRoutes(dependencies.support, dependencies.webSessions))
+  }
+  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
+    && dependencies.support !== undefined && dependencies.staffSessions !== undefined) {
+    await app.register(createStaffSupportRoutes(dependencies.support, dependencies.staffSessions))
+  }
+  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
+    && dependencies.legalHolds !== undefined && dependencies.staffSessions !== undefined) {
+    await app.register(createStaffLegalHoldRoutes(dependencies.legalHolds, dependencies.staffSessions))
+  }
+  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
+    && dependencies.entitlements !== undefined && dependencies.staffSessions !== undefined) {
+    await app.register(createStaffBillingRoutes(dependencies.entitlements, dependencies.staffSessions))
+  }
+  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test' && dependencies.risk !== undefined && dependencies.staffSessions !== undefined) {
+    await app.register(createStaffRiskRoutes(dependencies.risk, dependencies.staffSessions))
+  }
+  if (dependencies.entitlements !== undefined && dependencies.webSessions !== undefined) {
+    await app.register(createBillingRoutes(dependencies.entitlements, dependencies.webSessions))
+  }
   if (dependencies.auth !== undefined && dependencies.tokens !== undefined) {
-    await app.register(createAuthRoutes(config, dependencies.auth, dependencies.tokens))
+    if (dependencies.deployment === undefined) throw new Error('Auth routes require DeploymentService')
+    await app.register(createAuthRoutes(config, dependencies.auth, dependencies.tokens, dependencies.deployment, dependencies.deletion, dependencies.risk))
   }
   if (dependencies.workspaces !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
-    await app.register(createWorkspaceRoutes(dependencies.workspaces, dependencies.tokens, dependencies.auth))
+    await app.register(createWorkspaceRoutes(config, dependencies.workspaces, dependencies.tokens, dependencies.auth))
+  }
+  if (dependencies.auth !== undefined && dependencies.tokens !== undefined && dependencies.deployment !== undefined) {
+    await app.register(createAccountContextRoutes(dependencies.auth, dependencies.tokens, dependencies.deployment, dependencies.entitlements, dependencies.usage, dependencies.compliance, dependencies.risk, dependencies.usageHardEnforcementActive, dependencies.maintenanceCoordinator))
   }
   if (dependencies.syncProtocol !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
     await app.register(createSyncRoutes(dependencies.syncProtocol, dependencies.tokens, dependencies.auth))
@@ -150,18 +245,22 @@ export async function buildApp(
   if (dependencies.tokens !== undefined && dependencies.workspaces !== undefined
     && dependencies.notifier !== undefined && dependencies.auth !== undefined) {
     await app.register(createEventRoutes(
-      dependencies.tokens, dependencies.auth, dependencies.workspaces, dependencies.notifier,
+      dependencies.tokens, dependencies.auth, dependencies.workspaces, dependencies.notifier, dependencies.maintenanceCoordinator,
+      dependencies.syncEpoch,
     ))
   }
   if (dependencies.blobs !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
     await app.register(createBlobRoutes(
-      dependencies.blobs, dependencies.tokens, dependencies.auth, config.blobPartBytes,
+      dependencies.blobs, dependencies.tokens, dependencies.auth, config.blobPartBytes, dependencies.risk,
     ))
   }
   if (dependencies.auth !== undefined && dependencies.webSessions !== undefined) {
     await app.register(createWebAuthRoutes(
-      config, dependencies.auth, dependencies.webSessions, dependencies.admin,
+      config, dependencies.auth, dependencies.webSessions, dependencies.admin, dependencies.deployment, dependencies.risk,
     ))
+  }
+  if (dependencies.emailIdentities !== undefined && dependencies.deployment !== undefined && dependencies.webSessions !== undefined) {
+    await app.register(createWebEmailRoutes(config, dependencies.deployment, dependencies.emailIdentities, dependencies.webSessions))
   }
   if (dependencies.workspaces !== undefined && dependencies.sync !== undefined
     && dependencies.webSessions !== undefined) {
@@ -169,8 +268,11 @@ export async function buildApp(
       dependencies.workspaces, dependencies.sync, dependencies.webSessions, dependencies.admin,
     ))
   }
-  if (dependencies.admin !== undefined && dependencies.webSessions !== undefined) {
-    await app.register(createWebAdminRoutes(config, dependencies.admin, dependencies.webSessions))
+  if (dependencies.admin !== undefined && dependencies.webSessions !== undefined && dependencies.stepUps !== undefined) {
+    await app.register(createWebAdminRoutes(config, dependencies.admin, dependencies.webSessions, dependencies.stepUps))
+  }
+  if (dependencies.mailAdmin !== undefined && dependencies.webSessions !== undefined && dependencies.stepUps !== undefined) {
+    await app.register(createMailAdminRoutes(config, dependencies.mailAdmin, dependencies.webSessions, dependencies.stepUps))
   }
   if (dependencies.deviceAuthorizations !== undefined && dependencies.webSessions !== undefined) {
     await app.register(createDeviceAuthorizationRoutes(

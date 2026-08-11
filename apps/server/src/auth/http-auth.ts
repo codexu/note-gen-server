@@ -15,7 +15,7 @@ export async function requireAuth(
 
   try {
     const claims = await tokens.verifyAccessToken(authorization.slice('Bearer '.length))
-    await auth?.assertDeviceActive(claims.accountId, claims.deviceId)
+    await auth?.assertDeviceActive(claims.accountId, claims.deviceId, claims.credentialEpoch, claims.instanceAuthEpoch, claims.issuedAt)
     return claims
   } catch (error) {
     if (error instanceof ApiError) throw error

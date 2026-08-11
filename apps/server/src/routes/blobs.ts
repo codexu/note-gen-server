@@ -4,6 +4,7 @@ import type { BlobService } from '../blobs/service.js'
 import { requireAuth } from '../auth/http-auth.js'
 import type { TokenService } from '../auth/tokens.js'
 import type { AuthService } from '../auth/service.js'
+import type { RiskService } from '../risk/service.js'
 import { ApiError } from '../errors.js'
 import { CounterString, HashString, NullableTimestamp, Timestamp, UploadedPartResponse } from './api-schemas.js'
 
@@ -41,6 +42,7 @@ export function createBlobRoutes(
   tokens: TokenService,
   auth: AuthService,
   partBytes: number,
+  risk?: RiskService,
 ): FastifyPluginAsyncTypebox {
   return async function blobRoutes(app) {
     app.post('/v1/workspaces/:workspaceId/blobs/uploads', {
@@ -51,6 +53,7 @@ export function createBlobRoutes(
           blobId: Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' }),
           expectedSize: Type.String({ pattern: '^\\d{1,19}$' }),
           ciphertextHash: Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' }),
+          expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })),
         }),
         response: { 200: UploadSessionResponse, 201: UploadSessionResponse },
       },
@@ -78,10 +81,15 @@ export function createBlobRoutes(
       if (!Buffer.isBuffer(request.body)) {
         throw new ApiError({ code: 'blob_part_invalid', message: 'Expected application/octet-stream', statusCode: 415 })
       }
-      return blobs.writePart(
+      const written = await blobs.writePart(
         claims.accountId, request.params.workspaceId, request.params.uploadId,
         request.params.partNumber, request.body,
       )
+      void blobs.recordIngress(
+        claims.accountId, request.params.workspaceId, request.params.uploadId,
+        request.params.partNumber, BigInt(request.body.byteLength), request.id,
+      ).catch(error => request.log.warn({ err: error }, 'Failed to record blob ingress usage'))
+      return written
     })
 
     app.get('/v1/workspaces/:workspaceId/blobs/uploads/:uploadId', {
@@ -107,10 +115,14 @@ export function createBlobRoutes(
     })
 
     app.post('/v1/workspaces/:workspaceId/blobs/uploads/:uploadId/complete', {
-      schema: { params: UploadParams, response: { 200: CompletedBlobResponse } },
+      schema: {
+        params: UploadParams,
+        body: Type.Optional(Type.Object({ expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })) })),
+        response: { 200: CompletedBlobResponse },
+      },
     }, async (request) => {
       const claims = await requireAuth(request, tokens, auth)
-      return blobs.complete(claims.accountId, request.params.workspaceId, request.params.uploadId)
+      return blobs.complete(claims.accountId, request.params.workspaceId, request.params.uploadId, request.body?.expectedSyncEpoch)
     })
 
     app.delete('/v1/workspaces/:workspaceId/blobs/uploads/:uploadId', {
@@ -125,6 +137,7 @@ export function createBlobRoutes(
       schema: { params: BlobParams, response: { 200: Type.Null() } },
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
+      await risk?.enforceAccountRead(claims.accountId, 'blob')
       const blob = await blobs.get(claims.accountId, request.params.workspaceId, request.params.blobId)
       return reply.headers({
         'content-length': blob.size.toString(),
@@ -139,6 +152,7 @@ export function createBlobRoutes(
       } },
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
+      await risk?.enforceAccountRead(claims.accountId, 'blob')
       const metadata = await blobs.get(claims.accountId, request.params.workspaceId, request.params.blobId)
       const range = parseRange(request.headers.range, metadata.size)
       const opened = await blobs.open(claims.accountId, request.params.workspaceId, request.params.blobId, range ?? undefined)
@@ -150,6 +164,11 @@ export function createBlobRoutes(
       } else {
         reply.header('content-length', metadata.size.toString())
       }
+      const deliveredBytes = range === null ? metadata.size : BigInt(range.end - range.start + 1)
+      reply.raw.once('finish', () => {
+        void blobs.recordEgress(claims.accountId, request.params.workspaceId, request.params.blobId, deliveredBytes, request.id)
+          .catch(error => request.log.warn({ err: error }, 'Failed to record blob egress usage'))
+      })
       return reply.type('application/octet-stream').send(opened.stream)
     })
   }

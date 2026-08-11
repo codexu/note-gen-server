@@ -16,6 +16,7 @@ export function createHealthRoutes(dependencies: ServiceDependencies): FastifyPl
     }, async (request, reply) => {
       try {
         await Promise.all([dependencies.database.check(), dependencies.blobStorage.check()])
+        if (dependencies.deployment?.getSafetyFailure() !== undefined) throw new Error('Startup safety gate is closed')
         return { status: 'ok' as const, version: dependencies.version }
       } catch (error) {
         request.log.warn({ err: error }, 'Readiness check failed')

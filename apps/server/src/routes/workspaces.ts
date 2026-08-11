@@ -1,9 +1,11 @@
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox'
 import { Type } from '@sinclair/typebox'
+import type { AppConfig } from '../config.js'
 import { requireAuth } from '../auth/http-auth.js'
 import type { TokenService } from '../auth/tokens.js'
 import type { AuthService } from '../auth/service.js'
 import type { WorkspaceService } from '../workspaces/service.js'
+import { ApiError } from '../errors.js'
 import { CounterString, KeyEnvelopeResponse, NullableTimestamp, Timestamp } from './api-schemas.js'
 
 const KeyEnvelope = Type.Object({
@@ -18,8 +20,12 @@ const KeyBody = Type.Object({
   envelopes: Type.Array(KeyEnvelope, { minItems: 1, maxItems: 100 }),
 })
 const WorkspaceParams = Type.Object({ workspaceId: Type.String({ format: 'uuid' }) })
+const IdempotencyKeyHeaders = Type.Object({
+  'idempotency-key': Type.Optional(Type.String({ minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._-]+$' })),
+})
 
 export function createWorkspaceRoutes(
+  config: AppConfig,
   workspaces: WorkspaceService,
   tokens: TokenService,
   auth: AuthService,
@@ -43,27 +49,61 @@ export function createWorkspaceRoutes(
         },
       },
     }, async (request) => {
+      if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test') {
+        throw new ApiError({ code: 'managed_default_workspace_unavailable', message: 'Managed default workspace is unavailable during internal E2EE testing', statusCode: 409 })
+      }
       const claims = await requireAuth(request, tokens, auth)
       return workspaces.getOrCreateManagedDefault(claims.accountId, request.body)
     })
 
     app.post('/v1/workspaces', {
       schema: {
+        headers: IdempotencyKeyHeaders,
         body: Type.Intersect([KeyBody, Type.Object({
           nameCiphertext: Type.String({ minLength: 1, maxLength: 8_192 }),
         })]),
         response: {
+          200: Type.Object({
+            id: Type.String({ format: 'uuid' }),
+            createdAt: Timestamp,
+            latestSequence: CounterString,
+            nameCiphertext: Type.String(),
+            created: Type.Boolean(),
+          }),
           201: Type.Object({
             id: Type.String({ format: 'uuid' }),
             createdAt: Timestamp,
             latestSequence: CounterString,
             nameCiphertext: Type.String(),
+            created: Type.Boolean(),
           }),
         },
       },
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
-      return reply.status(201).send(await workspaces.create(claims.accountId, request.body))
+      const idempotencyKey = typeof request.headers['idempotency-key'] === 'string'
+        ? request.headers['idempotency-key'] : undefined
+      const result = await workspaces.create(claims.accountId, {
+        ...request.body,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      })
+      return reply.status(result.created ? 201 : 200).send(result)
+    })
+
+    app.get('/v1/workspace-creation-requests/:idempotencyKey', {
+      schema: {
+        params: Type.Object({
+          idempotencyKey: Type.String({ minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._-]+$' }),
+        }),
+        response: { 200: Type.Object({ id: Type.String({ format: 'uuid' }), createdAt: Timestamp }) },
+      },
+    }, async (request) => {
+      const claims = await requireAuth(request, tokens, auth)
+      const workspace = await workspaces.getCreationRequest(claims.accountId, request.params.idempotencyKey)
+      if (workspace === undefined) {
+        throw new ApiError({ code: 'workspace_creation_not_found', message: 'Workspace creation was not found', statusCode: 404 })
+      }
+      return workspace
     })
 
     app.get('/v1/workspaces', {
@@ -133,6 +173,30 @@ export function createWorkspaceRoutes(
       return reply.status(201).send(await workspaces.addEnvelope(
         claims.accountId, request.params.workspaceId, request.params.keyVersion, request.body,
       ))
+    })
+
+    app.put('/v1/workspaces/:workspaceId/keys/:keyVersion/recovery-envelope', {
+      schema: {
+        headers: Type.Object({
+          'idempotency-key': Type.String({ minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._-]+$' }),
+        }),
+        params: Type.Object({
+          workspaceId: Type.String({ format: 'uuid' }),
+          keyVersion: Type.Integer({ minimum: 1 }),
+        }),
+        body: KeyEnvelope,
+        response: { 200: Type.Object({ id: Type.String({ format: 'uuid' }), status: Type.Literal('active'), created: Type.Boolean() }) },
+      },
+    }, async (request) => {
+      const claims = await requireAuth(request, tokens, auth)
+      const idempotencyKey = request.headers['idempotency-key']
+      if (typeof idempotencyKey !== 'string') {
+        throw new ApiError({ code: 'idempotency_key_invalid', message: 'Idempotency-Key is required', statusCode: 400 })
+      }
+      return workspaces.replaceRecoveryEnvelope(
+        claims.accountId, request.params.workspaceId, request.params.keyVersion,
+        request.body, idempotencyKey,
+      )
     })
 
     app.put('/v1/workspaces/:workspaceId/keys/:keyVersion/encryption/e2ee', {

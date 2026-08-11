@@ -7,19 +7,25 @@ import {
   syncV2ResourceBindings, syncV2Updates, workspaceKeys, workspaces,
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
+import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
 import type { ChangeNotifier } from '../sync/types.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import type { CiphertextEnvelope, SyncCommand, SyncCommandResult } from './types.js'
+import type { UsageService } from '../usage/service.js'
 
 export class DurableSyncService {
   constructor(
     private readonly database: DatabaseContext,
     private readonly workspaces: WorkspaceService,
     private readonly notifier: ChangeNotifier,
-    private readonly maxObjectBytes: number,
+    private readonly maxObjectBytes: number | (() => number),
+    private readonly usage?: UsageService,
+    private readonly storageLimitResolver?: (accountId: string) => Promise<bigint | null>,
+    private readonly syncEpoch?: string,
   ) {}
 
-  async commands(accountId: string, deviceId: string, workspaceId: string, commands: SyncCommand[]) {
+  async commands(accountId: string, deviceId: string, workspaceId: string, commands: SyncCommand[], expectedSyncEpoch?: string) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const results: SyncCommandResult[] = []
     for (const command of commands) {
@@ -37,7 +43,12 @@ export class DurableSyncService {
     return { results }
   }
 
-  async events(accountId: string, workspaceId: string, after: string, limit: number) {
+  async recordCommandIngress(accountId: string, workspaceId: string, bytes: bigint, requestId: string): Promise<void> {
+    await this.usage?.recordSyncCommandIngress({ accountId, workspaceId, bytes, requestId })
+  }
+
+  async events(accountId: string, workspaceId: string, after: string, limit: number, expectedSyncEpoch?: string) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const cursor = counter(after, 'after')
     const rows = await this.database.db.select().from(syncV2Events).where(and(
@@ -60,7 +71,9 @@ export class DurableSyncService {
     workspaceId: string,
     objectId: string,
     revisionValue: string,
+    expectedSyncEpoch?: string,
   ) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const revision = counter(revisionValue, 'revision')
     const [version] = await this.database.db.select().from(objectVersions).where(and(
@@ -114,7 +127,9 @@ export class DurableSyncService {
     objectId: string,
     beforeValue: string | null,
     limit: number,
+    expectedSyncEpoch?: string,
   ) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const before = beforeValue === null ? null : counter(beforeValue, 'before')
     const rows = await this.database.db.select().from(objectVersions).where(and(
@@ -137,9 +152,12 @@ export class DurableSyncService {
     bootstrapId: string | null,
     afterObjectId: string | null,
     limit: number,
+    expectedSyncEpoch?: string,
   ) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const session = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       await tx.delete(syncV2BootstrapSessions).where(sql`${syncV2BootstrapSessions.expiresAt} <= now()`)
       if (bootstrapId !== null) {
         const [existing] = await tx.select().from(syncV2BootstrapSessions).where(and(
@@ -225,7 +243,8 @@ export class DurableSyncService {
     }
   }
 
-  async documentUpdates(accountId: string, workspaceId: string, documentId: string, after: string, limit: number) {
+  async documentUpdates(accountId: string, workspaceId: string, documentId: string, after: string, limit: number, expectedSyncEpoch?: string) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const cursor = counter(after, 'after')
     const rows = await this.database.db.select().from(syncV2Updates).where(and(
@@ -241,10 +260,18 @@ export class DurableSyncService {
     }
   }
 
+  #assertSyncEpoch(expectedSyncEpoch: string | undefined): void {
+    if (expectedSyncEpoch !== undefined && this.syncEpoch !== undefined && expectedSyncEpoch !== this.syncEpoch) {
+      throw new ApiError({ code: 'sync_epoch_changed', message: 'Server restore epoch changed; re-bootstrap before continuing', statusCode: 409 })
+    }
+  }
+
   async #command(accountId: string, deviceId: string, workspaceId: string, command: SyncCommand): Promise<SyncCommandResult> {
     if ('ciphertext' in command) this.#validateEnvelope(command)
     const requestHash = createHash('sha256').update(JSON.stringify(command)).digest('base64url')
+    const storageLimit = this.storageLimitResolver === undefined ? null : await this.storageLimitResolver(accountId)
     const result = await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [lockedWorkspace] = await tx.select({ id: workspaces.id }).from(workspaces).where(and(
         eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId), isNull(workspaces.deletedAt),
       )).limit(1).for('update')
@@ -257,7 +284,7 @@ export class DurableSyncService {
         return { ...(previous.result as SyncCommandResult), duplicate: true }
       }
 
-      const applied = await this.#apply(tx, deviceId, workspaceId, command)
+      const applied = await this.#apply(tx, accountId, deviceId, workspaceId, command, storageLimit)
       await tx.insert(syncV2Commands).values({
         workspaceId, commandId: command.commandId, sourceDeviceId: deviceId, requestHash,
         result: applied as unknown as Record<string, unknown>,
@@ -270,7 +297,7 @@ export class DurableSyncService {
     return result
   }
 
-  async #apply(tx: SyncTransaction, deviceId: string, workspaceId: string, command: SyncCommand): Promise<SyncCommandResult> {
+  async #apply(tx: SyncTransaction, accountId: string, deviceId: string, workspaceId: string, command: SyncCommand, storageLimit: bigint | null): Promise<SyncCommandResult> {
     if (command.type === 'upsert-object' || command.type === 'delete-object') {
       const [current] = await tx.select().from(objects).where(and(eq(objects.workspaceId, workspaceId), eq(objects.objectId, command.objectId))).limit(1)
       if (current !== undefined && current.kind !== command.kind) {
@@ -431,6 +458,14 @@ export class DurableSyncService {
       if (nameCollision !== undefined && existingSameNameConflict === undefined) {
         this.#validateCiphertext(nameConflict!.ciphertext!, nameConflict!.ciphertextHash!)
       }
+      await this.usage?.applyCurrentObject(tx, {
+        accountId,
+        previousBytes: current === undefined ? 0n : BigInt(Buffer.from(current.ciphertext, 'base64url').byteLength),
+        previousActive: current !== undefined && current.deletedAt === null,
+        nextBytes: BigInt(Buffer.from(command.ciphertext, 'base64url').byteLength),
+        nextActive: !deleted,
+        storageLimit,
+      })
       await tx.insert(objectVersions).values({
         workspaceId, objectId: command.objectId, revision, sequence, kind: command.kind,
         parentObjectId,
@@ -601,6 +636,11 @@ export class DurableSyncService {
         if (item === undefined) throw new Error('Validated subtree item disappeared')
         const revision = current.currentRevision + 1n
         finalSequence = await nextSequence(tx, workspaceId)
+        await this.usage?.applyCurrentObject(tx, {
+          accountId,
+          previousBytes: BigInt(Buffer.from(current.ciphertext, 'base64url').byteLength), previousActive: current.deletedAt === null,
+          nextBytes: 0n, nextActive: false, storageLimit,
+        })
         await tx.insert(objectVersions).values({
           workspaceId, objectId: current.objectId, revision, sequence: finalSequence, kind: current.kind,
           parentObjectId: current.parentObjectId, nameCiphertext: current.nameCiphertext,
@@ -660,6 +700,7 @@ export class DurableSyncService {
         eventSequence: sequence, sourceDeviceId: deviceId, keyVersion: command.keyVersion,
         ciphertext: command.ciphertext, ciphertextHash: command.ciphertextHash,
       })
+      await this.usage?.applyActiveCrdtDelta(tx, accountId, BigInt(Buffer.from(command.ciphertext, 'base64url').byteLength), storageLimit)
       await insertEvent(tx, {
         workspaceId, sequence, commandId: command.commandId, deviceId, type: 'document.updated',
         objectId: command.objectId, documentId: command.documentId, documentSequence,
@@ -703,7 +744,12 @@ export class DurableSyncService {
         checkpointKeyVersion: command.keyVersion, checkpointCiphertext: command.ciphertext,
         checkpointCiphertextHash: command.ciphertextHash, materializedRevision, updatedAt: new Date(),
       }).where(and(eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.documentId)))
-      await this.#pruneCoveredUpdates(tx, workspaceId, command.documentId, covers)
+      const prunedBytes = await this.#pruneCoveredUpdates(tx, workspaceId, command.documentId, covers)
+      await this.usage?.applyActiveCrdtDelta(tx, accountId,
+        BigInt(Buffer.from(command.ciphertext, 'base64url').byteLength)
+          - BigInt(document.checkpointCiphertext === null ? 0 : Buffer.from(document.checkpointCiphertext, 'base64url').byteLength)
+          - prunedBytes,
+        storageLimit)
       await insertEvent(tx, {
         workspaceId, sequence, commandId: command.commandId, deviceId, type: 'document.checkpointed',
         objectId: command.objectId, documentId: command.documentId, documentSequence: covers,
@@ -907,6 +953,12 @@ export class DurableSyncService {
       }
       resolvedRevision = object.currentRevision + 1n
       const objectSequence = await nextSequence(tx, workspaceId)
+      await this.usage?.applyCurrentObject(tx, {
+        accountId,
+        previousBytes: BigInt(Buffer.from(object.ciphertext, 'base64url').byteLength), previousActive: object.deletedAt === null,
+        nextBytes: BigInt(Buffer.from(command.objectResolution.ciphertext, 'base64url').byteLength), nextActive: true,
+        storageLimit,
+      })
       await tx.insert(objectVersions).values({
         workspaceId, objectId: object.objectId, revision: resolvedRevision, sequence: objectSequence,
         kind: object.kind, parentObjectId: resolvedParentObjectId,
@@ -961,6 +1013,11 @@ export class DurableSyncService {
       }
       const revision = object.currentRevision + 1n
       const deleteSequence = await nextSequence(tx, workspaceId)
+      await this.usage?.applyCurrentObject(tx, {
+        accountId,
+        previousBytes: BigInt(Buffer.from(object.ciphertext, 'base64url').byteLength), previousActive: true,
+        nextBytes: 0n, nextActive: false, storageLimit,
+      })
       await tx.insert(objectVersions).values({
         workspaceId, objectId: object.objectId, revision, sequence: deleteSequence, kind: object.kind,
         parentObjectId: object.parentObjectId, nameCiphertext: object.nameCiphertext,
@@ -998,7 +1055,12 @@ export class DurableSyncService {
         checkpointCiphertextHash: command.resolution.ciphertextHash,
         materializedRevision: resolvedRevision, updatedAt: new Date(),
       }).where(and(eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.resolution.documentId)))
-      await this.#pruneCoveredUpdates(tx, workspaceId, command.resolution.documentId, documentSequence)
+      const prunedBytes = await this.#pruneCoveredUpdates(tx, workspaceId, command.resolution.documentId, documentSequence)
+      await this.usage?.applyActiveCrdtDelta(tx, accountId,
+        BigInt(Buffer.from(command.resolution.ciphertext, 'base64url').byteLength)
+          - BigInt(document.checkpointCiphertext === null ? 0 : Buffer.from(document.checkpointCiphertext, 'base64url').byteLength)
+          - prunedBytes,
+        storageLimit)
       await insertEvent(tx, {
         workspaceId, sequence: checkpointSequence, commandId: command.commandId, deviceId,
         type: 'document.checkpointed', objectId: conflict.objectId,
@@ -1051,15 +1113,20 @@ export class DurableSyncService {
     }
   }
 
-  async #pruneCoveredUpdates(tx: SyncTransaction, workspaceId: string, documentId: string, covers: bigint) {
+  async #pruneCoveredUpdates(tx: SyncTransaction, workspaceId: string, documentId: string, covers: bigint): Promise<bigint> {
     const [activeBootstrap] = await tx.select({ id: syncV2BootstrapSessions.id }).from(syncV2BootstrapSessions).where(and(
       eq(syncV2BootstrapSessions.workspaceId, workspaceId), gt(syncV2BootstrapSessions.expiresAt, new Date()),
     )).limit(1)
-    if (activeBootstrap !== undefined) return
+    if (activeBootstrap !== undefined) return 0n
+    const removed = await tx.select({ ciphertext: syncV2Updates.ciphertext }).from(syncV2Updates).where(and(
+      eq(syncV2Updates.workspaceId, workspaceId), eq(syncV2Updates.documentId, documentId),
+      sql`${syncV2Updates.documentSequence} <= ${covers}`,
+    ))
     await tx.delete(syncV2Updates).where(and(
       eq(syncV2Updates.workspaceId, workspaceId), eq(syncV2Updates.documentId, documentId),
       sql`${syncV2Updates.documentSequence} <= ${covers}`,
     ))
+    return removed.reduce((total, row) => total + BigInt(Buffer.from(row.ciphertext, 'base64url').byteLength), 0n)
   }
 
   #validateEnvelope(envelope: CiphertextEnvelope) {
@@ -1069,10 +1136,14 @@ export class DurableSyncService {
   #validateCiphertext(ciphertext: string, expectedHash: string) {
     if (!/^[A-Za-z0-9_-]+$/.test(ciphertext)) throw new ApiError({ code: 'request_invalid', message: 'Ciphertext must be Base64URL', statusCode: 400 })
     const bytes = Buffer.from(ciphertext, 'base64url')
-    if (bytes.byteLength > this.maxObjectBytes) throw new ApiError({ code: 'object_too_large', message: 'Ciphertext exceeds the configured limit', statusCode: 413 })
+    if (bytes.byteLength > this.currentMaxObjectBytes()) throw new ApiError({ code: 'object_too_large', message: 'Ciphertext exceeds the configured limit', statusCode: 413 })
     if (createHash('sha256').update(bytes).digest('base64url') !== expectedHash) {
       throw new ApiError({ code: 'ciphertext_hash_mismatch', message: 'Ciphertext hash does not match', statusCode: 422 })
     }
+  }
+
+  private currentMaxObjectBytes(): number {
+    return typeof this.maxObjectBytes === 'function' ? this.maxObjectBytes() : this.maxObjectBytes
   }
 
 }

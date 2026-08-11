@@ -1,12 +1,11 @@
-import { spawn } from 'node:child_process'
-import { mkdir, rm, stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
 import { and, desc, eq, inArray, isNull, ne, notInArray, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
-import type { AppConfig } from '../config.js'
 import type { BlobStorage } from '../storage/blob-storage.js'
+import type { UsageService } from '../usage/service.js'
+import type { AppConfig } from '../config.js'
+import type { DeploymentService, RuntimeConfiguration } from '../deployment/service.js'
 import {
-  accounts, adminAuditLogs, adminBackups, adminJobs, devices, refreshTokens, webSessions, workspaces,
+  accounts, adminAuditLogs, adminBackups, adminJobs, devices, refreshTokens, riskEvents, riskRestrictions, webSessions, workspaces,
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 
@@ -14,7 +13,10 @@ export class AdminService {
   constructor(
     private readonly database: DatabaseContext,
     private readonly storage?: BlobStorage,
+    private readonly usage?: UsageService,
+    private readonly workspaceLimitResolver?: (accountId: string) => Promise<bigint | null>,
     private readonly config?: AppConfig,
+    private readonly deployment?: DeploymentService,
   ) {}
 
   async recoverInterruptedJobs(): Promise<void> {
@@ -22,7 +24,9 @@ export class AdminService {
     await this.database.db.transaction(async (tx) => {
       await tx.update(adminJobs).set({
         status: 'failed', error: 'Server restarted before the job completed', finishedAt: now,
-      }).where(inArray(adminJobs.status, ['pending', 'running']))
+      // This process only understands the legacy in-process backup job. Never
+      // mutate future generation/versioned jobs during a rolling deployment.
+      }).where(and(eq(adminJobs.type, 'backup.create'), inArray(adminJobs.status, ['pending', 'running'])))
       await tx.update(adminBackups).set({ status: 'failed' }).where(eq(adminBackups.status, 'creating'))
     })
   }
@@ -77,10 +81,13 @@ export class AdminService {
   async restoreWorkspace(actorAccountId: string, workspaceId: string): Promise<void> {
     await this.assertAdmin(actorAccountId)
     await this.database.db.transaction(async (tx) => {
-      const restored = await tx.update(workspaces).set({ deletedAt: null, updatedAt: new Date() }).where(and(
-        eq(workspaces.id, workspaceId), sql`${workspaces.deletedAt} is not null`,
-      )).returning({ id: workspaces.id })
-      if (restored.length === 0) throw new ApiError({ code: 'workspace_not_deleted', message: 'Deleted workspace was not found', statusCode: 404 })
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`notegen-workspace-lifecycle:${workspaceId}`}))`)
+      const [target] = await tx.select({ accountId: workspaces.accountId, deletedAt: workspaces.deletedAt })
+        .from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1).for('update')
+      if (target === undefined || target.deletedAt === null) throw new ApiError({ code: 'workspace_not_deleted', message: 'Deleted workspace was not found', statusCode: 404 })
+      await this.usage?.admitWorkspace(tx, target.accountId, this.workspaceLimitResolver === undefined
+        ? null : await this.workspaceLimitResolver(target.accountId))
+      await tx.update(workspaces).set({ deletedAt: null, updatedAt: new Date() }).where(eq(workspaces.id, workspaceId))
       await tx.insert(adminAuditLogs).values({
         actorAccountId, action: 'workspace.admin-restore', targetType: 'workspace', targetId: workspaceId,
       })
@@ -90,7 +97,11 @@ export class AdminService {
   async getRuntimeConfiguration(accountId: string) {
     await this.assertAdmin(accountId)
     if (this.config === undefined) throw new ApiError({ code: 'configuration_unavailable', message: 'Runtime configuration is unavailable', statusCode: 503 })
+    const state = this.deployment?.getState()
     return {
+      revision: state?.configurationRevision ?? '0',
+      editable: state !== undefined && state.deploymentMode === 'self-hosted',
+      runtimeConfiguration: state?.runtimeConfiguration ?? null,
       nodeEnv: this.config.nodeEnv,
       host: this.config.host,
       port: this.config.port,
@@ -113,7 +124,56 @@ export class AdminService {
         versions: this.config.versionRetentionDays,
         tombstones: this.config.tombstoneRetentionDays,
       },
+      mail: {
+        driver: this.config.deploymentMode === 'hosted' ? this.config.hostedMailProvider : this.config.mailDriver,
+        configured: this.config.deploymentMode === 'hosted'
+          ? this.config.hostedMailProvider === 'log'
+          : this.config.mailDriver === 'smtp',
+        fromAddress: this.config.mailFromAddress || null,
+        fromName: this.config.mailFromName,
+        replyTo: this.config.mailReplyTo || null,
+        smtp: this.config.deploymentMode === 'self-hosted' && this.config.mailDriver === 'smtp'
+          ? {
+              host: this.config.smtpHost,
+              port: this.config.smtpPort,
+              tlsMode: this.config.smtpTlsMode,
+              authenticationConfigured: this.config.smtpUsername.length > 0,
+              tlsRejectUnauthorized: this.config.smtpTlsRejectUnauthorized,
+            }
+          : null,
+      },
     }
+  }
+
+  async updateRuntimeConfiguration(accountId: string, configuration: RuntimeConfiguration, expectedRevision: string, smtpPassword?: string | null) {
+    await this.assertAdmin(accountId)
+    if (this.deployment === undefined || this.deployment.getState().deploymentMode !== 'self-hosted') {
+      throw new ApiError({ code: 'runtime_configuration_read_only', message: 'Runtime configuration is read-only for this deployment', statusCode: 403 })
+    }
+    if (configuration.versionRetentionDays < configuration.changeRetentionDays) {
+      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'Version retention must be greater than or equal to change retention', statusCode: 400 })
+    }
+    if (configuration.accountDeletionRetentionDays < configuration.accountDeletionCoolingOffDays) {
+      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'Account deletion retention must be greater than or equal to the cooling-off period', statusCode: 400 })
+    }
+    if (this.config !== undefined && configuration.maxBlobBytes > this.config.blobPartBytes * 10_000) {
+      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'Blob limit exceeds the 10000-part upload limit', statusCode: 400 })
+    }
+    const passwordConfigured = smtpPassword === undefined ? this.deployment.getState().runtimeConfiguration.smtpPasswordConfigured
+      : smtpPassword !== null && smtpPassword.length > 0
+    if (configuration.mailDriver === 'smtp' && (
+      configuration.smtpHost.length === 0 || !isEmailAddress(configuration.mailFromAddress)
+      || ((configuration.smtpUsername.length === 0) !== !passwordConfigured)
+      || configuration.smtpTlsMode === 'none' || !configuration.smtpTlsRejectUnauthorized
+      || (configuration.mailReplyTo.length > 0 && !isEmailAddress(configuration.mailReplyTo))
+    )) {
+      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'SMTP configuration is incomplete or insecure', statusCode: 400 })
+    }
+    const updated = await this.deployment.updateRuntimeConfiguration(accountId, configuration, expectedRevision, smtpPassword)
+    if (!updated) {
+      throw new ApiError({ code: 'runtime_configuration_conflict', message: 'Runtime configuration was changed by another administrator', statusCode: 409 })
+    }
+    return this.getRuntimeConfiguration(accountId)
   }
 
   async inspectStorage(accountId: string) {
@@ -141,22 +201,16 @@ export class AdminService {
 
   async createBackup(actorAccountId: string): Promise<{ jobId: string, backupId: string }> {
     await this.assertAdmin(actorAccountId)
-    if (this.config === undefined) throw new ApiError({ code: 'configuration_unavailable', message: 'Backup configuration is unavailable', statusCode: 503 })
-    const created = await this.database.db.transaction(async (tx) => {
-      const [job] = await tx.insert(adminJobs).values({ actorAccountId, type: 'backup.create' })
-        .returning({ id: adminJobs.id })
-      if (job === undefined) throw new Error('Backup job insert returned no row')
-      const filename = `notegen-${new Date().toISOString().replaceAll(/[:.]/g, '-')}-${job.id}.dump`
-      const [backup] = await tx.insert(adminBackups).values({ jobId: job.id, filename })
-        .returning({ id: adminBackups.id })
-      if (backup === undefined) throw new Error('Backup record insert returned no row')
-      await tx.insert(adminAuditLogs).values({
-        actorAccountId, action: 'backup.create', targetType: 'backup', targetId: backup.id,
-      })
-      return { jobId: job.id, backupId: backup.id, filename }
+    // The former endpoint launched an in-process pg_dump and labelled its
+    // database-only artifact "ready". It had neither a Blob snapshot nor a
+    // manifest/signature/restore preflight, and could not survive a restart.
+    // Do not create more artifacts that look recoverable while the unified
+    // backup runner is not available.
+    throw new ApiError({
+      code: 'unified_backup_required',
+      message: 'Backup creation is disabled until the unified, verified backup runner is configured',
+      statusCode: 409,
     })
-    void this.#runBackup(created.jobId, created.backupId, created.filename)
-    return { jobId: created.jobId, backupId: created.backupId }
   }
 
   async listBackups(accountId: string) {
@@ -169,30 +223,22 @@ export class AdminService {
     return rows.map((row) => ({ ...row, size: row.size?.toString() ?? null }))
   }
 
-  async getBackupFile(accountId: string, backupId: string): Promise<{ path: string, filename: string }> {
+  async getBackupFile(accountId: string, _backupId: string): Promise<{ path: string, filename: string }> {
     await this.assertAdmin(accountId)
-    if (this.config === undefined) throw new ApiError({ code: 'configuration_unavailable', message: 'Backup configuration is unavailable', statusCode: 503 })
-    const [backup] = await this.database.db.select({
-      filename: adminBackups.filename, status: adminBackups.status,
-    }).from(adminBackups).where(eq(adminBackups.id, backupId)).limit(1)
-    if (backup === undefined || backup.status !== 'ready') {
-      throw new ApiError({ code: 'backup_not_ready', message: 'Backup is missing or not ready', statusCode: 404 })
-    }
-    return { path: resolve(this.config.backupPath, backup.filename), filename: backup.filename }
+    throw new ApiError({
+      code: 'legacy_backup_unavailable',
+      message: 'Legacy database-only backup downloads are disabled; use the offline recovery procedure for existing artifacts',
+      statusCode: 410,
+    })
   }
 
-  async deleteBackup(actorAccountId: string, backupId: string): Promise<void> {
-    const backup = await this.getBackupFile(actorAccountId, backupId)
-    await this.database.db.transaction(async (tx) => {
-      const changed = await tx.update(adminBackups).set({ status: 'deleting' }).where(eq(adminBackups.id, backupId))
-        .returning({ id: adminBackups.id })
-      if (changed.length === 0) throw new ApiError({ code: 'backup_not_found', message: 'Backup was not found', statusCode: 404 })
-      await tx.insert(adminAuditLogs).values({
-        actorAccountId, action: 'backup.delete', targetType: 'backup', targetId: backupId,
-      })
+  async deleteBackup(actorAccountId: string, _backupId: string): Promise<void> {
+    await this.assertAdmin(actorAccountId)
+    throw new ApiError({
+      code: 'legacy_backup_unavailable',
+      message: 'Legacy backup management is disabled; manage existing artifacts through the offline recovery procedure',
+      statusCode: 410,
     })
-    await rm(backup.path, { force: true })
-    await this.database.db.delete(adminBackups).where(eq(adminBackups.id, backupId))
   }
 
   async listJobs(accountId: string) {
@@ -205,36 +251,6 @@ export class AdminService {
     const [job] = await this.database.db.select().from(adminJobs).where(eq(adminJobs.id, jobId)).limit(1)
     if (job === undefined) throw new ApiError({ code: 'job_not_found', message: 'Administrative job was not found', statusCode: 404 })
     return job
-  }
-
-  async #runBackup(jobId: string, backupId: string, filename: string): Promise<void> {
-    if (this.config === undefined) return
-    const startedAt = new Date()
-    await this.database.db.update(adminJobs).set({ status: 'running', progress: 10, startedAt })
-      .where(eq(adminJobs.id, jobId))
-    try {
-      await mkdir(this.config.backupPath, { recursive: true })
-      const target = resolve(this.config.backupPath, filename)
-      await runPgDump(this.config.databaseUrl, target)
-      const details = await stat(target)
-      const finishedAt = new Date()
-      await this.database.db.transaction(async (tx) => {
-        await tx.update(adminBackups).set({
-          status: 'ready', size: BigInt(details.size), completedAt: finishedAt,
-        }).where(eq(adminBackups.id, backupId))
-        await tx.update(adminJobs).set({
-          status: 'completed', progress: 100, finishedAt,
-          result: { backupId, filename, size: details.size },
-        }).where(eq(adminJobs.id, jobId))
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Backup failed'
-      await this.database.db.transaction(async (tx) => {
-        await tx.update(adminBackups).set({ status: 'failed' }).where(eq(adminBackups.id, backupId))
-        await tx.update(adminJobs).set({ status: 'failed', error: message, finishedAt: new Date() })
-          .where(eq(adminJobs.id, jobId))
-      })
-    }
   }
 
   async assertAdmin(accountId: string): Promise<void> {
@@ -473,13 +489,14 @@ export class AdminService {
     await this.assertAdmin(actorAccountId)
     await this.database.db.transaction(async (tx) => {
       const [target] = await tx.select({
-        id: workspaces.id, isDefault: workspaces.isDefault, deletedAt: workspaces.deletedAt,
+        id: workspaces.id, accountId: workspaces.accountId, isDefault: workspaces.isDefault, deletedAt: workspaces.deletedAt,
       }).from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1).for('update')
       if (target === undefined) throw new ApiError({ code: 'workspace_not_found', message: 'Workspace was not found', statusCode: 404 })
       if (target.isDefault) throw new ApiError({ code: 'workspace_default_delete_forbidden', message: 'Default workspace cannot be deleted', statusCode: 409 })
       if (target.deletedAt === null) {
         const now = new Date()
         await tx.update(workspaces).set({ deletedAt: now, updatedAt: now }).where(eq(workspaces.id, workspaceId))
+        await this.usage?.releaseWorkspace(tx, target.accountId)
       }
       await tx.insert(adminAuditLogs).values({
         actorAccountId, action: 'workspace.admin-delete', targetType: 'workspace', targetId: workspaceId,
@@ -492,8 +509,9 @@ export class AdminService {
     await this.database.db.transaction(async (tx) => {
       const now = new Date()
       const changed = await tx.update(devices).set({ revokedAt: now, updatedAt: now })
-        .where(and(eq(devices.id, deviceId), isNull(devices.revokedAt))).returning({ id: devices.id })
+        .where(and(eq(devices.id, deviceId), isNull(devices.revokedAt))).returning({ id: devices.id, accountId: devices.accountId })
       if (changed.length === 0) throw new ApiError({ code: 'device_not_found', message: 'Active device was not found', statusCode: 404 })
+      await this.usage?.releaseDevice(tx, changed[0]!.accountId)
       await tx.update(refreshTokens).set({ revokedAt: now }).where(and(
         eq(refreshTokens.deviceId, deviceId), isNull(refreshTokens.revokedAt),
       ))
@@ -557,6 +575,112 @@ export class AdminService {
 
   async setAccountSuspended(actorAccountId: string, targetAccountId: string, suspended: boolean): Promise<void> {
     await this.batchSetAccountsSuspended(actorAccountId, [targetAccountId], suspended)
+  }
+
+  async listAccountRiskRestrictions(actorAccountId: string, targetAccountId: string) {
+    await this.assertAdmin(actorAccountId)
+    return this.database.db.select({
+      id: riskRestrictions.id, scope: riskRestrictions.scope, action: riskRestrictions.action,
+      reasonCode: riskRestrictions.reasonCode, source: riskRestrictions.source,
+      expiresAt: riskRestrictions.expiresAt, createdBy: riskRestrictions.createdBy,
+      revokedAt: riskRestrictions.revokedAt, revokedBy: riskRestrictions.revokedBy,
+      createdAt: riskRestrictions.createdAt,
+    }).from(riskRestrictions).where(and(
+      eq(riskRestrictions.subjectType, 'account'), eq(riskRestrictions.subjectRef, targetAccountId),
+    )).orderBy(desc(riskRestrictions.createdAt)).limit(200)
+  }
+
+  async listAccountRiskEvents(actorAccountId: string, targetAccountId: string) {
+    await this.assertAdmin(actorAccountId)
+    const rows = await this.database.db.select({
+      id: riskEvents.id, eventType: riskEvents.eventType, requestId: riskEvents.requestId,
+      outcome: riskEvents.outcome, reasonCodes: riskEvents.reasonCodes, createdAt: riskEvents.createdAt,
+    }).from(riskEvents).where(eq(riskEvents.accountId, targetAccountId))
+      .orderBy(desc(riskEvents.createdAt)).limit(200)
+    return rows.map((row) => ({ ...row, id: row.id.toString() }))
+  }
+
+  async getAccountUsage(actorAccountId: string, targetAccountId: string) {
+    await this.assertAdmin(actorAccountId)
+    if (this.usage === undefined) throw new ApiError({ code: 'usage_unavailable', message: 'Usage accounting is unavailable', statusCode: 503 })
+    const [account] = await this.database.db.select({ id: accounts.id }).from(accounts)
+      .where(eq(accounts.id, targetAccountId)).limit(1)
+    if (account === undefined) throw new ApiError({ code: 'account_not_found', message: 'Account was not found', statusCode: 404 })
+    return this.usage.getSnapshot(targetAccountId)
+  }
+
+  async reconcileAccountUsage(actorAccountId: string, targetAccountId: string) {
+    await this.assertAdmin(actorAccountId)
+    if (this.usage === undefined) throw new ApiError({ code: 'usage_unavailable', message: 'Usage accounting is unavailable', statusCode: 503 })
+    await this.usage.reconcileCurrent(targetAccountId)
+    const snapshot = await this.usage.getSnapshot(targetAccountId)
+    await this.recordAudit(actorAccountId, 'usage.reconcile', 'account', targetAccountId, { revision: snapshot.revision })
+    return snapshot
+  }
+
+  async upsertAccountRiskRestriction(actorAccountId: string, input: {
+    targetAccountId: string
+    scope: 'authentication' | 'recovery' | 'device' | 'sync_write' | 'blob' | 'billing' | 'all'
+    action: 'challenge' | 'deny' | 'lock' | 'read_only' | 'review'
+    reasonCode: string
+    expiresAt: Date | null
+  }): Promise<{ id: string }> {
+    await this.assertAdmin(actorAccountId)
+    if (actorAccountId === input.targetAccountId) {
+      throw new ApiError({ code: 'risk_self_restriction_forbidden', message: 'Administrators cannot restrict themselves', statusCode: 409 })
+    }
+    return this.database.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext('notegen-admin-role'))`)
+      const [target] = await tx.select({ id: accounts.id, isAdmin: accounts.isAdmin, suspendedAt: accounts.suspendedAt, disabledAt: accounts.disabledAt })
+        .from(accounts).where(eq(accounts.id, input.targetAccountId)).limit(1).for('update')
+      if (target === undefined) throw new ApiError({ code: 'account_not_found', message: 'Account was not found', statusCode: 404 })
+      if (target.isAdmin && target.suspendedAt === null && target.disabledAt === null) {
+        const [otherAdmin] = await tx.select({ id: accounts.id }).from(accounts).where(and(
+          eq(accounts.isAdmin, true), ne(accounts.id, input.targetAccountId),
+          isNull(accounts.suspendedAt), isNull(accounts.disabledAt),
+        )).limit(1)
+        if (otherAdmin === undefined) {
+          throw new ApiError({ code: 'last_admin_restriction_forbidden', message: 'The last active administrator cannot be restricted', statusCode: 409 })
+        }
+      }
+      const [existing] = await tx.select({ id: riskRestrictions.id }).from(riskRestrictions).where(and(
+        eq(riskRestrictions.subjectType, 'account'), eq(riskRestrictions.subjectRef, input.targetAccountId),
+        eq(riskRestrictions.scope, input.scope), eq(riskRestrictions.action, input.action), isNull(riskRestrictions.revokedAt),
+      )).limit(1).for('update')
+      const now = new Date()
+      const [restriction] = existing === undefined
+        ? await tx.insert(riskRestrictions).values({
+            subjectType: 'account', subjectRef: input.targetAccountId, scope: input.scope,
+            action: input.action, reasonCode: input.reasonCode, source: 'staff',
+            expiresAt: input.expiresAt, createdBy: actorAccountId,
+          }).returning({ id: riskRestrictions.id })
+        : await tx.update(riskRestrictions).set({
+            reasonCode: input.reasonCode, expiresAt: input.expiresAt, createdBy: actorAccountId,
+          }).where(eq(riskRestrictions.id, existing.id)).returning({ id: riskRestrictions.id })
+      await tx.insert(adminAuditLogs).values({
+        actorAccountId, action: existing === undefined ? 'risk.restriction.create' : 'risk.restriction.update',
+        targetType: 'account', targetId: input.targetAccountId,
+        metadata: { restrictionId: restriction!.id, scope: input.scope, restrictionAction: input.action, reasonCode: input.reasonCode, expiresAt: input.expiresAt?.toISOString() ?? null, at: now.toISOString() },
+      })
+      return { id: restriction!.id }
+    })
+  }
+
+  async revokeAccountRiskRestriction(actorAccountId: string, restrictionId: string): Promise<void> {
+    await this.assertAdmin(actorAccountId)
+    await this.database.db.transaction(async (tx) => {
+      const [restriction] = await tx.select({ id: riskRestrictions.id, subjectRef: riskRestrictions.subjectRef })
+        .from(riskRestrictions).where(and(
+          eq(riskRestrictions.id, restrictionId), eq(riskRestrictions.subjectType, 'account'), isNull(riskRestrictions.revokedAt),
+        )).limit(1).for('update')
+      if (restriction === undefined) throw new ApiError({ code: 'risk_restriction_not_found', message: 'Active risk restriction was not found', statusCode: 404 })
+      await tx.update(riskRestrictions).set({ revokedAt: new Date(), revokedBy: actorAccountId })
+        .where(eq(riskRestrictions.id, restriction.id))
+      await tx.insert(adminAuditLogs).values({
+        actorAccountId, action: 'risk.restriction.revoke', targetType: 'account', targetId: restriction.subjectRef,
+        metadata: { restrictionId },
+      })
+    })
   }
 
   async listAudit(accountId: string, options: {
@@ -692,28 +816,6 @@ export class AdminService {
   }
 }
 
-async function runPgDump(databaseUrl: string, target: string): Promise<void> {
-  const url = new URL(databaseUrl)
-  const args = [
-    '--format=custom', '--no-owner', '--no-privileges', '--file', target,
-    '--host', url.hostname, '--port', url.port || '5432', '--username', decodeURIComponent(url.username),
-    url.pathname.replace(/^\//, ''),
-  ]
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn('pg_dump', args, {
-      env: { ...process.env, PGPASSWORD: decodeURIComponent(url.password) },
-      stdio: ['ignore', 'ignore', 'pipe'],
-    })
-    let stderr = ''
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk: string) => { stderr += chunk.slice(0, 4_000) })
-    child.once('error', reject)
-    child.once('exit', (code) => code === 0
-      ? resolvePromise()
-      : reject(new Error(stderr.trim() || `pg_dump exited with status ${String(code)}`)))
-  })
-}
-
 function encodeCursor(at: Date, id: string): string {
   return Buffer.from(JSON.stringify({ at: at.toISOString(), id })).toString('base64url')
 }
@@ -730,4 +832,8 @@ function decodeCursor(value: string | undefined): { at: string, id: string } | n
   } catch {
     throw new ApiError({ code: 'pagination_cursor_invalid', message: 'Pagination cursor is invalid', statusCode: 400 })
   }
+}
+
+function isEmailAddress(value: string): boolean {
+  return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 }

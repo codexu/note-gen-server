@@ -1,6 +1,7 @@
 import { Type, type Static } from '@sinclair/typebox'
 import { Value } from '@sinclair/typebox/value'
 import { networkInterfaces } from 'node:os'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const EnvironmentSchema = Type.Object({
@@ -43,6 +44,35 @@ const EnvironmentSchema = Type.Object({
   WEB_DIST_PATH: Type.String({ minLength: 1 }),
   WEB_PUBLIC_BASE_URL: Type.String({ minLength: 1 }),
   DEPLOYMENT_MODE: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
+  HOSTED_RELEASE_STAGE: Type.Union([Type.Literal('internal-test'), Type.Literal('live')]),
+  HOSTED_REGISTRATION_POLICY: Type.Union([Type.Literal('disabled'), Type.Literal('public')]),
+  BILLING_PROVIDER: Type.Union([Type.Literal('none'), Type.Literal('mock')]),
+  BILLING_PROVIDER_ENVIRONMENT: Type.Union([Type.Literal('test'), Type.Literal('live')]),
+  BILLING_MERCHANT_ENTITY: Type.String(),
+  HOSTED_MAIL_PROVIDER: Type.Union([Type.Literal('none'), Type.Literal('log')]),
+  MAIL_DRIVER: Type.Union([Type.Literal('disabled'), Type.Literal('smtp')]),
+  MAIL_FROM_ADDRESS: Type.String(),
+  MAIL_FROM_NAME: Type.String({ maxLength: 200 }),
+  MAIL_REPLY_TO: Type.String(),
+  MAIL_DEFAULT_LOCALE: Type.Union([Type.Literal('en'), Type.Literal('zh-CN')]),
+  SMTP_HOST: Type.String(),
+  SMTP_PORT: Type.Integer({ minimum: 1, maximum: 65_535 }),
+  SMTP_TLS_MODE: Type.Union([Type.Literal('starttls-required'), Type.Literal('starttls'), Type.Literal('tls'), Type.Literal('none')]),
+  SMTP_USERNAME: Type.String(),
+  SMTP_PASSWORD: Type.String(),
+  SMTP_CONNECT_TIMEOUT_MS: Type.Integer({ minimum: 1_000, maximum: 120_000 }),
+  SMTP_COMMAND_TIMEOUT_MS: Type.Integer({ minimum: 1_000, maximum: 120_000 }),
+  SMTP_TLS_REJECT_UNAUTHORIZED: Type.Boolean(),
+  ALLOW_INSECURE_SMTP: Type.Boolean(),
+  HOSTED_DATA_REGION: Type.String({ minLength: 1 }),
+  PENDING_EMAIL_VERIFICATION_DAYS: Type.Integer({ minimum: 1, maximum: 90 }),
+  ACCOUNT_DELETION_COOLING_OFF_DAYS: Type.Integer({ minimum: 1, maximum: 365 }),
+  ACCOUNT_DELETION_RETENTION_DAYS: Type.Integer({ minimum: 1, maximum: 3650 }),
+  DELETION_LEDGER_PATH: Type.String({ minLength: 1 }),
+  LEGAL_HOLD_APPROVAL_AUTHORITY: Type.Literal('platform-admin'),
+  USAGE_ENFORCEMENT: Type.Union([Type.Literal('disabled'), Type.Literal('observe'), Type.Literal('hard')]),
+  CAPABILITIES_ENABLE: Type.Array(Type.String()),
+  CAPABILITIES_DISABLE: Type.Array(Type.String()),
 })
 
 type Environment = Static<typeof EnvironmentSchema>
@@ -84,6 +114,42 @@ export interface AppConfig {
   readonly webDistPath: string
   readonly webPublicBaseUrl: string
   readonly deploymentMode: Environment['DEPLOYMENT_MODE']
+  /** Internal-test is deliberately the default: no hosted capability is a production launch signal. */
+  readonly hostedReleaseStage: Environment['HOSTED_RELEASE_STAGE']
+  /** Internal-test-only override for the otherwise control-plane-managed hosted signup policy. */
+  readonly hostedRegistrationPolicy: Extract<Environment['HOSTED_REGISTRATION_POLICY'], 'disabled' | 'public'>
+  /** Provider-neutral test seam. `mock` never creates a real charge or customer. */
+  readonly billingProvider: Environment['BILLING_PROVIDER']
+  readonly billingProviderEnvironment: Environment['BILLING_PROVIDER_ENVIRONMENT']
+  readonly billingMerchantEntity: string
+  /** `log` is a redacted local sink and must never deliver email externally. */
+  readonly hostedMailProvider: Environment['HOSTED_MAIL_PROVIDER']
+  /** Seeded from legacy env once, then managed by the encrypted runtime configuration store. */
+  readonly mailDriver: Environment['MAIL_DRIVER']
+  readonly mailFromAddress: string
+  readonly mailFromName: string
+  readonly mailReplyTo: string
+  readonly mailDefaultLocale: Environment['MAIL_DEFAULT_LOCALE']
+  readonly smtpHost: string
+  readonly smtpPort: number
+  readonly smtpTlsMode: Environment['SMTP_TLS_MODE']
+  readonly smtpUsername: string
+  readonly smtpPassword: string
+  readonly smtpConnectTimeoutMs: number
+  readonly smtpCommandTimeoutMs: number
+  readonly smtpTlsRejectUnauthorized: boolean
+  readonly hostedDataRegion: string
+  /** Pending hosted registrations are non-durable and may be safely pruned after this window. */
+  readonly pendingEmailVerificationDays: number
+  readonly accountDeletionCoolingOffDays: number
+  readonly accountDeletionRetentionDays: number
+  /** Separate receipt store used for internal recovery drills; it must not share an application backup path. */
+  readonly deletionLedgerPath: string
+  readonly legalHoldApprovalAuthority: 'platform-admin'
+  /** Commercial counter enforcement is internal-test-only until every writer is fenced. */
+  readonly usageEnforcement: Environment['USAGE_ENFORCEMENT']
+  readonly capabilitiesEnable: readonly string[]
+  readonly capabilitiesDisable: readonly string[]
 }
 
 function integer(value: string | undefined, fallback: number): number {
@@ -156,6 +222,39 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     WEB_PUBLIC_BASE_URL: environment.WEB_PUBLIC_BASE_URL?.trim()
       || (nodeEnv === 'development' ? 'http://127.0.0.1:3790' : environment.PUBLIC_BASE_URL ?? 'http://localhost:3789'),
     DEPLOYMENT_MODE: environment.DEPLOYMENT_MODE === 'hosted' ? 'hosted' : 'self-hosted',
+    HOSTED_RELEASE_STAGE: environment.HOSTED_RELEASE_STAGE === 'live' ? 'live' : 'internal-test',
+    HOSTED_REGISTRATION_POLICY: environment.HOSTED_REGISTRATION_POLICY === 'public' ? 'public' : 'disabled',
+    BILLING_PROVIDER: environment.BILLING_PROVIDER === 'mock' ? 'mock' : 'none',
+    BILLING_PROVIDER_ENVIRONMENT: environment.BILLING_PROVIDER_ENVIRONMENT === 'live' ? 'live' : 'test',
+    BILLING_MERCHANT_ENTITY: environment.BILLING_MERCHANT_ENTITY?.trim() ?? '',
+    HOSTED_MAIL_PROVIDER: environment.HOSTED_MAIL_PROVIDER === 'log' ? 'log' : 'none',
+    MAIL_DRIVER: environment.MAIL_DRIVER === 'smtp' ? 'smtp' : 'disabled',
+    MAIL_FROM_ADDRESS: environment.MAIL_FROM_ADDRESS?.trim() ?? '',
+    MAIL_FROM_NAME: environment.MAIL_FROM_NAME?.trim() || 'NoteGen',
+    MAIL_REPLY_TO: environment.MAIL_REPLY_TO?.trim() ?? '',
+    MAIL_DEFAULT_LOCALE: environment.MAIL_DEFAULT_LOCALE === 'en' ? 'en' : 'zh-CN',
+    SMTP_HOST: environment.SMTP_HOST?.trim() ?? '',
+    SMTP_PORT: integer(environment.SMTP_PORT, 587),
+    SMTP_TLS_MODE: environment.SMTP_TLS_MODE === 'tls' ? 'tls'
+      : environment.SMTP_TLS_MODE === 'starttls' ? 'starttls'
+        : environment.SMTP_TLS_MODE === 'none' ? 'none' : 'starttls-required',
+    SMTP_USERNAME: environment.SMTP_USERNAME ?? '',
+    SMTP_PASSWORD: environment.SMTP_PASSWORD ?? '',
+    SMTP_CONNECT_TIMEOUT_MS: integer(environment.SMTP_CONNECT_TIMEOUT_MS, 10_000),
+    SMTP_COMMAND_TIMEOUT_MS: integer(environment.SMTP_COMMAND_TIMEOUT_MS, 15_000),
+    SMTP_TLS_REJECT_UNAUTHORIZED: environment.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
+    ALLOW_INSECURE_SMTP: environment.ALLOW_INSECURE_SMTP === 'true',
+    HOSTED_DATA_REGION: environment.HOSTED_DATA_REGION?.trim() || 'local-internal-test',
+    PENDING_EMAIL_VERIFICATION_DAYS: integer(environment.PENDING_EMAIL_VERIFICATION_DAYS, 7),
+    ACCOUNT_DELETION_COOLING_OFF_DAYS: integer(environment.ACCOUNT_DELETION_COOLING_OFF_DAYS, 30),
+    ACCOUNT_DELETION_RETENTION_DAYS: integer(environment.ACCOUNT_DELETION_RETENTION_DAYS, 90),
+    DELETION_LEDGER_PATH: environment.DELETION_LEDGER_PATH ?? './data/deletion-ledger',
+    LEGAL_HOLD_APPROVAL_AUTHORITY: 'platform-admin',
+    USAGE_ENFORCEMENT: environment.USAGE_ENFORCEMENT === 'hard' ? 'hard'
+      : environment.USAGE_ENFORCEMENT === 'disabled' ? 'disabled'
+        : environment.DEPLOYMENT_MODE === 'hosted' ? 'observe' : 'disabled',
+    CAPABILITIES_ENABLE: parseList(environment.CAPABILITIES_ENABLE),
+    CAPABILITIES_DISABLE: parseList(environment.CAPABILITIES_DISABLE),
   }
 
   if (!Value.Check(EnvironmentSchema, candidate)) {
@@ -204,6 +303,52 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
   if (candidate.MAX_BLOB_BYTES > candidate.BLOB_PART_BYTES * 10_000) {
     throw new Error('Invalid server configuration: MAX_BLOB_BYTES exceeds the 10000-part upload limit')
   }
+  if (candidate.ACCOUNT_DELETION_RETENTION_DAYS < candidate.ACCOUNT_DELETION_COOLING_OFF_DAYS) {
+    throw new Error('Invalid server configuration: ACCOUNT_DELETION_RETENTION_DAYS must be >= ACCOUNT_DELETION_COOLING_OFF_DAYS')
+  }
+  if (candidate.DEPLOYMENT_MODE === 'hosted') {
+    const ledgerPath = resolve(candidate.DELETION_LEDGER_PATH)
+    if (ledgerPath === resolve(candidate.BACKUP_PATH) || (candidate.BLOB_STORAGE_DRIVER === 'filesystem' && ledgerPath === resolve(candidate.BLOB_STORAGE_PATH))) {
+      throw new Error('Invalid server configuration: DELETION_LEDGER_PATH must be separate from backup and blob storage paths')
+    }
+  }
+  if (candidate.DEPLOYMENT_MODE === 'hosted' && candidate.HOSTED_RELEASE_STAGE === 'internal-test'
+    && (candidate.BILLING_PROVIDER_ENVIRONMENT !== 'test' || candidate.HOSTED_MAIL_PROVIDER !== 'log')) {
+    throw new Error('Invalid server configuration: internal-test requires test billing and the non-delivering log mail provider')
+  }
+  if (candidate.DEPLOYMENT_MODE === 'hosted' && candidate.HOSTED_RELEASE_STAGE === 'internal-test'
+    && (candidate.BILLING_PROVIDER !== 'mock' || candidate.BILLING_MERCHANT_ENTITY !== 'internal-test-only')) {
+    throw new Error('Invalid server configuration: hosted internal-test requires the mock provider and internal-test-only merchant entity')
+  }
+  if (candidate.HOSTED_RELEASE_STAGE === 'live') {
+    throw new Error('Hosted live configuration is not supported until a reviewed billing and mail adapter is implemented')
+  }
+  if (candidate.DEPLOYMENT_MODE === 'hosted' && candidate.MAIL_DRIVER !== 'disabled') {
+    throw new Error('Invalid server configuration: hosted mail uses HOSTED_MAIL_PROVIDER, not MAIL_DRIVER')
+  }
+  if (candidate.MAIL_DRIVER === 'smtp') {
+    if (candidate.DEPLOYMENT_MODE !== 'self-hosted' || candidate.SMTP_HOST.length === 0 || !isEmailAddress(candidate.MAIL_FROM_ADDRESS)) {
+      throw new Error('Invalid server configuration: self-hosted SMTP requires SMTP_HOST and a valid MAIL_FROM_ADDRESS')
+    }
+    if ((candidate.SMTP_USERNAME.length === 0) !== (candidate.SMTP_PASSWORD.length === 0)) {
+      throw new Error('Invalid server configuration: SMTP_USERNAME and SMTP_PASSWORD must be configured together')
+    }
+    if ((candidate.SMTP_TLS_MODE === 'none' || !candidate.SMTP_TLS_REJECT_UNAUTHORIZED) && !candidate.ALLOW_INSECURE_SMTP) {
+      throw new Error('Invalid server configuration: insecure SMTP requires ALLOW_INSECURE_SMTP=true')
+    }
+    if (candidate.MAIL_REPLY_TO.length > 0 && !isEmailAddress(candidate.MAIL_REPLY_TO)) {
+      throw new Error('Invalid server configuration: MAIL_REPLY_TO must be a valid email address')
+    }
+  }
+  if (candidate.DEPLOYMENT_MODE !== 'hosted' && candidate.USAGE_ENFORCEMENT !== 'disabled') {
+    throw new Error('Invalid server configuration: self-hosted usage enforcement must remain disabled')
+  }
+  if (candidate.USAGE_ENFORCEMENT === 'hard' && candidate.HOSTED_RELEASE_STAGE !== 'internal-test') {
+    throw new Error('Invalid server configuration: hard usage enforcement is internal-test-only')
+  }
+  if (candidate.USAGE_ENFORCEMENT === 'hard' && !candidate.CAPABILITIES_ENABLE.includes('usage.enforcement')) {
+    throw new Error('Invalid server configuration: hard usage enforcement requires explicit usage.enforcement capability enablement')
+  }
 
   return {
     nodeEnv: candidate.NODE_ENV,
@@ -242,7 +387,43 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     webDistPath: candidate.WEB_DIST_PATH,
     webPublicBaseUrl: webPublicUrl.origin,
     deploymentMode: candidate.DEPLOYMENT_MODE,
+    hostedReleaseStage: candidate.HOSTED_RELEASE_STAGE,
+    hostedRegistrationPolicy: candidate.HOSTED_REGISTRATION_POLICY,
+    billingProvider: candidate.BILLING_PROVIDER,
+    billingProviderEnvironment: candidate.BILLING_PROVIDER_ENVIRONMENT,
+    billingMerchantEntity: candidate.BILLING_MERCHANT_ENTITY,
+    hostedMailProvider: candidate.HOSTED_MAIL_PROVIDER,
+    mailDriver: candidate.MAIL_DRIVER,
+    mailFromAddress: candidate.MAIL_FROM_ADDRESS,
+    mailFromName: candidate.MAIL_FROM_NAME,
+    mailReplyTo: candidate.MAIL_REPLY_TO,
+    mailDefaultLocale: candidate.MAIL_DEFAULT_LOCALE,
+    smtpHost: candidate.SMTP_HOST,
+    smtpPort: candidate.SMTP_PORT,
+    smtpTlsMode: candidate.SMTP_TLS_MODE,
+    smtpUsername: candidate.SMTP_USERNAME,
+    smtpPassword: candidate.SMTP_PASSWORD,
+    smtpConnectTimeoutMs: candidate.SMTP_CONNECT_TIMEOUT_MS,
+    smtpCommandTimeoutMs: candidate.SMTP_COMMAND_TIMEOUT_MS,
+    smtpTlsRejectUnauthorized: candidate.SMTP_TLS_REJECT_UNAUTHORIZED,
+    hostedDataRegion: candidate.HOSTED_DATA_REGION,
+    pendingEmailVerificationDays: candidate.PENDING_EMAIL_VERIFICATION_DAYS,
+    accountDeletionCoolingOffDays: candidate.ACCOUNT_DELETION_COOLING_OFF_DAYS,
+    accountDeletionRetentionDays: candidate.ACCOUNT_DELETION_RETENTION_DAYS,
+    deletionLedgerPath: candidate.DELETION_LEDGER_PATH,
+    legalHoldApprovalAuthority: candidate.LEGAL_HOLD_APPROVAL_AUTHORITY,
+    usageEnforcement: candidate.USAGE_ENFORCEMENT,
+    capabilitiesEnable: candidate.CAPABILITIES_ENABLE,
+    capabilitiesDisable: candidate.CAPABILITIES_DISABLE,
   }
+}
+
+function parseList(value: string | undefined): string[] {
+  return (value ?? '').split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function isEmailAddress(value: string): boolean {
+  return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 }
 
 function isLogLevel(value: string | undefined): value is Environment['LOG_LEVEL'] {

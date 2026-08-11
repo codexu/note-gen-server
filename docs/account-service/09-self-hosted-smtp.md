@@ -1,6 +1,6 @@
 # 09：自托管可选 SMTP 与邮件通知技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试与 self-hosted SMTP 范围；Hosted MailProvider 上线移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 适用形态：`self-hosted`
 - 前置依赖：[00 共享部署策略与能力基础](00-shared-foundation.md)
@@ -19,20 +19,19 @@
 ## 2. 非目标
 
 - 不内置 SMTP server、DKIM 签名器、邮件营销或群发系统。
-- 不保存邮箱账号密码到数据库管理页面；一期只从 secret/environment 读取。
+- SMTP 密码只通过管理员二次验证后的配置接口写入，使用 `AUTH_SECRET` 派生的 AES-256-GCM 密钥加密保存；接口、审计和备份清单均不回显明文。
 - 不保证普通 SMTP 能提供可靠 bounce/complaint Webhook。
 - 不因一次 EHLO/投递失败让 `/health/ready` 关闭同步服务。
 
 ## 3. 配置
 
-建议新增：
+旧版本使用以下 env；升级时会一次性迁入数据库。新部署应直接在 Web 后台“实例运维 → SMTP 配置”中填写：
 
 ```text
 MAIL_DRIVER=disabled|smtp
 MAIL_FROM_ADDRESS=
 MAIL_FROM_NAME=NoteGen
 MAIL_REPLY_TO=
-MAIL_DEFAULT_LOCALE=zh-CN
 
 SMTP_HOST=
 SMTP_PORT=587
@@ -46,9 +45,11 @@ SMTP_MAX_MESSAGES_PER_CONNECTION=100
 SMTP_TLS_REJECT_UNAUTHORIZED=true
 ```
 
+`MAIL_DEFAULT_LOCALE` 已迁入 Web 管理后台的运行配置，不再需要写入 env。
+
 规则：
 
-- `MAIL_DRIVER=disabled` 是 self-hosted 默认，SMTP 其他字段可为空。
+- 邮件投递默认关闭；启用 SMTP 时后台校验主机、发件地址、认证字段与 TLS 安全策略。
 - 启用 smtp 时 host、port、from 必填；username/password 必须同时有或同时无。
 - `tls` 用于隐式 TLS，`starttls-required` 拒绝不支持升级的 server；`starttls` 只用于受信内网兼容并显示警告。
 - 生产 `none` 或关闭证书验证需要单独 `ALLOW_INSECURE_SMTP=true`，管理员页面持续显示高风险警告；不得成为示例默认值。
@@ -58,7 +59,7 @@ SMTP_TLS_REJECT_UNAUTHORIZED=true
 ## 4. 投递流程
 
 1. 业务事务写 `outbox_messages`，recipient 在受控列或独立加密 payload 中保存。
-2. Worker 领取 lease，解密受限 payload，渲染固定模板，校验 headers/recipient，并用 outbox ID 生成稳定 RFC `Message-ID`。
+2. Worker 领取 lease，解密后再次运行时校验固定模板 ID、语言、变量白名单和值大小，再渲染固定模板，校验 headers/recipient，并用 outbox ID 生成稳定 RFC `Message-ID`。
 3. SMTP adapter 发送并记录远端 response/message ID（若有）。
 4. 成功标 sent；临时失败计算 next attempt；永久失败 dead-letter。远端可能已接受但连接/进程在本地提交前中断时标 `delivery_unknown`。
 5. HTTP 请求只返回业务状态或 queued，不等待远端 SMTP。
@@ -86,6 +87,7 @@ SMTP_TLS_REJECT_UNAUTHORIZED=true
 要求：
 
 - 模板 ID 和 version 进入 outbox，发布后旧任务仍可渲染兼容版本或安全作废。
+- SMTP adapter 只接收经共享 `MailMessage` 校验的固定模板、`en`/`zh-CN` locale 和有限的纯字符串变量；template ID、变量键、收件地址、幂等键及每项大小均须在入队和解密后复核。
 - MIME/header/body 有明确大小上限；recipient/正文/secret payload 使用独立 keyring 加密并按模板保留期清理，轮换先双读后切 writer。
 - subject/from/to/reply-to 禁止 CR/LF 注入；显示名称做编码。
 - 所有 action URL 来自验证过的 `WEB_PUBLIC_BASE_URL`，不接受请求 Host 拼接生产链接。
@@ -115,9 +117,9 @@ SMTP 状态分为：
 ```text
 GET  /v1/web/admin/mail/status
 POST /v1/web/admin/mail/test
-GET  /v1/web/admin/mail/outbox?status=...
-POST /v1/web/admin/mail/outbox/:id/retry
-POST /v1/web/admin/mail/outbox/:id/cancel
+GET  /v1/web/admin/mail/queue?status=...&limit=...
+POST /v1/web/admin/mail/queue/:id/cancel
+POST /v1/web/admin/mail/probe
 ```
 
 测试邮件：
@@ -127,7 +129,7 @@ POST /v1/web/admin/mail/outbox/:id/cancel
 - 有独立限流和审计。
 - UI 显示 accepted/queued/sent/failed，不把 SMTP 原始响应无过滤展示给浏览器。
 
-dead-letter 页面显示模板、掩码 recipient、attempt、分类错误、时间和 request/job ID；不显示 action token 或正文。
+队列页面显示 ID、模板、状态、attempt、稳定错误码与时间；不显示 recipient、action token、正文、provider response 或 request payload。`probe` 仅执行 EHLO/auth/TLS verify，不投递邮件；结果仅为 `healthy`、`degraded` 或 `misconfigured` 和检查时间，且每次操作写管理员审计。dead-letter 的 secret payload 已擦除，不能被原地重试；需要再次发送时必须由原业务流程签发新 action token/envelope。
 
 ## 8. 自托管无邮件恢复边界
 
@@ -154,7 +156,7 @@ dead-letter 页面显示模板、掩码 recipient、attempt、分类错误、时
 1. **PR-09A：SMTP Config + Adapter。** TLS/认证/timeout、secret redaction、单元 fake transport。
 2. **PR-09B：Outbox Worker。** lease、稳定 Message-ID、错误分类、`delivery_unknown`、退避、dead-letter、token 过期检查。
 3. **PR-09C：模板。** i18n、HTML/text、安全 URL 和 header 校验。
-4. **PR-09D：Admin Status/Test。** 掩码状态、测试、队列查询/重试、审计。
+4. **PR-09D：Admin Status/Test。** 掩码状态、测试、队列查询、对 `pending` 的可审计取消；已擦除 secret 的 dead-letter 不提供伪重试。
 5. **PR-09E：Feature Integrations。** 邀请、验证/找回、安全、备份/升级通知的降级矩阵。
 6. **PR-09F：Runbook。** 常见 provider 配置、TLS、SPF/DKIM/DMARC 提示和排障。
 
@@ -173,7 +175,7 @@ dead-letter 页面显示模板、掩码 recipient、attempt、分类错误、时
 
 先以内部 relay 和 test template 运行；再启用管理员通知；最后启用邀请/验证/找回。每类模板用独立 capability/配置逐项打开。
 
-回滚将 `MAIL_DRIVER=disabled` 并停止 worker；保留 outbox，安全 token 任务按过期清理。不要让旧进程继续领取新模板类型。
+回滚时在 Web 后台关闭邮件投递；worker 会停止领取邮件但保留 outbox，安全 token 任务按过期清理。不要让旧进程继续领取新模板类型。
 
 验收条件：配置正确时邮件可恢复投递；错误时管理者能定位且不泄密；未配置时实例完全可用并提供明确替代路径；任何业务请求不因 SMTP 慢而阻塞。
 

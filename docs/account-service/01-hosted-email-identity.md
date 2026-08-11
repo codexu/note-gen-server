@@ -1,6 +1,6 @@
 # 01：官方托管邮箱身份与账号恢复技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；真实 Hosted MailProvider、发信域名与数据区域决策移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 默认适用形态：`hosted`
 - 可选适用形态：配置邮件投递后的 `self-hosted`
@@ -194,10 +194,10 @@ Access JWT、refresh、Web Session、设备授权 exchange 都携带/校验 cred
 
 ## 6. 邮件投递接口
 
-使用计划 00 定义的 `MailProvider` 和 outbox。Hosted 一期实现一个事务邮件 provider 适配器，但内部身份流程不引用供应商套餐名或 SDK 类型。要求：
+使用计划 00 定义的 `MailProvider` 和 outbox。当前只允许内部测试的 `HOSTED_MAIL_PROVIDER=log`：它是脱敏、不可投递的本地 sink；仅在 `HOSTED_RELEASE_STAGE=internal-test` 且 operator 显式开启 `mail.delivery`、`identity.email` 与相应身份 capability 时，才可为内部邮箱验证/找回演练提供投递契约。它绝不能使 live capability available。Hosted 一期实现一个事务邮件 provider 适配器，但内部身份流程不引用供应商套餐名或 SDK 类型。生产 provider、发信域名和数据区域经评审后才可替换该 sink。要求：
 
 - 启动时静态验证 API credential、from address 和公开 URL；启用邮箱身份能力但缺失/格式错误时 `configured=false`，hosted readiness 失败。供应商临时网络故障只标记 `healthy=false` 并由 outbox 重试，不让 readiness 抖动。
-- 模板在代码中版本化，提供纯文本与 HTML；URL 只允许配置的账号域名。
+- 模板在代码中版本化，提供纯文本与 HTML；仅允许代码固定的 template ID、`en`/`zh-CN` 和受限变量键/字符串值进入加密 payload，入队和解密后均校验；URL 只允许配置的账号域名。
 - 临时失败重试，认证失败/地址语法错误进入 dead-letter；重复任务使用同一幂等键。
 - provider webhook 使用 current/previous signature secret 验签，先写带 status/lease/attempt/dead-letter 的 inbox，再异步处理 delivered/bounced/complained；事件 ID 唯一、乱序/重复幂等。
 - hard bounce/complaint 写独立 `email_suppressions`，不 disabled identity/删除账号，避免误伤登录；停止非安全邮件并提示更新邮箱，安全/合规必需通知按批准策略处理。

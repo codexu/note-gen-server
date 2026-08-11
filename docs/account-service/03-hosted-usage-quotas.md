@@ -1,6 +1,6 @@
 # 03：官方托管用量计量与配额技术规格
 
-- 状态：Draft
+- 状态：已完成（内部测试范围；商业套餐配额接入与 retained-safety 扩展移至 [13 生产上线准备](13-production-readiness.md)）
 - 日期：2026-08-11
 - 默认适用形态：`hosted`
 - 自托管行为：默认不启用商业配额，仅保留实例级安全上限
@@ -136,6 +136,8 @@ interface EffectiveLimits {
 - limit 变更发布账号策略事件，客户端刷新 context；hard 写事务读取/锁定数据库中的 limits revision 或以 CAS 校验，不能用可能过期的进程缓存作为强一致事实。
 - 月度 ingress/egress 一期只 observe 并写 `account_period_usage`；在账期边界、重试去重和 provider period 对齐完成前，相应 hard limit 必须为 null。
 
+当前实现只允许 hosted `internal-test` 以 `USAGE_ENFORCEMENT=hard` 加 `CAPABILITIES_ENABLE=usage.enforcement` 显式打开 `storage_bytes` 的 CAS gate；值来自当前 entitlement 的 `limits.storage_bytes`，缺失/null 即无限。自托管必须 `disabled`。已覆盖 Blob reservation、普通/管理员设备撤销、普通/管理员 Workspace、legacy/durable 当前对象写入与 durable CRDT append/checkpoint/resolve；管理员可读取或显式触发按账号当前状态对账快照。合规删除恢复、retained safety、账期 ledger 仍未纳入统一 guard，因此不是生产商业配额启用条件。
+
 ## 6. 原子计量与 Guard
 
 ### 6.1 对象和 command
@@ -259,7 +261,7 @@ POST /v1/web/admin/accounts/:id/usage/reconcile
 
 ## 12. 上线、回滚与验收
 
-先完成 12C/12F 对 quota rejection 的 blocked 状态：当前客户端会把部分 `retryable=false` command 永久 block，或在同一 flush 高频重试，修复前只能 observe。Hard enforcement 只在所有 HTTP/Web/legacy/durable/admin writer 版本都识别 UsageGuard/schema 后开启；任何旧 server 都能绕过 object/device/workspace guard，不能仅保护 reservation。
+12C/12F 已将 durable command 的 `quota_exceeded`/device 限额及其他 account-action rejection 从逐条 blocked 转为保留 outbox 的全局暂停，不再在同一 flush 高频重试；用户或运营方处理后再显式恢复。Hard enforcement 只在所有 HTTP/Web/legacy/durable/admin writer 版本都识别 UsageGuard/schema 后开启；任何旧 server 都能绕过 object/device/workspace guard，不能仅保护 reservation。
 
 回滚只关闭 enforcement，不删除 usage/ledger/reservation 表。关闭前仍需等待或释放有效 reservation；旧版本若不理解任一 usage guard，不得在滚动发布中与 hard enforcement 混跑。
 
