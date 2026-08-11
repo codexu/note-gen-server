@@ -126,7 +126,7 @@ export class MaintenanceService {
         update outbox_messages
         set status = 'dead_letter', last_error_code = 'secret_payload_expired',
             locked_at = null, locked_by = null, lease_expires_at = null
-        where channel = 'mail' and secret_payload_ref = any(${this.database.sql.array(expiredMailPayloads.map(row => row.id), 'text')})
+        where channel = 'mail' and secret_payload_ref = any(${this.database.sql.array(expiredMailPayloads.map(row => row.id))}::uuid[])
           and status in ('pending', 'sending')`
     }
     // Pending email registrations never receive a device or Workspace. Prune
@@ -142,9 +142,9 @@ export class MaintenanceService {
         for update skip locked`
       if (candidates.length === 0) return 0
       const ids = candidates.map(candidate => candidate.id)
-      await sql`delete from account_login_claims where account_id = any(${sql.array(ids, 'uuid')})`
+      await sql`delete from account_login_claims where account_id = any(${sql.array(ids)}::uuid[])`
       const deleted = await sql<Array<{ id: string }>>`
-        delete from accounts where id = any(${sql.array(ids, 'uuid')}) and identity_state = 'pending_verification'
+        delete from accounts where id = any(${sql.array(ids)}::uuid[]) and identity_state = 'pending_verification'
         returning id`
       return deleted.length
     })

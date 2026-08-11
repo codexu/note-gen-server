@@ -19,7 +19,7 @@
 
 使用独立 PostgreSQL 数据库、独立 filesystem Blob 路径和独立 `BACKUP_PATH`；三者不得指向开发者常用数据或彼此重叠。每轮创建测试实例 ID、两个普通账号、一个 self-hosted 管理员、一个 hosted Staff fixture、一个 synthetic workspace 和测试邮件地址。测试完成后只删除明确命名的临时资源。
 
-Hosted 只允许 `HOSTED_RELEASE_STAGE=internal-test`、`HOSTED_MAIL_PROVIDER=log`、`BILLING_PROVIDER=mock` 和 `BILLING_PROVIDER_ENVIRONMENT=test`。不要填入 live token、真实发信凭据、生产数据库 URL 或生产 DNS。
+Hosted 通过首次 Web 安装向导选择，服务端自动使用 internal-test、日志邮件和 Mock 计费配置。不要填入 live token、真实发信凭据、生产数据库 URL 或生产 DNS。
 
 ### 建议命令
 
@@ -57,7 +57,7 @@ pnpm --filter @notegen/server restore -- preflight \
 | Fixture | 最小数据 | 用途 |
 | --- | --- | --- |
 | H1 hosted-internal | log mail、mock billing、capability 默认关闭 | 邮箱、风险、用量、删除、支持与 capability 拒绝 |
-| S1 self-hosted setup | `uninitialized` lifecycle、临时 setup token | 首次初始化和自动提权防护 |
+| S1 self-hosted setup | 空数据库、仅本机可访问的安装页面 | 首次初始化和自动提权防护 |
 | S2 self-hosted ready | 一位管理员、SMTP fake server 或不可达端口 | 邀请、SMTP 队列、probe、maintenance |
 | C1 client profile | 两个本地实体、未同步 outbox、E2EE workspace | sync epoch 与恢复 UX |
 | R1 restore sandbox | 空隔离 DB/Blob/backup path、临时 trust/key | backup create、verify、preflight 及拒绝路径 |
@@ -81,7 +81,7 @@ pnpm --filter @notegen/server restore -- preflight \
 | ID | 步骤 | 预期结果 |
 | --- | --- | --- |
 | T0.1 | 分别启动 hosted 与 self-hosted fixture；读取 `/v1/capabilities`。 | 返回 additive schema；不支持的 mode 不可用，能力开关不因前端参数打开。 |
-| T0.2 | 令环境 `DEPLOYMENT_MODE` 与持久 settings 不一致后启动。 | 启动/ready fail-closed，HTTP、WebSocket、worker 不开始业务服务。 |
+| T0.2 | 空数据库启动并尝试在未完成向导前访问普通业务 route。 | 只开放安装、静态页面与健康检查；HTTP、WebSocket、worker 不开始业务服务。 |
 | T0.3 | hosted 使用 legacy register 与 self-hosted 未初始化访问普通业务 route。 | hosted 不出现自动 admin；setup 仅暴露 control plane，普通业务被拒绝。 |
 | T0.4 | 尝试以 capability 环境覆盖提前打开 billing、preserve restore 或 live mail。 | resolver 仍拒绝；输出稳定错误，不出现 provider 调用。 |
 

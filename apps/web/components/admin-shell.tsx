@@ -3,7 +3,6 @@
 import type { ReactNode } from "react"
 import {
   DatabaseIcon,
-  FileSearchIcon,
   LayoutDashboardIcon,
   LaptopIcon,
   KeyRoundIcon,
@@ -48,12 +47,11 @@ import { Spinner } from "@/components/ui/spinner"
 import { ThemeToggle } from "@/components/theme-toggle"
 import type { Account, ServerCapabilities } from "@/lib/api"
 
-export type AdminSection = "overview" | "services" | "content" | "workspaces" | "devices" | "connect" | "security" | "operations" | "admin"
+export type AdminSection = "overview" | "services" | "workspaces" | "devices" | "connect" | "security" | "operations" | "admin"
 
 const sectionDetails: Record<AdminSection, { title: string; description: string }> = {
   overview: { title: "仪表盘", description: "查看同步服务、存储和最近活动。" },
   services: { title: "账号服务", description: "管理权益、政策、数据请求与内部测试支持工单。" },
-  content: { title: "内容管理", description: "确认已保存的笔记、记录、绘图和配置。" },
   workspaces: { title: "工作区管理", description: "检查默认与历史工作区，并清理测试数据。" },
   devices: { title: "设备管理", description: "查看关联设备并撤销不再使用的会话。" },
   connect: { title: "关联新设备", description: "输入客户端验证码或扫描二维码，安全地关联新设备。" },
@@ -66,7 +64,6 @@ export function AdminShell({
   account,
   capabilities,
   section,
-  objectCount,
   workspaceCount,
   deviceCount,
   busy,
@@ -78,7 +75,6 @@ export function AdminShell({
   account: Account
   capabilities: ServerCapabilities | null
   section: AdminSection
-  objectCount: number
   workspaceCount: number
   deviceCount: number
   busy: boolean
@@ -91,7 +87,6 @@ export function AdminShell({
   const navigation = [
     { section: "overview" as const, label: "仪表盘", icon: LayoutDashboardIcon },
     { section: "services" as const, label: "账号服务", icon: LifeBuoyIcon },
-    { section: "content" as const, label: "内容管理", icon: FileSearchIcon, count: objectCount },
     { section: "workspaces" as const, label: "工作区管理", icon: DatabaseIcon, count: workspaceCount },
     { section: "devices" as const, label: "设备管理", icon: LaptopIcon, count: deviceCount },
     { section: "connect" as const, label: "关联新设备", icon: LaptopIcon },

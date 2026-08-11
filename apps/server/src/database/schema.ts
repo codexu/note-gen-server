@@ -59,13 +59,21 @@ export const supportMessageVisibility = pgEnum('support_message_visibility', ['c
  * remain open-ended; the code permission registry is the authorization fact. */
 export const staffPrincipals = pgTable('staff_principals', {
   id: uuid('id').primaryKey().defaultRandom(), externalIssuer: text('external_issuer').notNull(), externalSubject: text('external_subject').notNull(),
-  displayName: text('display_name').notNull(), email: text('email'), disabledAt: timestamp('disabled_at', { withTimezone: true }),
+  displayName: text('display_name').notNull(), email: text('email'),
+  /** Internal-test local credential. Production Staff continues to use OIDC. */
+  localLogin: text('local_login'), localPasswordHash: text('local_password_hash'),
+  disabledAt: timestamp('disabled_at', { withTimezone: true }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }), createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(), updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [uniqueIndex('staff_principals_issuer_subject_unique').on(table.externalIssuer, table.externalSubject), index('staff_principals_active_idx').on(table.disabledAt)])
+}, (table) => [
+  uniqueIndex('staff_principals_issuer_subject_unique').on(table.externalIssuer, table.externalSubject),
+  uniqueIndex('staff_principals_local_login_unique').on(table.localLogin).where(sql`${table.localLogin} is not null`),
+  index('staff_principals_active_idx').on(table.disabledAt),
+])
 
 export const staffSessions = pgTable('staff_sessions', {
   id: uuid('id').primaryKey().defaultRandom(), staffId: uuid('staff_id').notNull().references(() => staffPrincipals.id, { onDelete: 'cascade' }),
-  authStrength: text('auth_strength').notNull(), expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(), revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  authStrength: text('auth_strength').notNull(), csrfTokenHash: text('csrf_token_hash'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(), revokedAt: timestamp('revoked_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(), lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [index('staff_sessions_active_idx').on(table.staffId, table.expiresAt)])
 

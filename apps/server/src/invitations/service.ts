@@ -131,7 +131,7 @@ export class InvitationService {
       select payload->>'invitationId' as invitation_id, status, last_error_code
       from outbox_messages
       where channel = 'mail' and template_or_event = 'invitation'
-        and payload->>'invitationId' = any(${this.database.sql.array(ids, 'text')})`
+        and payload->>'invitationId' = any(${this.database.sql.array(ids)}::text[])`
     const deliveryByInvitation = new Map(deliveries.map((delivery) => [delivery.invitation_id, delivery]))
     return invitations.map((invitation) => {
       const delivery = deliveryByInvitation.get(invitation.id)

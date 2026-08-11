@@ -41,6 +41,9 @@ import { createStaffRiskRoutes } from './routes/staff-risk.js'
 import { isAllowedDevelopmentWebOrigin } from './development-origin.js'
 import { createPostgresRateLimitStore } from './observability/postgres-rate-limit-store.js'
 import type { DatabaseContext } from './database/client.js'
+import { createInstallationRoutes } from './routes/installation.js'
+import { createStaffAuthRoutes } from './routes/staff-auth.js'
+import { createStaffOperationsRoutes } from './routes/staff-operations.js'
 
 export async function buildApp(
   config: AppConfig,
@@ -196,6 +199,9 @@ export async function buildApp(
     }
   })
   await app.register(createHealthRoutes(dependencies))
+  if (dependencies.installation !== undefined) {
+    await app.register(createInstallationRoutes(config, dependencies.installation, dependencies.onInstallationComplete))
+  }
   await app.register(createCapabilitiesRoutes(config, dependencies))
   if (config.deploymentMode === 'self-hosted'
     && dependencies.bootstrap !== undefined && dependencies.deployment !== undefined && dependencies.webSessions !== undefined) {
@@ -216,6 +222,15 @@ export async function buildApp(
     await app.register(createStaffSupportRoutes(dependencies.support, dependencies.staffSessions))
   }
   if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
+    && dependencies.staff !== undefined && dependencies.staffSessions !== undefined) {
+    await app.register(createStaffAuthRoutes(config, dependencies.staff, dependencies.staffSessions))
+    await app.register(createStaffOperationsRoutes(
+      dependencies.staff,
+      dependencies.staffSessions,
+      dependencies.support,
+    ))
+  }
+  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
     && dependencies.legalHolds !== undefined && dependencies.staffSessions !== undefined) {
     await app.register(createStaffLegalHoldRoutes(dependencies.legalHolds, dependencies.staffSessions))
   }
@@ -234,7 +249,7 @@ export async function buildApp(
     await app.register(createAuthRoutes(config, dependencies.auth, dependencies.tokens, dependencies.deployment, dependencies.deletion, dependencies.risk))
   }
   if (dependencies.workspaces !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
-    await app.register(createWorkspaceRoutes(config, dependencies.workspaces, dependencies.tokens, dependencies.auth))
+    await app.register(createWorkspaceRoutes(dependencies.workspaces, dependencies.tokens, dependencies.auth))
   }
   if (dependencies.auth !== undefined && dependencies.tokens !== undefined && dependencies.deployment !== undefined) {
     await app.register(createAccountContextRoutes(dependencies.auth, dependencies.tokens, dependencies.deployment, dependencies.entitlements, dependencies.usage, dependencies.compliance, dependencies.risk, dependencies.usageHardEnforcementActive, dependencies.maintenanceCoordinator))
@@ -262,10 +277,9 @@ export async function buildApp(
   if (dependencies.emailIdentities !== undefined && dependencies.deployment !== undefined && dependencies.webSessions !== undefined) {
     await app.register(createWebEmailRoutes(config, dependencies.deployment, dependencies.emailIdentities, dependencies.webSessions))
   }
-  if (dependencies.workspaces !== undefined && dependencies.sync !== undefined
-    && dependencies.webSessions !== undefined) {
+  if (dependencies.workspaces !== undefined && dependencies.webSessions !== undefined) {
     await app.register(createWebDashboardRoutes(
-      dependencies.workspaces, dependencies.sync, dependencies.webSessions, dependencies.admin,
+      dependencies.workspaces, dependencies.webSessions, dependencies.admin,
     ))
   }
   if (dependencies.admin !== undefined && dependencies.webSessions !== undefined && dependencies.stepUps !== undefined) {

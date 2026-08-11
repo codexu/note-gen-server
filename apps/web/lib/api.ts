@@ -15,10 +15,7 @@ export type {
   ServerCapabilitiesContract as ServerCapabilities,
   SyncObjectKindContract as SyncObjectKind,
   SyncOverviewContract as SyncOverview,
-  WebSyncObjectContract as WebSyncObject,
-  WebSyncObjectPageContract as WebSyncObjectPage,
   WebWorkspaceContract as WebWorkspace,
-  WebWorkspaceKeyContract as WebWorkspaceKey,
 } from "@notegen/contracts"
 
 const apiBaseUrl = resolveApiBaseUrl()
@@ -56,7 +53,7 @@ export async function apiRequest<T>(
     headers.set("content-type", "application/json")
   }
   if (init.csrf) {
-    const token = readCookie("notegen_csrf")
+    const token = readCookie(path.startsWith("/v1/staff/") ? "notegen_staff_csrf" : "notegen_csrf")
     if (token) headers.set("x-csrf-token", token)
   }
   const timeoutController = new AbortController()
@@ -93,7 +90,13 @@ export async function apiRequest<T>(
 }
 
 const apiErrorMessages: Record<string, string> = {
-  registration_closed: "服务器已关闭公开注册，请填写管理员提供的 Setup Token。",
+  installation_already_completed: "实例已经完成安装。",
+  installation_existing_data: "数据库中已经存在账号数据，不能作为全新实例初始化。",
+  installation_server_name_invalid: "服务名称不能为空，且不能超过 100 个字符。",
+  installation_administrator_required: "必须创建首位管理员账号。",
+  installation_administrator_invalid: "管理员账号格式不正确。",
+  setup_token_invalid: "一次性初始化凭据无效或已经过期。",
+  registration_closed: "服务器已关闭公开注册，请联系实例管理员获取邀请。",
   credentials_invalid: "账号或密码不正确，请检查后重试。",
   password_unchanged: "新密码不能与当前密码相同。",
   account_exists: "这个账号已经注册，请切换到“登录”。",

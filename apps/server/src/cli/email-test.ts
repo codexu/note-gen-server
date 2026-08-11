@@ -1,10 +1,11 @@
-import { loadConfig } from '../config.js'
+import { applyPersistedDeploymentProfile, loadConfig } from '../config.js'
 import { createDatabase } from '../database/client.js'
 import { CapabilityRegistry } from '../deployment/capabilities.js'
 import { DeploymentService } from '../deployment/service.js'
 import { EmailIdentityService } from '../identity/email-service.js'
 import { MailOutboxService } from '../mail/outbox-service.js'
 import { MailSecretPayloadService } from '../mail/secret-payload-service.js'
+import { InstallationService } from '../installation/service.js'
 
 async function main(): Promise<void> {
   const [command, accountId, confirmation] = process.argv.slice(2)
@@ -15,6 +16,13 @@ async function main(): Promise<void> {
   const config = loadConfig()
   const database = createDatabase({ ...config, databasePoolSize: 1 })
   try {
+    const persistedInstallation = await new InstallationService(database, config, true).persistedSettings()
+    if (persistedInstallation === undefined) throw new Error('Server installation is not complete')
+    applyPersistedDeploymentProfile(
+      config,
+      persistedInstallation.deploymentMode,
+      persistedInstallation.registrationPolicy === 'public' ? 'public' : 'disabled',
+    )
     const deployment = new DeploymentService(database, config)
     await deployment.initialize()
     if (deployment.getSafetyFailure() !== undefined) throw new Error(`Deployment safety gate is closed: ${deployment.getSafetyFailure()}`)

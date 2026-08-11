@@ -40,13 +40,9 @@ export interface DeploymentState {
   runtimeConfiguration: RuntimeConfiguration
 }
 
-/**
- * Reconciles the one-time environment-to-database migration before HTTP or workers
- * start. Once written, a deployment mode can never be changed by an env var.
- */
+/** Loads the immutable deployment choice made by the Web installation guide. */
 export class DeploymentService {
   private state: DeploymentState | undefined
-  private unsafeLegacyHostedRegistration = false
   private configurationListening = false
 
   constructor(
@@ -68,17 +64,6 @@ export class DeploymentService {
           if (migrated === undefined) throw new Error('Runtime configuration migration returned no row')
           return migrated
         }
-        if (existing.deploymentMode === 'hosted'
-          && this.config.deploymentMode === 'hosted'
-          && this.config.hostedReleaseStage === 'internal-test'
-          && existing.registrationPolicy !== this.config.hostedRegistrationPolicy) {
-          const [updated] = await tx.update(deploymentSettings).set({
-            registrationPolicy: this.config.hostedRegistrationPolicy,
-            updatedAt: new Date(),
-            configurationRevision: sql`${deploymentSettings.configurationRevision} + 1`,
-          }).where(eq(deploymentSettings.id, true)).returning()
-          if (updated !== undefined) return updated
-        }
         if (existing.deploymentMode === 'self-hosted' && existing.selfHostedLifecycle === 'ready') {
           const [activeAdmin] = await tx.select({ id: accounts.id }).from(accounts).where(and(
             eq(accounts.isAdmin, true), isNull(accounts.suspendedAt), isNull(accounts.disabledAt),
@@ -93,28 +78,9 @@ export class DeploymentService {
         return existing
       }
 
-      const [account] = await tx.select({ id: accounts.id }).from(accounts).limit(1)
-      const [activeAdmin] = await tx.select({ id: accounts.id }).from(accounts).where(and(
-        eq(accounts.isAdmin, true), isNull(accounts.suspendedAt), isNull(accounts.disabledAt),
-      )).limit(1)
-      const isHosted = this.config.deploymentMode === 'hosted'
-      const [created] = await tx.insert(deploymentSettings).values({
-        id: true,
-        deploymentMode: this.config.deploymentMode,
-        // Hosted policy is control-plane-owned in production. Internal tests
-        // may explicitly seed a policy without using the legacy open switch.
-        registrationPolicy: isHosted ? this.config.hostedRegistrationPolicy : account === undefined ? 'bootstrap'
-          : this.config.registrationMode === 'open' ? 'public' : 'disabled',
-        selfHostedLifecycle: isHosted ? null : account === undefined ? 'uninitialized' : 'ready',
-        adminRepairRequired: !isHosted && account !== undefined && activeAdmin === undefined,
-        runtimeConfiguration: this.configurationForStorageFromEnvironment(),
-      }).returning()
-      if (created === undefined) throw new Error('Deployment settings insert returned no row')
-      return created
+      throw new Error('installation_required')
     })
 
-    this.unsafeLegacyHostedRegistration = state.deploymentMode === 'hosted'
-      && this.config.registrationMode === 'open'
     this.state = this.toState(state)
     this.applyRuntimeConfiguration(this.state.runtimeConfiguration, state.runtimeConfiguration)
     if (!this.configurationListening) {
@@ -177,9 +143,6 @@ export class DeploymentService {
   }
 
   getSafetyFailure(): string | undefined {
-    const state = this.getState()
-    if (state.deploymentMode !== this.config.deploymentMode) return 'deployment_mode_mismatch'
-    if (this.unsafeLegacyHostedRegistration) return 'hosted_legacy_registration_open'
     return undefined
   }
 

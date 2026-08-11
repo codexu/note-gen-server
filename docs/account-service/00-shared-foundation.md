@@ -33,7 +33,7 @@
 
 ## 4. 当前实现锚点
 
-- `apps/server/src/config.ts`：已有 `DEPLOYMENT_MODE=self-hosted|hosted` 与 `AppConfig.deploymentMode`。
+- `apps/server/src/config.ts`：`AppConfig.deploymentMode` 是启动期服务装配视图，值从持久安装配置恢复。
 - `apps/server/src/routes/capabilities.ts`：已有公开能力发现、限制和 legacy `registrationMode`。
 - `apps/server/src/services.ts` 与 `apps/server/src/server.ts`：适合注入 policy、capability、job runner 等共享依赖。
 - `apps/server/src/app.ts`：负责路由注册、错误格式、限流和日志脱敏，可安装 route guard。
@@ -45,12 +45,12 @@
 
 ### 5.1 固化 deployment mode
 
-`deployment_settings` singleton 是 deployment mode 的唯一长期事实来源。`server_metadata['deployment_mode']` 只作为兼容迁移输入，完成迁移后不再与 singleton 双写。Schema migration 只建表；启动期 locked reconciliation 执行：
+`deployment_settings` singleton 是 deployment mode 的唯一事实来源。Schema migration 只建表；首次 Web 安装与后续启动执行：
 
-1. 读取环境配置中的 `DEPLOYMENT_MODE`。
-2. 读取 `deployment_settings.deployment_mode`；若尚不存在，可读取 legacy metadata 作为一次性候选值。
-3. singleton 不存在时，在事务和 advisory lock 内校验候选值后写入；legacy metadata 随后只保留迁移审计，不再读取。
-4. singleton 存在但环境值不一致时进入 `StartupSafetyGate`。当前实现会在路由、worker 与 socket bind 前硬失败；普通 HTTP、WebSocket upgrade、业务 worker 和内部定时任务均不会启动。需要受控诊断时由独立本机 doctor 读取数据库，不能把一个对外监听的“受限诊断”进程当作隔离边界。
+1. 读取 `deployment_settings.deployment_mode`。
+2. singleton 不存在时只装配安装页面、安装 API 与健康检查，不装配普通 HTTP、WebSocket、业务 worker 和内部定时任务。
+3. Web 向导在事务和 advisory lock 内写入部署模式与运行配置；自托管创建客户域首位管理员，运营模式创建 Staff 域首位运营管理员。部署者应在开放公网前完成这一步。
+4. 安装响应完成后，进程自动关闭安装态应用，从 singleton 恢复 `AppConfig.deploymentMode`，再装配对应模式的路由和 worker；env 无权覆盖持久模式，也不要求部署者手动重启。
 
 `StartupSafetyGate` 必须安装在路由分发和 worker start 之前，使用显式 allowlist，仅允许 `/health/live`、安全的 readiness 原因和本机/受控管理员诊断。不能把“负载均衡器会尊重 readiness”当作安全边界。Hosted 必需 provider 静态配置缺失时使用同一 gate；self-hosted 可选 provider 缺失不触发全局 gate。
 
@@ -340,6 +340,7 @@ Hosted 运营人员不使用客户 `accounts`/`isAdmin`。00 提供独立 staff 
 staff_principals
   id uuid pk
   external_issuer, external_subject, display_name, email
+  local_login, local_password_hash nullable (internal-test only)
   disabled_at, last_login_at nullable
   unique(external_issuer, external_subject)
 
@@ -347,6 +348,7 @@ staff_sessions
   id uuid pk
   staff_id uuid
   auth_strength text
+  csrf_token_hash nullable
   expires_at, revoked_at nullable
   created_at, last_seen_at
 
@@ -360,7 +362,7 @@ staff_role_assignments
 
 `role_key` 不是跨计划封闭数据库 enum；代码中的 typed permission registry 才是授权事实。首批权限至少覆盖 `risk.read/manage/admin`、`billing.read/grant/admin`、`compliance.request.process`、`legal_hold.read/manage/approve`、`support.read/write/diagnostics`、`platform.provision`。可提供 security analyst/admin、billing support/admin、compliance operator、legal-hold admin、support read/write 等默认角色模板；`platform_admin` 不天然绕过 legal hold 双人审批。
 
-Staff 使用受限 OIDC/SSO、独立 issuer/audience/cookie/signing key，校验 state/nonce/PKCE 与 `acr/amr`；MFA、短 Session、IdP disable 传播和高敏 step-up 是上线门槛。内部 Staff 高敏路由只接受 phishing-resistant assertion，或建立后 5 分钟内的 `step-up` assertion，不能用长期遗留的 step-up 标记绕过新鲜度。Hosted 客户账号永不通过 `isAdmin` 获得这些权限。Self-hosted `isAdmin` 只表示该实例管理员，不进入 staff realm。
+内部测试阶段由 Web 安装向导在 Staff realm 创建本地运营管理员，使用独立的 `/operations/` 登录入口、HttpOnly Session Cookie 与 CSRF Cookie；首位管理员获得 `platform-admin` 角色。它不创建客户 `accounts` 记录，客户账号也不能复用该登录入口。正式运营必须切换到受限 OIDC/SSO、独立 issuer/audience/cookie/signing key，并校验 state/nonce/PKCE 与 `acr/amr`；MFA、短 Session、IdP disable 传播和高敏 step-up 是上线门槛。内部 Staff 高敏路由只接受 phishing-resistant assertion，或建立后 5 分钟内的 `step-up` assertion，不能用长期遗留的 step-up 标记绕过新鲜度。Hosted 客户账号永不通过 `isAdmin` 获得这些权限。Self-hosted `isAdmin` 只表示该实例管理员，不进入 staff realm。
 
 共享 `WebStepUpService` 同时服务 self-hosted admin、客户高敏动作和 staff。当前首个 self-hosted account 实现已提供 5 分钟一次性 opaque grant：密码认证（启用 TOTP 时同时校验 TOTP）后，grant 以 keyed digest 保存并绑定 account、Web session、audience 与 request hash；邀请创建/撤销及注册策略变更必须消费对应 grant。staff OIDC grant 将在 staff realm 接入时复用相同表与消费语义：
 
@@ -422,15 +424,15 @@ maintenance_instance_acks
 
 建议分为可独立回滚的 migration：
 
-1. 新增权威 `deployment_settings`，包括 additive 的实例 auth epoch/not-before/enforcement 字段；启动期 reconciliation 从 legacy metadata/env 一次性迁移，随后停止双读。
+1. 新增权威 `deployment_settings`，包括 additive 的实例 auth epoch/not-before/enforcement 字段；新实例由 Web 安装向导原子写入，随后只读持久状态。
 2. 新增 StartupSafetyGate、maintenance/step-up/staff/audit 基础表，但保持新能力关闭。
 3. 先发布 legacy job fencing compatibility，再新增带 generation/payload version 的 jobs/outbox 表与索引。
-4. self-hosted 才可从 `REGISTRATION_MODE` 派生初始策略；hosted 强制 disabled 并要求显式确认旧 open 配置。
+4. self-hosted 初始化后默认关闭注册；hosted 在安装向导中显式选择 disabled 或 public。
 5. 先让全部账号创建 primitive 理解 `bootstrap-first-admin | none`，保持注册关闭并清空旧进程后，再把 hosted 客户账号策略切换为 none；平台人员只从 staff provisioning 创建，不自动回写/提升已有客户账号。切换属于安全契约 migration，不受 capability 开关控制。
 6. additive 增加各类凭据的 instance auth epoch/issued-at 字段并完成兼容签发；旧凭据清退且所有实例达到最低认证 binary 后，才切换 `auth_epoch_enforced=true`。恢复能力在此之前保持关闭。
 7. 引入账号上下文 revision 和最小生命周期字段，但不提前创建各功能私有表。
 
-所有 migration 先 add/backfill/read，再启用约束；不得在同一发布中删除旧字段。既有数据库第一次运行时默认记录当前 `DEPLOYMENT_MODE`，不会默认为 hosted。
+所有 migration 先 add/backfill/read，再启用约束；不得在同一发布中删除旧字段。新数据库不会从环境变量猜测部署模式，必须由安装者在 Web 向导中确认。
 
 ## 7. API、Web 与客户端任务
 
@@ -442,7 +444,7 @@ maintenance_instance_acks
 - 在注册、设备会话、同步 command、Blob 上传、后台写操作接入 Guard。
 - 在 Access/Refresh/Web Session、WebSocket 与设备授权的签发和每次鉴权中接入 instance auth epoch/not-before，并提供仅本机可用的 credential review 恢复命令。
 - 在 HTTP、WebSocket、worker start 安装 StartupSafetyGate；readiness 只是其可观察投影，不是唯一执行点。
-- 已提供独立 `staff_principals`/`staff_sessions`/`staff_role_assignments` schema、代码级 permission/role template registry 与 transport-free `StaffSessionService`：它只接受已由未来 OIDC edge 验证的 issuer/subject，建立短 TTL session，并在每次权限检查时重新校验 session、principal 禁用状态与角色有效期；session 建立/撤销与跨 realm append-only audit 在同一事务提交。客户 `accounts.isAdmin` 不参与该 registry。OIDC redirect/PKCE/cookie、staff origin 与 IdP 配置、staff step-up route 仍待外部 IdP 准备后接入。EffectiveLimitsProvider 和 MaintenanceModeCoordinator 已有基础实现。
+- 已提供独立 `staff_principals`/`staff_sessions`/`staff_role_assignments` schema、代码级 permission/role template registry 与 `StaffSessionService`。内部测试可由安装向导创建本地 Staff 管理员，并通过 `/operations/` 建立带 CSRF 防护的短 Session；服务在每次权限检查时重新校验 session、principal 禁用状态与角色有效期。客户 `accounts.isAdmin` 不参与该 registry。服务同时保留已验证 issuer/subject 的联邦会话入口；正式 OIDC redirect/PKCE、staff origin 与 IdP 配置、staff step-up route 仍待外部 IdP 准备后接入。EffectiveLimitsProvider 和 MaintenanceModeCoordinator 已有基础实现。
 - Hosted legal hold 的审批/释放人以 `approved_by_staff_id`/`released_by_staff_id` 单独存储，必须同时拥有 `legal_hold.manage` 与 `legal_hold.approve`；旧 customer-account 审批列只为历史兼容保留，不能再授予 hosted authority。
 
 ### 7.2 账号 Web

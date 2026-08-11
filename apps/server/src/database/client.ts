@@ -32,6 +32,8 @@ export function createDatabase(config: AppConfig): DatabaseContext {
       await sqlClient`select deployment_mode, registration_policy, runtime_configuration, instance_auth_epoch, token_not_before, auth_epoch_enforced from deployment_settings limit 0`
       await sqlClient`select normalized_login_key from account_login_claims limit 0`
       await sqlClient`select id, actor_type from step_up_grants limit 0`
+      await sqlClient`select local_login, local_password_hash from staff_principals limit 0`
+      await sqlClient`select csrf_token_hash from staff_sessions limit 0`
       await sqlClient`select id from background_jobs limit 0`
       await sqlClient`select id, sanitation_status from restore_markers limit 0`
       await sqlClient`select mode, generation from maintenance_state limit 0`

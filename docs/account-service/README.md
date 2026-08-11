@@ -28,7 +28,7 @@
 
 以下结论来自当前仓库，而不是未来设想：
 
-- `DEPLOYMENT_MODE` 已在 `apps/server/src/config.ts` 中建模，并由 `/v1/capabilities` 返回；它与持久 `deployment_settings` 共同构成 StartupSafetyGate、路由注册与服务策略的权威边界。配置/持久状态不一致时业务请求必须关闭，不得退化为展示字段。
+- 部署模式由首次 Web 安装向导写入 `deployment_settings`，启动时先从数据库恢复，再用于路由注册与服务策略装配；env 不再是第二个部署模式来源。
 - `/v1/capabilities` 已经是客户端发现协议与功能的入口。后续必须保持增量兼容，不能让客户端根据版本号猜测功能。
 - 普通注册不再基于“当前没有有效管理员”自动提权；自托管仅能在持久 lifecycle 的 bootstrap/repair-admin 受控流程中建立管理员，官方托管普通注册固定为非管理员。管理员修复状态由 `deployment_settings.admin_repair_required` 明确暴露并受本机流程约束。
 - PostgreSQL 已承载跨实例限流、维护 advisory lock、管理员审计、后台任务和数据库备份记录，可以继续作为账号服务一期的协调基础，无需为了运营功能立即引入 Redis 或消息队列。

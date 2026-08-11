@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import packageJson from '../package.json' with { type: 'json' }
 import { buildApp } from './app.js'
-import { loadConfig } from './config.js'
+import { applyPersistedDeploymentProfile, loadConfig } from './config.js'
 import { createDatabase, type DatabaseContext } from './database/client.js'
 import { assertMigrationCompatibility } from './database/migration-compatibility.js'
 import { getOrCreateInstanceId } from './database/instance.js'
@@ -51,6 +51,7 @@ import { StaffSessionService } from './staff/session-service.js'
 import { AccountServiceAudit } from './audit/service.js'
 import { FilesystemDeletionLedgerStore } from './compliance/deletion-ledger-store.js'
 import { DeletionLedgerReplayService } from './compliance/deletion-ledger-replay-service.js'
+import { InstallationService } from './installation/service.js'
 
 async function main(): Promise<void> {
   const config = loadConfig()
@@ -76,6 +77,40 @@ async function main(): Promise<void> {
   try {
     database = createDatabase(config)
     await assertMigrationCompatibility(database)
+    const installationProbe = new InstallationService(database, config, true)
+    const persistedInstallation = await installationProbe.persistedSettings()
+    if (persistedInstallation === undefined) {
+      let finishInstallation!: () => void
+      const installationCompleted = new Promise<void>((resolve) => { finishInstallation = resolve })
+      const instanceId = await getOrCreateInstanceId(database)
+      const syncEpoch = await getOrCreateSyncEpoch(database)
+      app = await buildApp(config, {
+        version: packageJson.version,
+        instanceId,
+        syncEpoch,
+        database,
+        blobStorage: { async check() {}, async close() {} },
+        installation: installationProbe,
+        onInstallationComplete: finishInstallation,
+      })
+      const handleSigint = () => void shutdown('SIGINT')
+      const handleSigterm = () => void shutdown('SIGTERM')
+      process.once('SIGINT', handleSigint)
+      process.once('SIGTERM', handleSigterm)
+      await app.listen({ host: config.host, port: config.port })
+      await installationCompleted
+      process.removeListener('SIGINT', handleSigint)
+      process.removeListener('SIGTERM', handleSigterm)
+      await shutdown('installation-complete')
+      await main()
+      return
+    }
+    applyPersistedDeploymentProfile(
+      config,
+      persistedInstallation.deploymentMode,
+      persistedInstallation.registrationPolicy === 'public' ? 'public' : 'disabled',
+    )
+    const installation = new InstallationService(database, config, false)
     const deployment = new DeploymentService(database, config)
     await deployment.initialize()
     // A readiness-only failure still leaves a listening process available to
@@ -233,6 +268,7 @@ async function main(): Promise<void> {
       staffSessions,
       maintenanceCoordinator,
       accountAudit,
+      installation,
     })
     // Hosted internal-test drains to the redacted LogMailProvider; a
     // self-hosted instance drains only when its explicitly configured SMTP

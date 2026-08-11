@@ -1,6 +1,5 @@
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox'
 import { Type } from '@sinclair/typebox'
-import type { AppConfig } from '../config.js'
 import { requireAuth } from '../auth/http-auth.js'
 import type { TokenService } from '../auth/tokens.js'
 import type { AuthService } from '../auth/service.js'
@@ -25,7 +24,6 @@ const IdempotencyKeyHeaders = Type.Object({
 })
 
 export function createWorkspaceRoutes(
-  config: AppConfig,
   workspaces: WorkspaceService,
   tokens: TokenService,
   auth: AuthService,
@@ -49,9 +47,6 @@ export function createWorkspaceRoutes(
         },
       },
     }, async (request) => {
-      if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test') {
-        throw new ApiError({ code: 'managed_default_workspace_unavailable', message: 'Managed default workspace is unavailable during internal E2EE testing', statusCode: 409 })
-      }
       const claims = await requireAuth(request, tokens, auth)
       return workspaces.getOrCreateManagedDefault(claims.accountId, request.body)
     })

@@ -17,6 +17,9 @@ export class BootstrapService {
 
   async initialize(): Promise<void> {
     if (!this.deployment.canBootstrapAdministrator()) return
+    // Fresh instances are initialized by InstallationService. Only import an
+    // env credential for a legacy uninitialized database that still has one.
+    if (this.config.setupToken.length === 0) return
     const [restoreRequiresReissue] = await this.database.db.select({ id: restoreMarkers.id }).from(restoreMarkers)
       .where(eq(restoreMarkers.bootstrapReissueRequired, true)).limit(1)
     if (restoreRequiresReissue !== undefined) return

@@ -10,6 +10,7 @@ export const staffPermissions = [
 export type StaffPermission = typeof staffPermissions[number]
 
 export const staffRoleTemplates = {
+  'platform-admin': staffPermissions,
   'security-analyst': ['risk.read'] as const,
   'security-admin': ['risk.read', 'risk.manage', 'risk.admin'] as const,
   'billing-support': ['billing.read'] as const,

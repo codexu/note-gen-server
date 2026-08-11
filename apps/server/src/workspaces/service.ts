@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
 import { devices, objects, workspaceKeyEnvelopes, workspaceKeys, workspaces } from '../database/schema.js'
 import { ApiError } from '../errors.js'
@@ -21,8 +21,6 @@ export interface KeyEnvelopeInput {
   kdfSalt: string | null
   kdfParams: Record<string, number> | null
 }
-
-type SyncObjectKind = typeof objects.$inferSelect.kind
 
 export class WorkspaceService {
   constructor(
@@ -372,54 +370,6 @@ export class WorkspaceService {
       objectCount: objectCountsByWorkspace.get(row.id)?.objectCount ?? 0,
       deletedObjectCount: objectCountsByWorkspace.get(row.id)?.deletedObjectCount ?? 0,
     }))
-  }
-
-  async listAccountWorkspaceObjects(accountId: string, workspaceId: string, input: {
-    kind?: SyncObjectKind
-    status: 'active' | 'deleted' | 'all'
-    limit: number
-    offset: number
-  }) {
-    await this.assertOwned(accountId, workspaceId)
-    const filters = [eq(objects.workspaceId, workspaceId)]
-    if (input.kind === 'record') {
-      // NoteGen clients sync user-facing records as `mark` objects. Keep the
-      // legacy `record` kind visible for older and admin-created test objects.
-      filters.push(inArray(objects.kind, ['record', 'mark']))
-    } else if (input.kind !== undefined) {
-      filters.push(eq(objects.kind, input.kind))
-    }
-    if (input.status === 'active') filters.push(isNull(objects.deletedAt))
-    if (input.status === 'deleted') filters.push(isNotNull(objects.deletedAt))
-
-    const where = and(...filters)
-    const [rows, totals] = await Promise.all([
-      this.database.db.select({
-        objectId: objects.objectId,
-        kind: objects.kind,
-        currentRevision: objects.currentRevision,
-        ciphertext: objects.ciphertext,
-        ciphertextHash: objects.ciphertextHash,
-        keyVersion: objects.keyVersion,
-        blobRefs: objects.blobRefs,
-        deletedAt: objects.deletedAt,
-        createdAt: objects.createdAt,
-        updatedAt: objects.updatedAt,
-      }).from(objects).where(where)
-        .orderBy(desc(objects.updatedAt), desc(objects.objectId))
-        .limit(input.limit)
-        .offset(input.offset),
-      this.database.db.select({ count: sql<number>`count(*)::int` }).from(objects).where(where),
-    ])
-
-    return {
-      total: totals[0]?.count ?? 0,
-      objects: rows.map((row) => ({
-        ...row,
-        currentRevision: row.currentRevision.toString(),
-        ciphertextBytes: Buffer.byteLength(row.ciphertext, 'utf8').toString(),
-      })),
-    }
   }
 
   async assertOwned(accountId: string, workspaceId: string): Promise<void> {

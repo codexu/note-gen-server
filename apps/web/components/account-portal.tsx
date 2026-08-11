@@ -40,12 +40,10 @@ import { Spinner } from "@/components/ui/spinner"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import {
-  ContentBrowser, type ContentStatus, type PrimaryContentKind,
-} from "@/components/content-browser"
 import { ServiceCenter } from "@/components/service-center"
 import { OperationsCenter } from "@/components/operations-center"
 import { DeviceConnection } from "@/components/device-connection"
+import { InstallationGuide, type InstallationStatus } from "@/components/installation-guide"
 import {
   apiRequest,
   isApiRequestError,
@@ -64,38 +62,22 @@ import {
   type Device,
   type ServerCapabilities,
   type SyncOverview,
-  type WebSyncObjectPage,
   type WebWorkspace,
-  type WebWorkspaceKey,
 } from "@/lib/api"
 import { formatRelativeTime as formatDate } from "@/lib/relative-time"
 import { cn } from "@/lib/utils"
-import {
-  decodeWorkspaceObject, unlockManagedWorkspaceKeys, type DecodedSyncObject,
-} from "@/lib/workspace-content"
 
 type AuthMode = "login" | "register"
-const CONTENT_PAGE_SIZE = 25
 
 export function AccountPortal() {
   const [, setRelativeTimeTick] = useState(0)
   const [account, setAccount] = useState<Account | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [capabilities, setCapabilities] = useState<ServerCapabilities | null>(null)
+  const [installationStatus, setInstallationStatus] = useState<InstallationStatus | null>(null)
   const [overview, setOverview] = useState<SyncOverview | null>(null)
   const [workspaces, setWorkspaces] = useState<WebWorkspace[]>([])
-  const [workspaceId, setWorkspaceId] = useState("")
-  const [contentKind, setContentKind] = useState<PrimaryContentKind>("note")
-  const [contentStatus, setContentStatus] = useState<ContentStatus>("active")
-  const [contentItems, setContentItems] = useState<DecodedSyncObject[]>([])
-  const [contentTotal, setContentTotal] = useState(0)
-  const [contentOffset, setContentOffset] = useState(0)
-  const [contentLoading, setContentLoading] = useState(false)
-  const [contentError, setContentError] = useState("")
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
-  const [deletingObjectId, setDeletingObjectId] = useState<string | null>(null)
-  const [creatingTestData, setCreatingTestData] = useState(false)
   const [section, setSection] = useState<AdminSection>(() => (
     typeof window !== "undefined" && window.location.pathname.startsWith("/connect")
       ? "connect"
@@ -121,7 +103,7 @@ export function AccountPortal() {
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminError, setAdminError] = useState("")
   const [adminBusyAccountId, setAdminBusyAccountId] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
@@ -134,16 +116,7 @@ export function AccountPortal() {
 
     if (devicesResult.status === "fulfilled") setDevices(devicesResult.value)
     if (overviewResult.status === "fulfilled") setOverview(overviewResult.value)
-    if (workspacesResult.status === "fulfilled") {
-      setWorkspaces(workspacesResult.value)
-      setWorkspaceId((current) => (
-        workspacesResult.value.some((workspace) => workspace.id === current)
-          ? current
-          : workspacesResult.value.find((workspace) => workspace.isDefault)?.id
-            ?? workspacesResult.value[0]?.id
-            ?? ""
-      ))
-    }
+    if (workspacesResult.status === "fulfilled") setWorkspaces(workspacesResult.value)
 
     const failed = devicesResult.status === "rejected"
       ? devicesResult
@@ -154,56 +127,6 @@ export function AccountPortal() {
           : null
     if (failed) setError(errorMessage(failed.reason))
   }, [])
-
-  const loadContent = useCallback(async () => {
-    if (!workspaceId) {
-      setContentItems([])
-      setContentTotal(0)
-      return
-    }
-    const workspace = workspaces.find((item) => item.id === workspaceId)
-    if (!workspace) return
-
-    setContentLoading(true)
-    setContentError("")
-    try {
-      const query = new URLSearchParams({
-        kind: contentKind,
-        status: contentStatus,
-        limit: String(CONTENT_PAGE_SIZE),
-        offset: String(contentOffset),
-      })
-      const pageRequest = apiRequest<WebSyncObjectPage>(
-        `/v1/web/workspaces/${workspaceId}/objects?${query.toString()}`
-      )
-      const keyRequest = workspace.encryptionMode === "managed"
-        ? apiRequest<WebWorkspaceKey[]>(`/v1/web/workspaces/${workspaceId}/keys`)
-        : Promise.resolve([])
-      const [page, versions] = await Promise.all([pageRequest, keyRequest])
-      if (page.objects.length === 0 && page.total > 0 && contentOffset > 0) {
-        setContentOffset(Math.max(0, contentOffset - CONTENT_PAGE_SIZE))
-        return
-      }
-      const keys = await unlockManagedWorkspaceKeys(versions)
-      const decoded = await Promise.all(page.objects.map((object) => (
-        decodeWorkspaceObject(object, keys, workspaceId)
-      )))
-      setContentItems(decoded)
-      setContentTotal(page.total)
-      setSelectedObjectId((current) => (
-        decoded.some((item) => item.object.objectId === current)
-          ? current
-          : decoded[0]?.object.objectId ?? null
-      ))
-    } catch (cause) {
-      setContentItems([])
-      setContentTotal(0)
-      setSelectedObjectId(null)
-      setContentError(errorMessage(cause))
-    } finally {
-      setContentLoading(false)
-    }
-  }, [contentKind, contentOffset, contentStatus, workspaceId, workspaces])
 
   const loadAdminData = useCallback(async () => {
     setAdminLoading(true)
@@ -267,10 +190,30 @@ export function AccountPortal() {
       setLoading(false)
       setError((current) => current || "登录状态检查超时，请重试或重新登录。")
     }, 5_000)
-    void apiRequest<ServerCapabilities>("/v1/capabilities")
-      .then(setCapabilities)
-      .catch((cause) => setError(errorMessage(cause)))
-    void loadAccount().finally(() => window.clearTimeout(loadingFallback))
+    void (async () => {
+      try {
+        const status = await apiRequest<InstallationStatus>("/v1/installation/status")
+        setInstallationStatus(status)
+        if (status.installationRequired || status.activationPending) {
+          setLoading(false)
+          return
+        }
+      } catch (cause) {
+        // Older compatible servers do not expose the installer status route.
+        if (!isApiRequestError(cause) || cause.status !== 404) {
+          setError(errorMessage(cause))
+          setLoading(false)
+          return
+        }
+      }
+      await Promise.all([
+        apiRequest<ServerCapabilities>("/v1/capabilities").then(setCapabilities),
+        loadAccount(),
+      ])
+    })().catch((cause) => {
+      setError(errorMessage(cause))
+      setLoading(false)
+    }).finally(() => window.clearTimeout(loadingFallback))
     return () => window.clearTimeout(loadingFallback)
   }, [loadAccount])
 
@@ -293,10 +236,6 @@ export function AccountPortal() {
   }, [account])
 
   useEffect(() => {
-    if (account) void loadContent()
-  }, [account, loadContent])
-
-  useEffect(() => {
     if (account?.isAdmin && section === "admin") void loadAdminData()
   }, [account, loadAdminData, section])
 
@@ -316,11 +255,6 @@ export function AccountPortal() {
       setDevices([])
       setOverview(null)
       setWorkspaces([])
-      setWorkspaceId("")
-      setContentItems([])
-      setContentTotal(0)
-      setContentOffset(0)
-      setSelectedObjectId(null)
       setAdminOverview(null)
       setAdminAccounts([])
       setAdminAccountTotal(0)
@@ -359,77 +293,11 @@ export function AccountPortal() {
         method: "DELETE",
         csrf: true,
       })
-      setWorkspaceId((current) => {
-        if (current !== targetWorkspaceId) return current
-        return workspaces.find((workspace) => workspace.isDefault)?.id
-          ?? workspaces.find((workspace) => workspace.id !== targetWorkspaceId)?.id
-          ?? ""
-      })
       await loadDashboardData()
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
       setDeletingWorkspaceId(null)
-    }
-  }
-
-  async function handleCreateTestObject() {
-    if (!workspaceId) return
-    setCreatingTestData(true)
-    setError("")
-    try {
-      await apiRequest(`/v1/web/workspaces/${workspaceId}/test-objects`, {
-        method: "POST",
-        csrf: true,
-        body: JSON.stringify({ kind: contentKind }),
-      })
-      setContentStatus("active")
-      setContentOffset(0)
-      await loadDashboardData()
-      if (contentStatus === "active" && contentOffset === 0) await loadContent()
-    } catch (cause) {
-      setError(errorMessage(cause))
-    } finally {
-      setCreatingTestData(false)
-    }
-  }
-
-  async function handleCleanupTestObjects() {
-    if (!workspaceId) return
-    setCreatingTestData(true)
-    setError("")
-    try {
-      await apiRequest(`/v1/web/workspaces/${workspaceId}/test-objects`, { method: "DELETE", csrf: true })
-      setContentOffset(0)
-      await loadDashboardData()
-      await loadContent()
-    } catch (cause) {
-      setError(errorMessage(cause))
-    } finally {
-      setCreatingTestData(false)
-    }
-  }
-
-  async function handleDeleteObject(objectId: string) {
-    if (!workspaceId) return
-    setDeletingObjectId(objectId)
-    setError("")
-    try {
-      await apiRequest(`/v1/web/workspaces/${workspaceId}/objects/${objectId}`, {
-        method: "DELETE",
-        csrf: true,
-      })
-      setSelectedObjectId(null)
-      await loadDashboardData()
-      if (contentItems.length === 1 && contentOffset > 0) {
-        setContentOffset(Math.max(0, contentOffset - CONTENT_PAGE_SIZE))
-      } else {
-        await loadContent()
-      }
-    } catch (cause) {
-      setError(errorMessage(cause))
-    } finally {
-      setDeletingObjectId(null)
     }
   }
 
@@ -482,6 +350,10 @@ export function AccountPortal() {
     )
   }
 
+  if (installationStatus?.installationRequired || installationStatus?.activationPending) {
+    return <InstallationGuide initialStatus={installationStatus} onStatusChange={setInstallationStatus} />
+  }
+
   if (!account) {
     return (
       <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:justify-center md:p-10">
@@ -504,7 +376,7 @@ export function AccountPortal() {
           </Card>
           <AuthCard
             busy={busy}
-            registrationMode={capabilities?.registrationMode ?? "closed"}
+            registrationMethods={capabilities?.registration.methods ?? []}
             deploymentMode={capabilities?.deploymentMode ?? "self-hosted"}
             setBusy={setBusy}
             onAuthenticated={handleAuthenticated}
@@ -520,7 +392,6 @@ export function AccountPortal() {
       account={account}
       capabilities={capabilities}
       section={section}
-      objectCount={overview?.objectCount ?? 0}
       workspaceCount={workspaces.length}
       deviceCount={devices.filter((device) => !device.revokedAt).length}
       busy={busy}
@@ -531,10 +402,6 @@ export function AccountPortal() {
           void loadAdminData()
           return
         }
-        if (section === "content") {
-          void loadContent()
-          return
-        }
         void loadDashboardData()
       }}
     >
@@ -542,52 +409,10 @@ export function AccountPortal() {
       {section === "overview" ? <OverviewSection overview={overview} /> : null}
       {section === "services" ? <ServiceCenter /> : null}
       {section === "operations" && account.isAdmin ? <OperationsCenter /> : null}
-      {section === "content" ? (
-        <ContentBrowser
-          workspaces={workspaces}
-          workspaceId={workspaceId}
-          kind={contentKind}
-          status={contentStatus}
-          items={contentItems}
-          total={contentTotal}
-          offset={contentOffset}
-          pageSize={CONTENT_PAGE_SIZE}
-          selectedObjectId={selectedObjectId}
-          loading={contentLoading}
-          error={contentError}
-          deletingWorkspaceId={deletingWorkspaceId}
-          deletingObjectId={deletingObjectId}
-          creatingTestData={creatingTestData}
-          onWorkspaceChange={(id) => {
-            setWorkspaceId(id)
-            setContentOffset(0)
-          }}
-          onDeleteWorkspace={handleDeleteWorkspace}
-          onCreateTestObject={handleCreateTestObject}
-          onCleanupTestObjects={handleCleanupTestObjects}
-          onDeleteObject={handleDeleteObject}
-          onKindChange={(kind) => {
-            setContentKind(kind)
-            setContentOffset(0)
-          }}
-          onStatusChange={(status) => {
-            setContentStatus(status)
-            setContentOffset(0)
-          }}
-          onPageChange={setContentOffset}
-          onSelectObject={setSelectedObjectId}
-        />
-      ) : null}
       {section === "workspaces" ? (
         <WorkspaceManagement
           workspaces={workspaces}
-          selectedWorkspaceId={workspaceId}
           deletingWorkspaceId={deletingWorkspaceId}
-          onSelect={(id) => {
-            setWorkspaceId(id)
-            setContentOffset(0)
-            setSection("content")
-          }}
           onDelete={handleDeleteWorkspace}
         />
       ) : null}
@@ -704,6 +529,8 @@ function LoginBenefit({
 }
 
 function OverviewSection({ overview }: { overview: SyncOverview | null }) {
+  const contentStats = summarizeContentKinds(overview?.kinds ?? [])
+
   return (
     <>
       <Card className="bg-card/90 shadow-sm">
@@ -735,35 +562,24 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
         </CardContent>
       </Card>
 
-      <div className="grid items-start gap-6 xl:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>类型统计</CardTitle>
-            <CardDescription>按数据类型统计当前有效内容和删除记录。</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {overview?.kinds.length ? (
-              <ItemGroup>
-                {overview.kinds.map((item) => (
-                  <Item key={item.kind} variant="outline">
-                    <ItemMedia variant="icon"><ServerIcon /></ItemMedia>
-                    <ItemContent>
-                      <ItemTitle>{kindLabel(item.kind)}</ItemTitle>
-                      <ItemDescription>最近更新 {formatDate(item.updatedAt)}</ItemDescription>
-                    </ItemContent>
-                    <ItemActions>
-                      <Badge>{item.activeCount}</Badge>
-                      {item.deletedCount ? <Badge variant="outline">删除 {item.deletedCount}</Badge> : null}
-                    </ItemActions>
-                  </Item>
-                ))}
-              </ItemGroup>
-            ) : (
-              <p className="text-sm text-muted-foreground">还没有同步内容。连接 NoteGen 后，本地内容会显示在这里。</p>
-            )}
-          </CardContent>
-        </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>内容数量</CardTitle>
+          <CardDescription>仅展示各类同步内容的数量，不读取文件名或正文。</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {contentStats.map((item) => (
+            <Metric
+              key={item.label}
+              label={item.label}
+              value={`${item.activeCount} 项`}
+              detail={`${item.deletedCount} 项删除记录`}
+            />
+          ))}
+        </CardContent>
+      </Card>
 
+      <div className="grid items-start gap-6">
         <Card>
           <CardHeader>
             <CardTitle>最近同步活动</CardTitle>
@@ -796,15 +612,11 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
 
 function WorkspaceManagement({
   workspaces,
-  selectedWorkspaceId,
   deletingWorkspaceId,
-  onSelect,
   onDelete,
 }: {
   workspaces: WebWorkspace[]
-  selectedWorkspaceId: string
   deletingWorkspaceId: string | null
-  onSelect: (id: string) => void
   onDelete: (id: string) => Promise<void>
 }) {
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null)
@@ -819,14 +631,14 @@ function WorkspaceManagement({
     <Card>
       <CardHeader>
         <CardTitle>工作区列表</CardTitle>
-        <CardDescription>默认工作区会受到保护；历史工作区可在确认后软删除，便于清理测试数据。</CardDescription>
+        <CardDescription>查看工作区状态与用量；默认工作区受到保护，历史工作区可在确认后软删除。</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {historicalCount ? (
           <Alert>
             <HistoryIcon />
             <AlertTitle>发现 {historicalCount} 个历史工作区</AlertTitle>
-            <AlertDescription>历史工作区按内容数量排序。删除前请先进入内容管理确认其中没有需要保留的数据。</AlertDescription>
+            <AlertDescription>历史工作区按内容数量排序。删除会影响其全部同步数据，请确认不再使用后操作。</AlertDescription>
           </Alert>
         ) : null}
         {sorted.length ? (
@@ -845,9 +657,6 @@ function WorkspaceManagement({
                     {workspace.isDefault ? "默认" : "历史"}
                   </Badge>
                   <Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管加密" : "E2EE"}</Badge>
-                  <Button size="sm" variant={selectedWorkspaceId === workspace.id ? "secondary" : "outline"} onClick={() => onSelect(workspace.id)}>
-                    {selectedWorkspaceId === workspace.id ? "查看当前内容" : "查看内容"}
-                  </Button>
                   {!workspace.isDefault && deleteCandidateId === workspace.id ? (
                     <>
                       <Button
@@ -1624,14 +1433,14 @@ async function downloadAdminExport(scope: "accounts" | "workspaces" | "devices" 
 
 function AuthCard({
   busy,
-  registrationMode,
+  registrationMethods,
   deploymentMode,
   setBusy,
   onAuthenticated,
   onError,
 }: {
   busy: boolean
-  registrationMode: "open" | "closed"
+  registrationMethods: string[]
   deploymentMode: "hosted" | "self-hosted"
   setBusy: (value: boolean) => void
   onAuthenticated: (account: Account) => Promise<void>
@@ -1643,7 +1452,10 @@ function AuthCard({
   const [setupToken, setSetupToken] = useState("")
   const [totpCode, setTotpCode] = useState("")
   const [notice, setNotice] = useState("")
-  const canRegister = deploymentMode === "self-hosted" || registrationMode === "open"
+  const canRegister = registrationMethods.some((method) => (
+    method === "setup" || method === "password" || method === "email-password"
+  ))
+  const isAdministratorSetup = registrationMethods.includes("setup")
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1660,7 +1472,7 @@ function AuthCard({
         setNotice("验证邮件已进入内部测试投递流程。验证完成后即可登录。")
         return
       }
-      if (mode === "register" && deploymentMode === "self-hosted" && setupToken.trim()) {
+      if (mode === "register" && deploymentMode === "self-hosted" && isAdministratorSetup) {
         const result = await apiRequest<{ account: Account }>("/v1/setup/complete", {
           method: "POST",
           body: JSON.stringify({ login, password, token: setupToken.trim() }),
@@ -1730,9 +1542,9 @@ function AuthCard({
                   />
                   <FieldDescription>至少 8 个字符，仅用于账号登录；默认同步无需另设加密口令。</FieldDescription>
                 </Field>
-                {mode === "register" && deploymentMode === "self-hosted" && registrationMode === "closed" ? (
+                {mode === "register" && deploymentMode === "self-hosted" && isAdministratorSetup ? (
                   <Field>
-                    <FieldLabel htmlFor="setup-token">Setup Token</FieldLabel>
+                    <FieldLabel htmlFor="setup-token">一次性恢复凭据</FieldLabel>
                     <Input
                       id="setup-token"
                       type="password"
@@ -1740,7 +1552,7 @@ function AuthCard({
                       onChange={(event) => setSetupToken(event.target.value)}
                       autoComplete="off"
                     />
-                    <FieldDescription>首次创建管理员时填写 `.env` 中的 Setup Token；初始化完成后此令牌立即失效。</FieldDescription>
+                    <FieldDescription>灾备恢复场景请填写本机 CLI 签发的一次性初始化凭据。</FieldDescription>
                   </Field>
                 ) : null}
                 {mode === "login" ? (
@@ -1818,7 +1630,7 @@ function kindLabel(kind: string): string {
     canvas: "画布",
     record: "记录",
     tag: "标签",
-    mark: "标记",
+    mark: "记录",
     conversation: "对话",
     memory: "记忆",
     setting: "设置",
@@ -1826,6 +1638,30 @@ function kindLabel(kind: string): string {
     "yjs-update": "实时文档增量",
   }
   return labels[kind] ?? kind
+}
+
+function summarizeContentKinds(kinds: SyncOverview["kinds"]): Array<{
+  label: string
+  activeCount: number
+  deletedCount: number
+}> {
+  const groups = [
+    { label: "笔记", kinds: ["note"] },
+    { label: "记录", kinds: ["mark", "record"] },
+    { label: "绘图", kinds: ["canvas"] },
+    { label: "对话", kinds: ["conversation"] },
+    { label: "记忆", kinds: ["memory"] },
+    { label: "配置", kinds: ["setting"] },
+    { label: "附件", kinds: ["asset"] },
+  ]
+  return groups.map((group) => {
+    const matches = kinds.filter((item) => group.kinds.includes(item.kind))
+    return {
+      label: group.label,
+      activeCount: matches.reduce((total, item) => total + item.activeCount, 0),
+      deletedCount: matches.reduce((total, item) => total + item.deletedCount, 0),
+    }
+  })
 }
 
 function auditActionLabel(action: string): string {
@@ -1844,6 +1680,7 @@ function auditActionLabel(action: string): string {
     "data.export": "导出后台数据",
     "audit.cleanup": "清理历史审计",
     "runtime-configuration.update": "更新运行配置",
+    "instance.web-installation-complete": "完成 Web 安装",
   }
   return labels[action] ?? action
 }

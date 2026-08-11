@@ -2,14 +2,14 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
-import { CheckCircle2Icon, LaptopIcon, QrCodeIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XCircleIcon } from "lucide-react"
+import { CheckCircle2Icon, CopyIcon, ExternalLinkIcon, LaptopIcon, QrCodeIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XCircleIcon } from "lucide-react"
 import QRCode from "react-qr-code"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -40,10 +40,16 @@ export function DeviceConnection({
   const [pairingBusy, setPairingBusy] = useState(false)
   const [pairingError, setPairingError] = useState("")
   const [remainingSeconds, setRemainingSeconds] = useState(0)
+  const [serverAddress, setServerAddress] = useState("")
+  const [serverAddressError, setServerAddressError] = useState("")
+  const [serverAddressCopied, setServerAddressCopied] = useState(false)
 
   useEffect(() => {
     const initialCode = new URLSearchParams(window.location.search).get("code") ?? ""
     setCode(initialCode)
+    void apiRequest<{ publicBaseUrl: string }>("/v1/capabilities")
+      .then((result) => setServerAddress(result.publicBaseUrl))
+      .catch(() => setServerAddressError("无法读取服务器地址，请刷新页面后重试。"))
     void apiRequest("/v1/web/session")
       .then(() => {
         setSignedIn(true)
@@ -80,20 +86,38 @@ export function DeviceConnection({
     }
   }, [pairing, pairingStatus])
 
+  async function replacePairing(): Promise<DevicePairing> {
+    if (pairing?.id && pairingStatus === "pending") {
+      await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true })
+    }
+    const result = await apiRequest<DevicePairing>("/v1/web/device-pairings", {
+      method: "POST",
+      csrf: true,
+    })
+    setPairing(result)
+    setPairingStatus("pending")
+    setRemainingSeconds(result.expiresIn)
+    return result
+  }
+
   async function createPairing() {
     setPairingBusy(true)
     setPairingError("")
     try {
-      if (pairing?.id && pairingStatus === "pending") {
-        await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true })
-      }
-      const result = await apiRequest<DevicePairing>("/v1/web/device-pairings", {
-        method: "POST",
-        csrf: true,
-      })
-      setPairing(result)
-      setPairingStatus("pending")
-      setRemainingSeconds(result.expiresIn)
+      await replacePairing()
+    } catch (cause) {
+      setPairingError(errorMessage(cause))
+    } finally {
+      setPairingBusy(false)
+    }
+  }
+
+  async function openPairingInNoteGen() {
+    setPairingBusy(true)
+    setPairingError("")
+    try {
+      const result = await replacePairing()
+      window.location.assign(result.pairingUri)
     } catch (cause) {
       setPairingError(errorMessage(cause))
     } finally {
@@ -131,6 +155,17 @@ export function DeviceConnection({
       setError(errorMessage(cause))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function copyServerAddress() {
+    if (!serverAddress) return
+    setServerAddressError("")
+    try {
+      await navigator.clipboard.writeText(serverAddress)
+      setServerAddressCopied(true)
+    } catch {
+      setServerAddressError("复制失败，请手动选择并复制服务器地址。")
     }
   }
 
@@ -194,12 +229,51 @@ export function DeviceConnection({
             <Alert>
               {completed === "approved" ? <CheckCircle2Icon /> : <XCircleIcon />}
               <AlertTitle>{completed === "approved" ? "设备已允许连接" : "已拒绝设备连接"}</AlertTitle>
-              <AlertDescription>
-                {completed === "approved" ? "可以返回 NoteGen，客户端会自动完成登录。" : "这次授权不会签发任何设备会话。"}
+              <AlertDescription className="flex flex-col gap-3">
+                <span>
+                  {completed === "approved" ? "设备授权已确认，可以直接打开 NoteGen 完成关联。" : "这次授权不会签发任何设备会话。"}
+                </span>
+                {completed === "approved" ? (
+                  <Button className="self-start" onClick={() => void openPairingInNoteGen()} disabled={pairingBusy}>
+                    {pairingBusy ? <Spinner data-icon="inline-start" /> : <ExternalLinkIcon data-icon="inline-start" />}
+                    {pairingBusy ? "正在打开…" : "打开 NoteGen 完成关联"}
+                  </Button>
+                ) : null}
               </AlertDescription>
             </Alert>
           ) : (
             <FieldGroup>
+              <Field data-invalid={serverAddressError ? true : undefined}>
+                <FieldLabel htmlFor="server-address">同步服务器地址</FieldLabel>
+                <div className="flex gap-2">
+                  <Input
+                    id="server-address"
+                    className="min-w-0"
+                    value={serverAddress}
+                    placeholder="正在读取服务器地址…"
+                    readOnly
+                    aria-invalid={serverAddressError ? true : undefined}
+                  />
+                  <Button
+                    type="button"
+                    className="shrink-0"
+                    variant="outline"
+                    disabled={!serverAddress}
+                    onClick={() => void copyServerAddress()}
+                  >
+                    {serverAddressCopied ? (
+                      <CheckCircle2Icon data-icon="inline-start" />
+                    ) : (
+                      <CopyIcon data-icon="inline-start" />
+                    )}
+                    {serverAddressCopied ? "已复制" : "复制地址"}
+                  </Button>
+                </div>
+                <FieldDescription>
+                  在 NoteGen 客户端的同步设置中填写此地址，然后输入下方验证码完成关联。
+                </FieldDescription>
+                <FieldError>{serverAddressError}</FieldError>
+              </Field>
               <Field>
                 <FieldLabel htmlFor="device-code">设备验证码</FieldLabel>
                 <Input
@@ -311,6 +385,10 @@ export function DeviceConnection({
             <Button onClick={() => void createPairing()} disabled={pairingBusy}>
               {pairingBusy ? <Spinner data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
               {pairing ? "刷新二维码" : "生成配对二维码"}
+            </Button>
+            <Button variant="outline" onClick={() => void openPairingInNoteGen()} disabled={pairingBusy}>
+              <ExternalLinkIcon data-icon="inline-start" />
+              打开 NoteGen 关联
             </Button>
             {pairing ? (
               <Button variant="outline" onClick={() => void cancelPairing()} disabled={pairingBusy}>

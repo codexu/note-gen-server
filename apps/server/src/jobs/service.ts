@@ -78,7 +78,7 @@ export class BackgroundJobService {
       sql`${backgroundJobs.attempt} >= ${backgroundJobs.maxAttempts}`,
       sql`(( ${backgroundJobs.status} = 'running' and ${backgroundJobs.leaseExpiresAt} < now()) or ${backgroundJobs.status} = 'pending')`,
     ))
-    const allowedTypes = this.database.sql.array([...new Set(handlerTypes)], 'text')
+    const allowedTypes = this.database.sql.array([...new Set(handlerTypes)])
     const rows = await this.database.sql<Array<ClaimedJob>>`
       with candidate as (
         select id from background_jobs
@@ -87,7 +87,7 @@ export class BackgroundJobService {
           or (status = 'running' and lease_expires_at < now())
         ) and attempt < max_attempts and min_handler_version <= ${handlerVersion}
           and queue_generation = ${queueGeneration}
-          and type = any(${allowedTypes})
+          and type = any(${allowedTypes}::text[])
         order by scheduled_at asc, created_at asc
         for update skip locked
         limit 1

@@ -102,7 +102,7 @@ export function createCapabilitiesRoutes(
         deltaSync: true,
         webSocketWakeUp: true,
         endToEndEncryption: true,
-        managedDefaultWorkspace: config.deploymentMode !== 'hosted' || config.hostedReleaseStage !== 'internal-test',
+        managedDefaultWorkspace: true,
         blobUpload: true,
         yjsUpdates: true,
         settingsSync: true,

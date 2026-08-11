@@ -47,7 +47,7 @@ export function isMailMessage(value: unknown): value is MailMessage {
   const template = candidate.template as MailTemplateId
   return entries.length <= templateVariableKeys[template].length && entries.every(([key, item]) => (
     templateVariableKeys[template].includes(key) && typeof item === 'string' && item.length <= 8_192 && !/[\r\n]/.test(item)
-  )) && (variables.actionUrl === undefined || isHttpsUrl(variables.actionUrl))
+  )) && (variables.actionUrl === undefined || isSafeActionUrl(variables.actionUrl))
 }
 
 interface MailLogger { info(bindings: Record<string, unknown>, message: string): void }
@@ -203,7 +203,7 @@ export function createMailProvider(config: AppConfig): MailProvider | undefined 
 
 function renderTemplate(message: MailMessage): { subject: string, text: string, html: string } {
   const actionUrl = message.variables.actionUrl
-  const safeUrl = typeof actionUrl === 'string' && /^https:\/\//.test(actionUrl) ? actionUrl : undefined
+  const safeUrl = typeof actionUrl === 'string' && isSafeActionUrl(actionUrl) ? actionUrl : undefined
   const labels: Record<MailTemplateId, { en: string, zh: string }> = {
     'verify-email': { en: 'Verify your email address', zh: '验证你的邮箱地址' },
     'reset-password': { en: 'Reset your password', zh: '重置你的密码' },
@@ -246,6 +246,13 @@ function digest(secret: string, value: string): string {
 function isEmailLike(value: string): boolean {
   return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 }
-function isHttpsUrl(value: string): boolean {
-  try { const url = new URL(value); return url.protocol === 'https:' && url.username.length === 0 && url.password.length === 0 } catch { return false }
+function isSafeActionUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    if (url.username.length > 0 || url.password.length > 0) return false
+    if (url.protocol === 'https:') return true
+    return url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+  } catch {
+    return false
+  }
 }

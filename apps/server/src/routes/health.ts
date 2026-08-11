@@ -16,6 +16,9 @@ export function createHealthRoutes(dependencies: ServiceDependencies): FastifyPl
     }, async (request, reply) => {
       try {
         await Promise.all([dependencies.database.check(), dependencies.blobStorage.check()])
+        if ((await dependencies.installation?.status())?.activationPending === true) {
+          throw new Error('Installation profile activation is pending')
+        }
         if (dependencies.deployment?.getSafetyFailure() !== undefined) throw new Error('Startup safety gate is closed')
         return { status: 'ok' as const, version: dependencies.version }
       } catch (error) {

@@ -73,14 +73,14 @@ export class MailOutboxService {
     if (secrets !== undefined) {
       for (const item of expiredFinal) if (item.secretPayloadRef !== null) await secrets.erase(item.secretPayloadRef)
     }
-    const allowedTemplates = this.database.sql.array([...new Set(templates)], 'text')
+    const allowedTemplates = this.database.sql.array([...new Set(templates)])
     const rows = await this.database.sql<Array<ClaimedMailOutbox>>`
       with candidate as (
         select id from outbox_messages
         where channel = 'mail' and (
           (status = 'pending' and next_attempt_at <= now())
           or (status = 'sending' and lease_expires_at < now())
-        ) and attempts < max_attempts and template_or_event = any(${allowedTemplates})
+        ) and attempts < max_attempts and template_or_event = any(${allowedTemplates}::text[])
         order by next_attempt_at asc, created_at asc
         for update skip locked
         limit 1

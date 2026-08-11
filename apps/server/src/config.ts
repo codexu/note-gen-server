@@ -14,7 +14,7 @@ const EnvironmentSchema = Type.Object({
   SERVER_NAME: Type.String({ minLength: 1, maxLength: 100 }),
   TRUST_PROXY: Type.Boolean(),
   AUTH_SECRET: Type.String({ minLength: 32 }),
-  SETUP_TOKEN: Type.String({ minLength: 16 }),
+  SETUP_TOKEN: Type.String(),
   REGISTRATION_MODE: Type.Union([Type.Literal('closed'), Type.Literal('open')]),
   BLOB_STORAGE_DRIVER: Type.Union([Type.Literal('filesystem'), Type.Literal('s3')]),
   BLOB_STORAGE_PATH: Type.String({ minLength: 1 }),
@@ -192,7 +192,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     SERVER_NAME: environment.SERVER_NAME?.trim() || 'NoteGen Sync Server',
     TRUST_PROXY: environment.TRUST_PROXY === 'true',
     AUTH_SECRET: environment.AUTH_SECRET ?? 'development-only-auth-secret-change-me',
-    SETUP_TOKEN: environment.SETUP_TOKEN ?? 'development-setup-token',
+    // Kept as an optional legacy import source for old uninitialized/restore
+    // flows. New installations are claimed directly through the Web guide.
+    SETUP_TOKEN: environment.SETUP_TOKEN ?? '',
     REGISTRATION_MODE: environment.REGISTRATION_MODE === 'open' ? 'open' : 'closed',
     BLOB_STORAGE_DRIVER: environment.BLOB_STORAGE_DRIVER === 's3' ? 's3' : 'filesystem',
     BLOB_STORAGE_PATH: environment.BLOB_STORAGE_PATH ?? './data/blobs',
@@ -221,13 +223,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     WEB_DIST_PATH: environment.WEB_DIST_PATH ?? fileURLToPath(new URL('../../web/out', import.meta.url)),
     WEB_PUBLIC_BASE_URL: environment.WEB_PUBLIC_BASE_URL?.trim()
       || (nodeEnv === 'development' ? 'http://127.0.0.1:3790' : environment.PUBLIC_BASE_URL ?? 'http://localhost:3789'),
-    DEPLOYMENT_MODE: environment.DEPLOYMENT_MODE === 'hosted' ? 'hosted' : 'self-hosted',
-    HOSTED_RELEASE_STAGE: environment.HOSTED_RELEASE_STAGE === 'live' ? 'live' : 'internal-test',
-    HOSTED_REGISTRATION_POLICY: environment.HOSTED_REGISTRATION_POLICY === 'public' ? 'public' : 'disabled',
-    BILLING_PROVIDER: environment.BILLING_PROVIDER === 'mock' ? 'mock' : 'none',
-    BILLING_PROVIDER_ENVIRONMENT: environment.BILLING_PROVIDER_ENVIRONMENT === 'live' ? 'live' : 'test',
-    BILLING_MERCHANT_ENTITY: environment.BILLING_MERCHANT_ENTITY?.trim() ?? '',
-    HOSTED_MAIL_PROVIDER: environment.HOSTED_MAIL_PROVIDER === 'log' ? 'log' : 'none',
+    // Deployment behavior is selected by the one-time Web installer. These
+    // values are only safe pre-installation defaults and are replaced from DB.
+    DEPLOYMENT_MODE: 'self-hosted',
+    HOSTED_RELEASE_STAGE: 'internal-test',
+    HOSTED_REGISTRATION_POLICY: 'disabled',
+    BILLING_PROVIDER: 'none',
+    BILLING_PROVIDER_ENVIRONMENT: 'test',
+    BILLING_MERCHANT_ENTITY: '',
+    HOSTED_MAIL_PROVIDER: 'none',
     MAIL_DRIVER: environment.MAIL_DRIVER === 'smtp' ? 'smtp' : 'disabled',
     MAIL_FROM_ADDRESS: environment.MAIL_FROM_ADDRESS?.trim() ?? '',
     MAIL_FROM_NAME: environment.MAIL_FROM_NAME?.trim() || 'NoteGen',
@@ -244,15 +248,13 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     SMTP_COMMAND_TIMEOUT_MS: integer(environment.SMTP_COMMAND_TIMEOUT_MS, 15_000),
     SMTP_TLS_REJECT_UNAUTHORIZED: environment.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
     ALLOW_INSECURE_SMTP: environment.ALLOW_INSECURE_SMTP === 'true',
-    HOSTED_DATA_REGION: environment.HOSTED_DATA_REGION?.trim() || 'local-internal-test',
+    HOSTED_DATA_REGION: 'local-internal-test',
     PENDING_EMAIL_VERIFICATION_DAYS: integer(environment.PENDING_EMAIL_VERIFICATION_DAYS, 7),
     ACCOUNT_DELETION_COOLING_OFF_DAYS: integer(environment.ACCOUNT_DELETION_COOLING_OFF_DAYS, 30),
     ACCOUNT_DELETION_RETENTION_DAYS: integer(environment.ACCOUNT_DELETION_RETENTION_DAYS, 90),
     DELETION_LEDGER_PATH: environment.DELETION_LEDGER_PATH ?? './data/deletion-ledger',
     LEGAL_HOLD_APPROVAL_AUTHORITY: 'platform-admin',
-    USAGE_ENFORCEMENT: environment.USAGE_ENFORCEMENT === 'hard' ? 'hard'
-      : environment.USAGE_ENFORCEMENT === 'disabled' ? 'disabled'
-        : environment.DEPLOYMENT_MODE === 'hosted' ? 'observe' : 'disabled',
+    USAGE_ENFORCEMENT: 'disabled',
     CAPABILITIES_ENABLE: parseList(environment.CAPABILITIES_ENABLE),
     CAPABILITIES_DISABLE: parseList(environment.CAPABILITIES_DISABLE),
   }
@@ -266,9 +268,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
 
   if (candidate.NODE_ENV === 'production' && candidate.AUTH_SECRET === 'development-only-auth-secret-change-me') {
     throw new Error('AUTH_SECRET must be explicitly configured in production')
-  }
-  if (candidate.NODE_ENV === 'production' && candidate.SETUP_TOKEN === 'development-setup-token') {
-    throw new Error('SETUP_TOKEN must be explicitly configured in production')
   }
 
   let publicUrl: URL
@@ -415,6 +414,46 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     usageEnforcement: candidate.USAGE_ENFORCEMENT,
     capabilitiesEnable: candidate.CAPABILITIES_ENABLE,
     capabilitiesDisable: candidate.CAPABILITIES_DISABLE,
+  }
+}
+
+/** Applies the persisted installation profile before mode-specific services are assembled. */
+export function applyPersistedDeploymentProfile(
+  config: AppConfig,
+  deploymentMode: 'self-hosted' | 'hosted',
+  hostedRegistrationPolicy: 'disabled' | 'public' = 'disabled',
+): void {
+  const profile = deploymentMode === 'hosted'
+    ? {
+        deploymentMode,
+        hostedReleaseStage: 'internal-test' as const,
+        hostedRegistrationPolicy,
+        billingProvider: 'mock' as const,
+        billingProviderEnvironment: 'test' as const,
+        billingMerchantEntity: 'internal-test-only',
+        hostedMailProvider: 'log' as const,
+        usageEnforcement: 'observe' as const,
+        mailDriver: 'disabled' as const,
+        capabilitiesEnable: hostedRegistrationPolicy === 'public'
+          ? ['mail.delivery', 'identity.email', 'identity.emailVerification', 'identity.passwordReset', 'registration.public']
+          : [],
+        capabilitiesDisable: [],
+      }
+    : {
+        deploymentMode,
+        hostedRegistrationPolicy: 'disabled' as const,
+        billingProvider: 'none' as const,
+        hostedMailProvider: 'none' as const,
+        usageEnforcement: 'disabled' as const,
+      }
+  Object.assign(config as unknown as Record<string, unknown>, profile)
+
+  if (deploymentMode === 'hosted') {
+    const ledgerPath = resolve(config.deletionLedgerPath)
+    if (ledgerPath === resolve(config.backupPath)
+      || (config.blobStorageDriver === 'filesystem' && ledgerPath === resolve(config.blobStoragePath))) {
+      throw new Error('Invalid server configuration: hosted deletion ledger must be separate from backup and blob storage paths')
+    }
   }
 }
 

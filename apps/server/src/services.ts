@@ -36,6 +36,7 @@ import type { StaffService } from './staff/service.js'
 import type { StaffSessionService } from './staff/session-service.js'
 import type { WebStepUpService } from './step-up/service.js'
 import type { AccountServiceAudit } from './audit/service.js'
+import type { InstallationService } from './installation/service.js'
 
 export interface ServiceDependencies {
   readonly version: string
@@ -81,4 +82,6 @@ export interface ServiceDependencies {
   readonly staff?: StaffService
   readonly staffSessions?: StaffSessionService
   readonly accountAudit?: AccountServiceAudit
+  readonly installation?: InstallationService
+  readonly onInstallationComplete?: () => void
 }

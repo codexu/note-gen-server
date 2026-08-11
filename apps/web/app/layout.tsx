@@ -3,6 +3,7 @@ import type { Metadata } from "next"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { LocaleProvider } from "@/components/locale-provider"
 
 export const metadata: Metadata = {
   title: "NoteGen 同步管理后台",
@@ -18,7 +19,9 @@ export default function RootLayout({
     <html lang="zh-CN" suppressHydrationWarning>
       <body>
         <ThemeProvider>
-          <TooltipProvider>{children}</TooltipProvider>
+          <LocaleProvider>
+            <TooltipProvider>{children}</TooltipProvider>
+          </LocaleProvider>
         </ThemeProvider>
       </body>
     </html>

@@ -159,40 +159,6 @@ export interface WebWorkspaceContract {
   updatedAt: string
 }
 
-export interface WebWorkspaceKeyContract {
-  keyVersion: number
-  createdAt: string
-  envelopes: Array<{
-    id: string
-    keyVersion: number
-    type: "passphrase" | "recovery" | "device" | "managed"
-    recipientId: string | null
-    wrappedKey: string
-    kdfSalt: string | null
-    kdfParams: Record<string, number> | null
-    createdAt: string
-  }>
-}
-
-export interface WebSyncObjectContract {
-  objectId: string
-  kind: SyncObjectKindContract
-  currentRevision: string
-  ciphertext: string
-  ciphertextHash: string
-  ciphertextBytes: string
-  keyVersion: number
-  blobRefs: string[]
-  deletedAt: string | null
-  createdAt: string
-  updatedAt: string
-}
-
-export interface WebSyncObjectPageContract {
-  total: number
-  objects: WebSyncObjectContract[]
-}
-
 export interface DeviceAuthorizationRequest {
   deviceId: string
   deviceName: string
