@@ -20,6 +20,7 @@ apps/web     Next.js + shadcn/ui 账号管理页面
 - [NoteGen 客户端接入协议](docs/client-protocol.md)
 - [NoteGen 接入与配置同步体验](docs/notegen-integration.md)
 - [部署后的个人验收用例](docs/self-test.md)
+- [账号服务开发计划总览](docs/account-service/README.md)
 
 ## 已确定技术栈
 
