@@ -117,12 +117,23 @@ export function createBlobRoutes(
     app.post('/v1/workspaces/:workspaceId/blobs/uploads/:uploadId/complete', {
       schema: {
         params: UploadParams,
-        body: Type.Optional(Type.Object({ expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })) })),
+        // Older clients completed an upload without a request body when the workspace did
+        // not expose a sync epoch. Fastify normalizes that missing body to null, so retain
+        // compatibility while newer clients consistently send an empty JSON object.
+        body: Type.Union([
+          Type.Object({ expectedSyncEpoch: Type.Optional(Type.String({ format: 'uuid' })) }),
+          Type.Null(),
+        ]),
         response: { 200: CompletedBlobResponse },
       },
     }, async (request) => {
       const claims = await requireAuth(request, tokens, auth)
-      return blobs.complete(claims.accountId, request.params.workspaceId, request.params.uploadId, request.body?.expectedSyncEpoch)
+      return blobs.complete(
+        claims.accountId,
+        request.params.workspaceId,
+        request.params.uploadId,
+        request.body?.expectedSyncEpoch,
+      )
     })
 
     app.delete('/v1/workspaces/:workspaceId/blobs/uploads/:uploadId', {

@@ -81,6 +81,18 @@ export class DeviceAuthorizationService {
         isNull(deviceAuthorizations.consumedAt),
       )).returning({ id: deviceAuthorizations.id })
       if (approved.length === 0) {
+        const [existing] = await tx.select({
+          accountId: deviceAuthorizations.accountId,
+          status: deviceAuthorizations.status,
+          expiresAt: deviceAuthorizations.expiresAt,
+        }).from(deviceAuthorizations).where(
+          eq(deviceAuthorizations.userCode, normalizeUserCode(userCode)),
+        ).limit(1)
+        // The browser can repeat the approval while the NoteGen polling client
+        // consumes it. Treat an approval already completed by this account as
+        // idempotent instead of replacing the success screen with a 409.
+        if (existing?.accountId === accountId && existing.status === 'approved'
+          && existing.expiresAt > approvedAt) return
         throw new ApiError({ code: 'authorization_not_pending', message: 'Authorization is expired or no longer pending', statusCode: 409 })
       }
     })

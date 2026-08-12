@@ -30,7 +30,7 @@
 | Metric | 定义 | 一期执行 |
 | --- | --- | --- |
 | `active_storage_bytes` | 未删除当前对象的逻辑 ciphertext payload、当前 CRDT payload、账号拥有的全部 ready Blob（每个实际 storage key 一次）及上传 reservation | 硬限额 |
-| `retained_storage_bytes` | 历史版本、tombstone、冲突、V2 event/command/document/update/checkpoint 等不属于当前逻辑 payload 的持久副本 | 物理安全限额/告警 |
+| `retained_storage_bytes` | 历史版本、tombstone、冲突、同步 event/command/document/update/checkpoint 等不属于当前逻辑 payload 的持久副本 | 物理安全限额/告警 |
 | `active_objects` | `objects.deleted_at is null` 的逻辑对象数量 | 展示，暂不作为付费核心 |
 | `active_devices` | `devices.revoked_at is null` | 硬限额 |
 | `active_workspaces` | `workspaces.deleted_at is null` | 硬限额 |
@@ -39,7 +39,7 @@
 
 商业 active quota 计逻辑 payload，不宣称等于 PostgreSQL 磁盘占用；PostgreSQL tuple/index/WAL/压缩开销由实例容量指标另管。`objects` 是当前状态，`object_versions` 是历史事实；同一 ciphertext 在 current/version/event 多表出现时 active 只计一次，额外持久副本进入 retained safety。历史保留不计入用户套餐时，仍通过 retained safety limit 防止版本风暴无限占用。
 
-对于 CRDT，一期保持当前“checkpoint 覆盖后立即 prune update”的语义，并在同一事务扣减 active/retained；不虚构一个尚不存在的 update 保留期。`sync_v2_events/commands/documents/checkpoints/conflicts` 的真实副本全部纳入 retained safety 与清理/对账；如以后新增保留期，另做 migration/GC 计划。
+对于 CRDT，一期保持当前“checkpoint 覆盖后立即 prune update”的语义，并在同一事务扣减 active/retained；不虚构一个尚不存在的 update 保留期。`sync_events/commands/documents/checkpoints/conflicts` 的真实副本全部纳入 retained safety 与清理/对账；如以后新增保留期，另做 migration/GC 计划。
 
 Ready Blob 在 upload complete 时立即收费，不等待对象引用；否则 complete 与首个/最后引用需要额外并发 refcount，容易穿透。对象引用变化不修改 blob usage，同账号/Workspace 的相同 storage key 只计一次；成为无引用后仍收费直到 fencing-aware GC 物理删除并在同事务扣减。
 
@@ -149,7 +149,7 @@ interface EffectiveLimits {
 3. 在同一事务校验 EffectiveLimits revision 与 limit；revision 已变化则重读/重算，不以缓存值继续提交。
 4. 同一事务写对象/版本/event、usage event 和 counter。
 
-Web 管理页测试数据和任何 legacy `SyncService` 写操作必须调用同一 UsageGuard。在 legacy/durable 双栈清理前，不允许仅在 HTTP 路由统计。
+Web 管理页测试数据与 durable sync 写操作必须调用同一 UsageGuard，不允许仅在 HTTP 路由统计；历史 `SyncService` 双栈已经清理。
 
 删除和缩减操作始终允许，即使它会产生一个很小的 tombstone/history 记录；该额外保留字节进入 retained safety buffer。冲突解决、恢复历史版本等扩容操作按正常写入检查。
 

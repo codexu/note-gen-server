@@ -4,6 +4,11 @@ import type { DatabaseContext } from './client.js'
 
 interface MigrationEntry { tag: string, when: string, hash: string }
 
+const squashedLegacyTail = {
+  when: '1786474800000',
+  hash: '7ba6ebc4cbaf43009f3c930cfe1056219e85506bf4d69683c62ba7e874d66ad6',
+} as const
+
 // Migration files are part of the immutable binary release. Cache their
 // hashes, while still reading the database records for every readiness probe.
 let localMigrationSet: Promise<{ missing: string[], entries: MigrationEntry[] }> | undefined
@@ -18,13 +23,41 @@ export async function assertMigrationCompatibility(database: DatabaseContext): P
     const next = migrations.entries[applied.length]
     throw new Error(`migration_required: ${applied.length}/${migrations.entries.length} applied${next === undefined ? '' : `; next ${next.tag}`}`)
   }
-  if (applied.length > migrations.entries.length) throw new Error(`binary_too_old: database has ${applied.length} migration records; binary knows ${migrations.entries.length}`)
-  for (const [index, actual] of applied.entries()) {
+  const compatibleTail = applied.slice(-migrations.entries.length)
+  for (const [index, actual] of compatibleTail.entries()) {
     const expected = migrations.entries[index]
     if (expected === undefined || actual.created_at !== expected.when || actual.hash !== expected.hash) {
-      throw new Error(`schema_drift: migration record ${index + 1} does not match local ${expected?.tag ?? 'journal'}`)
+      throw new Error(`schema_drift: migration tail record ${index + 1} does not match local ${expected?.tag ?? 'journal'}`)
     }
   }
+}
+
+/** Records the single squashed baseline for databases that ended on the exact
+ * pre-squash migration tail. It preserves the old audit rows and refuses to
+ * adopt unknown or partially migrated histories. */
+export async function adoptSquashedMigrationBaseline(database: DatabaseContext): Promise<void> {
+  const migrations = await (localMigrationSet ??= readMigrationSet())
+  if (migrations.missing.length > 0 || migrations.entries.length === 0) return
+  const baseline = migrations.entries[0]!
+  await database.sql.begin(async (transaction) => {
+    await transaction`lock table drizzle.__drizzle_migrations in exclusive mode`
+    const applied = await transaction<Array<{ hash: string, created_at: string }>>`
+      select hash, created_at::text as created_at
+      from drizzle.__drizzle_migrations order by created_at asc, id asc`
+    const tail = applied.at(-1)
+    if (tail?.created_at === baseline.when && tail.hash === baseline.hash) return
+    if (tail?.created_at !== squashedLegacyTail.when || tail.hash !== squashedLegacyTail.hash) return
+
+    // The legacy tail is necessary but not sufficient: verify representative
+    // objects introduced by its final account-service migrations before
+    // acknowledging the equivalent squashed baseline.
+    await transaction`select runtime_configuration, instance_auth_epoch, auth_epoch_enforced from deployment_settings limit 0`
+    await transaction`select local_login, local_password_hash from staff_principals limit 0`
+    await transaction`select id, scope_version, deleted_at from support_diagnostic_grants limit 0`
+    await transaction`
+      insert into drizzle.__drizzle_migrations (hash, created_at)
+      values (${baseline.hash}, ${baseline.when})`
+  })
 }
 
 async function readMigrationSet(): Promise<{ missing: string[], entries: MigrationEntry[] }> {

@@ -151,13 +151,22 @@ export class AdminService {
       throw new ApiError({ code: 'runtime_configuration_read_only', message: 'Runtime configuration is read-only for this deployment', statusCode: 403 })
     }
     if (configuration.versionRetentionDays < configuration.changeRetentionDays) {
-      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'Version retention must be greater than or equal to change retention', statusCode: 400 })
+      throw new ApiError({
+        code: 'runtime_configuration_invalid', message: 'Version retention must be greater than or equal to change retention', statusCode: 400,
+        details: { fieldErrors: { 'configuration.versionRetentionDays': 'Must be greater than or equal to change retention' } },
+      })
     }
     if (configuration.accountDeletionRetentionDays < configuration.accountDeletionCoolingOffDays) {
-      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'Account deletion retention must be greater than or equal to the cooling-off period', statusCode: 400 })
+      throw new ApiError({
+        code: 'runtime_configuration_invalid', message: 'Account deletion retention must be greater than or equal to the cooling-off period', statusCode: 400,
+        details: { fieldErrors: { 'configuration.accountDeletionRetentionDays': 'Must be greater than or equal to the cooling-off period' } },
+      })
     }
     if (this.config !== undefined && configuration.maxBlobBytes > this.config.blobPartBytes * 10_000) {
-      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'Blob limit exceeds the 10000-part upload limit', statusCode: 400 })
+      throw new ApiError({
+        code: 'runtime_configuration_invalid', message: 'Blob limit exceeds the 10000-part upload limit', statusCode: 400,
+        details: { fieldErrors: { 'configuration.maxBlobBytes': 'Exceeds the 10000-part upload limit' } },
+      })
     }
     const passwordConfigured = smtpPassword === undefined ? this.deployment.getState().runtimeConfiguration.smtpPasswordConfigured
       : smtpPassword !== null && smtpPassword.length > 0
@@ -167,7 +176,10 @@ export class AdminService {
       || configuration.smtpTlsMode === 'none' || !configuration.smtpTlsRejectUnauthorized
       || (configuration.mailReplyTo.length > 0 && !isEmailAddress(configuration.mailReplyTo))
     )) {
-      throw new ApiError({ code: 'runtime_configuration_invalid', message: 'SMTP configuration is incomplete or insecure', statusCode: 400 })
+      throw new ApiError({
+        code: 'runtime_configuration_invalid', message: 'SMTP configuration is incomplete or insecure', statusCode: 400,
+        details: { fieldErrors: { 'configuration.mailDriver': 'SMTP configuration is incomplete or insecure' } },
+      })
     }
     const updated = await this.deployment.updateRuntimeConfiguration(accountId, configuration, expectedRevision, smtpPassword)
     if (!updated) {
@@ -295,6 +307,83 @@ export class AdminService {
       deletedObjectCount: row?.deleted_object_count ?? 0,
       activeDeviceCount: row?.active_device_count ?? 0,
       auditCount: row?.audit_count ?? 0,
+    }
+  }
+
+  async getSummary(accountId: string, serverVersion: string) {
+    await this.assertAdmin(accountId)
+    const [overview, system, operations] = await Promise.all([
+      this.getOverview(accountId),
+      this.getSystemStatus(accountId),
+      this.database.sql<Array<{
+        active_jobs: number
+        failed_jobs: number
+        pending_mail: number
+        failed_mail: number
+        maintenance_mode: string
+        latest_backup_status: string | null
+        latest_backup_at: Date | null
+        latest_restore_drill_status: string | null
+        latest_restore_drill_at: Date | null
+      }>>`
+        select
+          (select count(*)::int from background_jobs where status in ('pending', 'running')) as active_jobs,
+          (select count(*)::int from background_jobs where status = 'dead_letter') as failed_jobs,
+          (select count(*)::int from outbox_messages where channel = 'mail' and status in ('pending', 'sending')) as pending_mail,
+          (select count(*)::int from outbox_messages where channel = 'mail' and status in ('dead_letter', 'delivery_unknown')) as failed_mail,
+          coalesce((select mode::text from maintenance_state where id = true), 'unknown') as maintenance_mode,
+          (select status::text from backup_runs order by created_at desc limit 1) as latest_backup_status,
+          (select coalesce(completed_at, created_at) from backup_runs order by created_at desc limit 1) as latest_backup_at,
+          (select status from restore_drills order by coalesce(completed_at, started_at) desc nulls last limit 1) as latest_restore_drill_status,
+          (select coalesce(completed_at, started_at) from restore_drills order by coalesce(completed_at, started_at) desc nulls last limit 1) as latest_restore_drill_at
+      `,
+    ])
+    const state = operations[0] ?? {
+      active_jobs: 0, failed_jobs: 0, pending_mail: 0, failed_mail: 0,
+      maintenance_mode: 'unknown', latest_backup_status: null, latest_backup_at: null,
+      latest_restore_drill_status: null, latest_restore_drill_at: null,
+    }
+    const attention: Array<{
+      code: string
+      severity: 'info' | 'warning' | 'blocking'
+      count: number
+      details: Record<string, string | number | boolean | null>
+    }> = []
+    if (state.maintenance_mode !== 'normal') attention.push({
+      code: 'maintenance_mode_active', severity: 'blocking', count: 1,
+      details: { mode: state.maintenance_mode },
+    })
+    if (state.failed_jobs > 0) attention.push({
+      code: 'background_jobs_failed', severity: 'warning', count: state.failed_jobs, details: {},
+    })
+    if (state.failed_mail > 0) attention.push({
+      code: 'mail_delivery_failed', severity: 'warning', count: state.failed_mail, details: {},
+    })
+    if (state.latest_backup_status !== 'ready') attention.push({
+      code: state.latest_backup_status === null ? 'backup_not_configured' : 'backup_not_ready',
+      severity: 'warning', count: 1, details: { status: state.latest_backup_status },
+    })
+    if (state.latest_restore_drill_status !== 'passed') attention.push({
+      code: 'restore_drill_missing', severity: 'info', count: 1,
+      details: { status: state.latest_restore_drill_status },
+    })
+    return {
+      serverVersion,
+      generatedAt: new Date(),
+      overview,
+      system,
+      operations: {
+        activeJobs: state.active_jobs,
+        failedJobs: state.failed_jobs,
+        pendingMail: state.pending_mail,
+        failedMail: state.failed_mail,
+        maintenanceMode: state.maintenance_mode,
+        latestBackupStatus: state.latest_backup_status,
+        latestBackupAt: state.latest_backup_at,
+        latestRestoreDrillStatus: state.latest_restore_drill_status,
+        latestRestoreDrillAt: state.latest_restore_drill_at,
+      },
+      attention,
     }
   }
 

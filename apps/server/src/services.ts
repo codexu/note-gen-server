@@ -3,7 +3,6 @@ import type { BlobStorageHealth } from './storage/blob-storage.js'
 import type { AuthService } from './auth/service.js'
 import type { TokenService } from './auth/tokens.js'
 import type { WorkspaceService } from './workspaces/service.js'
-import type { SyncService } from './sync/service.js'
 import type { ChangeNotifier } from './sync/types.js'
 import type { BlobService } from './blobs/service.js'
 import type { WebSessionService } from './auth/web-session-service.js'
@@ -48,7 +47,6 @@ export interface ServiceDependencies {
   readonly auth?: AuthService
   readonly tokens?: TokenService
   readonly workspaces?: WorkspaceService
-  readonly sync?: SyncService
   readonly notifier?: ChangeNotifier
   readonly blobs?: BlobService
   readonly webSessions?: WebSessionService

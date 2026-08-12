@@ -4,6 +4,7 @@ import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { LocaleProvider } from "@/components/locale-provider"
+import { Toaster } from "@/components/ui/toast"
 
 export const metadata: Metadata = {
   title: "NoteGen 同步管理后台",
@@ -21,6 +22,7 @@ export default function RootLayout({
         <ThemeProvider>
           <LocaleProvider>
             <TooltipProvider>{children}</TooltipProvider>
+            <Toaster />
           </LocaleProvider>
         </ThemeProvider>
       </body>

@@ -256,7 +256,7 @@ interface EffectiveLimitsProvider {
 
 ### 5.5.1 同步双栈收口门槛
 
-账号计量/保留不能把 legacy `changes/operations` 与 durable `sync_v2_events/commands` 当作两份等价事实。先记录 ADR：durable commands/events 是新客户端 canonical log；legacy 仅作为兼容入口，Web 测试数据迁到 durable。兼容期所有对象/CRDT/Blob 写必须经过共同 `SyncWritePolicyFacade`，usage/audit 写独立领域 ledger，而不是从任一日志事后猜测。
+账号计量/保留不能把 legacy `changes/operations` 与 durable `sync_events/commands` 当作两份等价事实。先记录 ADR：durable commands/events 是新客户端 canonical log；legacy 仅作为兼容入口，Web 测试数据迁到 durable。兼容期所有对象/CRDT/Blob 写必须经过共同 `SyncWritePolicyFacade`，usage/audit 写独立领域 ledger，而不是从任一日志事后猜测。
 
 在完全停写 legacy 前，retention/GC/对账同时覆盖两套表并按对象/command 幂等去重；`workspaces.latest_sequence` 的推进只有一个事务 owner。未建模/未使用的 `collaboration_updates` 先标 quarantine，不接入新配额/合规逻辑，另做删除或正式建模 migration。完成 writer telemetry 为零和旧客户端兼容窗口后，再独立 contract migration 移除 legacy。
 

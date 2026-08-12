@@ -132,10 +132,10 @@ export class UsageService {
             from objects o join workspaces w on w.id = o.workspace_id
             where w.account_id = ${accountId} and w.deleted_at is null and o.deleted_at is null), 0)::text as active_object_bytes,
           (coalesce((select sum((length(d.checkpoint_ciphertext) * 3) / 4)::bigint
-            from sync_v2_documents d join workspaces w on w.id = d.workspace_id
+            from sync_documents d join workspaces w on w.id = d.workspace_id
             where w.account_id = ${accountId} and w.deleted_at is null and d.checkpoint_ciphertext is not null), 0)
           + coalesce((select sum((length(u.ciphertext) * 3) / 4)::bigint
-            from sync_v2_updates u join workspaces w on w.id = u.workspace_id
+            from sync_updates u join workspaces w on w.id = u.workspace_id
             where w.account_id = ${accountId} and w.deleted_at is null), 0))::text as active_crdt_bytes,
           coalesce((select sum(b.size)::bigint from blobs b join workspaces w on w.id = b.workspace_id
             where w.account_id = ${accountId} and w.deleted_at is null and b.state = 'ready'), 0)::text as active_blob_bytes,

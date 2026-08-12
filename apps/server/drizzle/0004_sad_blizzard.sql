@@ -1,2 +1,0 @@
-ALTER TABLE "object_versions" ADD CONSTRAINT "object_versions_workspace_key_fk" FOREIGN KEY ("workspace_id","key_version") REFERENCES "public"."workspace_keys"("workspace_id","key_version") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "objects" ADD CONSTRAINT "objects_workspace_key_fk" FOREIGN KEY ("workspace_id","key_version") REFERENCES "public"."workspace_keys"("workspace_id","key_version") ON DELETE no action ON UPDATE no action;

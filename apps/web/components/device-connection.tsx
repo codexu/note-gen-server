@@ -47,6 +47,12 @@ export function DeviceConnection({
   useEffect(() => {
     const initialCode = new URLSearchParams(window.location.search).get("code") ?? ""
     setCode(initialCode)
+    if (initialCode) {
+      const url = new URL(window.location.href)
+      url.pathname = "/connect/"
+      url.searchParams.set("section", "connect")
+      window.history.replaceState(null, "", url)
+    }
     void apiRequest<{ publicBaseUrl: string }>("/v1/capabilities")
       .then((result) => setServerAddress(result.publicBaseUrl))
       .catch(() => setServerAddressError("无法读取服务器地址，请刷新页面后重试。"))
@@ -150,6 +156,10 @@ export function DeviceConnection({
         `/v1/web/device-authorizations/${encodeURIComponent(value)}`
       )
       setAuthorization(result)
+      if (result.status === "approved" || result.status === "denied") {
+        setCompleted(result.status)
+        removeAuthorizationCodeFromUrl()
+      }
     } catch (cause) {
       setAuthorization(null)
       setError(errorMessage(cause))
@@ -179,6 +189,7 @@ export function DeviceConnection({
         { method: "POST", csrf: true }
       )
       setCompleted(action === "approve" ? "approved" : "denied")
+      removeAuthorizationCodeFromUrl()
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -279,14 +290,18 @@ export function DeviceConnection({
                 <Input
                   id="device-code"
                   value={code}
-                  onChange={(event) => setCode(event.target.value.toUpperCase())}
+                  onChange={(event) => {
+                    setCode(event.target.value.toUpperCase())
+                    setAuthorization(null)
+                    setCompleted(null)
+                  }}
                   placeholder="ABCD-EFGH"
                   autoCapitalize="characters"
                   autoCorrect="off"
                 />
                 <FieldDescription>验证码由 NoteGen 客户端显示，5 分钟内有效且只能使用一次。</FieldDescription>
               </Field>
-              {signedIn ? (
+              {signedIn && !authorization ? (
                 <Button onClick={() => void loadAuthorization()} disabled={busy || code.length < 8}>
                   {busy ? <Spinner data-icon="inline-start" /> : null}
                   查看设备
@@ -299,8 +314,10 @@ export function DeviceConnection({
             <Alert>
               <LaptopIcon />
               <AlertTitle>{authorization.deviceName}</AlertTitle>
-              <AlertDescription>
-                平台：{authorization.platform} · 设备 ID：{authorization.deviceId} · 验证码：{authorization.userCode}
+              <AlertDescription className="grid gap-1">
+                <span>平台：{authorization.platform}</span>
+                <span className="break-all">设备 ID：{authorization.deviceId}</span>
+                <span>验证码：{authorization.userCode}</span>
               </AlertDescription>
             </Alert>
           ) : null}
@@ -425,4 +442,11 @@ function redirectToLogin(): void {
   const loginUrl = new URL("/", window.location.origin)
   loginUrl.searchParams.set("next", returnPath)
   window.location.replace(loginUrl.toString())
+}
+
+function removeAuthorizationCodeFromUrl(): void {
+  const url = new URL(window.location.href)
+  url.searchParams.delete("code")
+  url.searchParams.set("section", "connect")
+  window.history.replaceState(null, "", url)
 }

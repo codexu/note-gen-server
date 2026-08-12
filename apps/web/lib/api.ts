@@ -1,11 +1,21 @@
 export type {
   AdminAccountContract as AdminAccount,
+  AdminBackupContract as AdminBackup,
+  AdminCapabilitiesContract as AdminCapabilities,
+  AdminCapabilityContract as AdminCapability,
   AdminAccountPageContract as AdminAccountPage,
   AdminAuditEntryContract as AdminAuditEntry,
   AdminAuditPageContract as AdminAuditPage,
   AdminDeviceContract as AdminDevice,
   AdminDevicePageContract as AdminDevicePage,
   AdminOverviewContract as AdminOverview,
+  AdminInvitationContract as AdminInvitation,
+  AdminJobContract as AdminJob,
+  AdminMailItemContract as AdminMailItem,
+  AdminMailStatusContract as AdminMailStatus,
+  AdminSummaryContract as AdminSummary,
+  AdminStorageReportContract as AdminStorageReport,
+  AdminWebSessionContract as AdminWebSession,
   AdminSystemStatusContract as AdminSystemStatus,
   AdminWorkspaceContract as AdminWorkspace,
   AdminWorkspacePageContract as AdminWorkspacePage,
@@ -15,6 +25,8 @@ export type {
   ServerCapabilitiesContract as ServerCapabilities,
   SyncObjectKindContract as SyncObjectKind,
   SyncOverviewContract as SyncOverview,
+  RuntimeConfigurationContract as RuntimeConfiguration,
+  RuntimeConfigurationResponseContract as RuntimeConfigurationResponse,
   WebWorkspaceContract as WebWorkspace,
 } from "@notegen/contracts"
 
@@ -26,7 +38,8 @@ export class ApiRequestError extends Error {
     readonly code: string,
     message: string,
     readonly requestId?: string,
-    readonly retryable = false
+    readonly retryable = false,
+    readonly details?: Record<string, unknown>
   ) {
     super(message)
     this.name = "ApiRequestError"
@@ -76,17 +89,27 @@ export async function apiRequest<T>(
       message?: string
       requestId?: string
       retryable?: boolean
+      details?: Record<string, unknown>
     } | null
     throw new ApiRequestError(
       response.status,
       body?.code ?? "request_failed",
       body?.message ?? `请求失败（${response.status}）`,
       body?.requestId,
-      body?.retryable ?? false
+      body?.retryable ?? false,
+      body?.details
     )
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+export function apiFieldError(cause: unknown, field: string): string | undefined {
+  if (!isApiRequestError(cause) || !(cause instanceof ApiRequestError)) return undefined
+  const fieldErrors = cause.details?.fieldErrors
+  if (typeof fieldErrors !== "object" || fieldErrors === null || Array.isArray(fieldErrors)) return undefined
+  const message = (fieldErrors as Record<string, unknown>)[field]
+  return typeof message === "string" ? message : undefined
 }
 
 const apiErrorMessages: Record<string, string> = {
@@ -134,6 +157,14 @@ const apiErrorMessages: Record<string, string> = {
   request_invalid: "提交的信息不完整或格式不正确，请检查后重试。",
   runtime_configuration_invalid: "运行配置中的数值关系无效，请检查保留周期和附件上限。",
   runtime_configuration_conflict: "运行配置已被其他管理员修改，请刷新后重试。",
+  runtime_configuration_read_only: "当前部署模式不允许从网页修改运行配置。",
+  configuration_unavailable: "当前实例无法读取运行配置。",
+  unified_backup_required: "统一备份尚未完成安全配置，请先查看实验功能中的启用条件。",
+  legacy_backup_unavailable: "旧数据库备份已停用，请按照离线恢复说明处理已有文件。",
+  startup_safety_gate_closed: "实例安全启动检查未通过，请运行 doctor 并处理阻塞项。",
+  maintenance_mode_active: "实例正在维护，当前操作暂时不可用。",
+  smtp_not_configured: "SMTP 尚未完成安全配置。",
+  route_not_found: "当前服务版本不提供这个功能。",
   internal_error: "服务器处理请求时出错，请稍后重试。",
 }
 

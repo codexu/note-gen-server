@@ -283,7 +283,10 @@ export async function buildApp(
     ))
   }
   if (dependencies.admin !== undefined && dependencies.webSessions !== undefined && dependencies.stepUps !== undefined) {
-    await app.register(createWebAdminRoutes(config, dependencies.admin, dependencies.webSessions, dependencies.stepUps))
+    await app.register(createWebAdminRoutes(
+      config, dependencies.admin, dependencies.webSessions, dependencies.stepUps,
+      dependencies.capabilities, dependencies.version,
+    ))
   }
   if (dependencies.mailAdmin !== undefined && dependencies.webSessions !== undefined && dependencies.stepUps !== undefined) {
     await app.register(createMailAdminRoutes(config, dependencies.mailAdmin, dependencies.webSessions, dependencies.stepUps))

@@ -2,11 +2,13 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator'
 import { fileURLToPath } from 'node:url'
 import { loadConfig } from '../config.js'
 import { createDatabase } from './client.js'
+import { adoptSquashedMigrationBaseline } from './migration-compatibility.js'
 
 export async function runMigrations(): Promise<void> {
   const config = loadConfig()
   const database = createDatabase({ ...config, databasePoolSize: 1 })
   try {
+    await adoptSquashedMigrationBaseline(database)
     await migrate(database.db, {
       migrationsFolder: fileURLToPath(new URL('../../drizzle', import.meta.url)),
     })

@@ -696,7 +696,7 @@ export const objectVersions = pgTable('object_versions', {
   }),
 ])
 
-export const syncV2ResourceBindings = pgTable('sync_v2_resource_bindings', {
+export const syncResourceBindings = pgTable('sync_resource_bindings', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   ownerObjectId: uuid('owner_object_id').notNull(),
   ownerRevision: bigint('owner_revision', { mode: 'bigint' }).notNull(),
@@ -705,19 +705,19 @@ export const syncV2ResourceBindings = pgTable('sync_v2_resource_bindings', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   primaryKey({ columns: [table.workspaceId, table.ownerObjectId, table.ownerRevision, table.resourceObjectId] }),
-  index('sync_v2_resource_bindings_resource_idx')
+  index('sync_resource_bindings_resource_idx')
     .on(table.workspaceId, table.resourceObjectId, table.resourceRevision),
-  index('sync_v2_resource_bindings_owner_idx')
+  index('sync_resource_bindings_owner_idx')
     .on(table.workspaceId, table.ownerObjectId, table.ownerRevision),
   foreignKey({
     columns: [table.workspaceId, table.ownerObjectId, table.ownerRevision],
     foreignColumns: [objectVersions.workspaceId, objectVersions.objectId, objectVersions.revision],
-    name: 'sync_v2_resource_bindings_owner_version_fk',
+    name: 'sync_resource_bindings_owner_version_fk',
   }).onDelete('cascade'),
   foreignKey({
     columns: [table.workspaceId, table.resourceObjectId, table.resourceRevision],
     foreignColumns: [objectVersions.workspaceId, objectVersions.objectId, objectVersions.revision],
-    name: 'sync_v2_resource_bindings_resource_version_fk',
+    name: 'sync_resource_bindings_resource_version_fk',
   }),
 ])
 
@@ -816,7 +816,7 @@ export const blobUploadParts = pgTable('blob_upload_parts', {
 
 // The sync protocol keeps lifecycle commands, CRDT traffic and conflict state in
 // one durable workspace sequence while reusing the object, version and Blob tables.
-export const syncV2Commands = pgTable('sync_v2_commands', {
+export const syncCommands = pgTable('sync_commands', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   commandId: uuid('command_id').notNull(),
   sourceDeviceId: uuid('source_device_id').notNull().references(() => devices.id),
@@ -825,10 +825,10 @@ export const syncV2Commands = pgTable('sync_v2_commands', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   primaryKey({ columns: [table.workspaceId, table.commandId] }),
-  index('sync_v2_commands_created_idx').on(table.createdAt),
+  index('sync_commands_created_idx').on(table.createdAt),
 ])
 
-export const syncV2Events = pgTable('sync_v2_events', {
+export const syncEvents = pgTable('sync_events', {
   id: bigserial('id', { mode: 'bigint' }).primaryKey(),
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   sequence: bigint('sequence', { mode: 'bigint' }).notNull(),
@@ -845,13 +845,13 @@ export const syncV2Events = pgTable('sync_v2_events', {
   metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  uniqueIndex('sync_v2_events_workspace_sequence_unique').on(table.workspaceId, table.sequence),
-  uniqueIndex('sync_v2_events_workspace_event_unique').on(table.workspaceId, table.eventId),
-  index('sync_v2_events_document_idx').on(table.workspaceId, table.documentId, table.documentSequence),
-  index('sync_v2_events_created_idx').on(table.createdAt),
+  uniqueIndex('sync_events_workspace_sequence_unique').on(table.workspaceId, table.sequence),
+  uniqueIndex('sync_events_workspace_event_unique').on(table.workspaceId, table.eventId),
+  index('sync_events_document_idx').on(table.workspaceId, table.documentId, table.documentSequence),
+  index('sync_events_created_idx').on(table.createdAt),
 ])
 
-export const syncV2Documents = pgTable('sync_v2_documents', {
+export const syncDocuments = pgTable('sync_documents', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   documentId: text('document_id').notNull(),
   objectId: uuid('object_id').notNull(),
@@ -866,10 +866,10 @@ export const syncV2Documents = pgTable('sync_v2_documents', {
   ...timestamps,
 }, (table) => [
   primaryKey({ columns: [table.workspaceId, table.documentId] }),
-  uniqueIndex('sync_v2_documents_object_unique').on(table.workspaceId, table.objectId),
+  uniqueIndex('sync_documents_object_unique').on(table.workspaceId, table.objectId),
 ])
 
-export const syncV2Updates = pgTable('sync_v2_updates', {
+export const syncUpdates = pgTable('sync_updates', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   documentId: text('document_id').notNull(),
   documentSequence: bigint('document_sequence', { mode: 'bigint' }).notNull(),
@@ -882,11 +882,11 @@ export const syncV2Updates = pgTable('sync_v2_updates', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   primaryKey({ columns: [table.workspaceId, table.documentId, table.documentSequence] }),
-  uniqueIndex('sync_v2_updates_id_unique').on(table.workspaceId, table.updateId),
-  index('sync_v2_updates_event_idx').on(table.workspaceId, table.eventSequence),
+  uniqueIndex('sync_updates_id_unique').on(table.workspaceId, table.updateId),
+  index('sync_updates_event_idx').on(table.workspaceId, table.eventSequence),
 ])
 
-export const syncV2Checkpoints = pgTable('sync_v2_checkpoints', {
+export const syncCheckpoints = pgTable('sync_checkpoints', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   checkpointId: uuid('checkpoint_id').notNull(),
   documentId: text('document_id').notNull(),
@@ -901,10 +901,10 @@ export const syncV2Checkpoints = pgTable('sync_v2_checkpoints', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   primaryKey({ columns: [table.workspaceId, table.checkpointId] }),
-  index('sync_v2_checkpoints_document_idx').on(table.workspaceId, table.documentId, table.eventSequence),
+  index('sync_checkpoints_document_idx').on(table.workspaceId, table.documentId, table.eventSequence),
 ])
 
-export const syncV2Conflicts = pgTable('sync_v2_conflicts', {
+export const syncConflicts = pgTable('sync_conflicts', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   conflictId: uuid('conflict_id').notNull(),
   objectId: uuid('object_id').notNull(),
@@ -923,22 +923,22 @@ export const syncV2Conflicts = pgTable('sync_v2_conflicts', {
   ...timestamps,
 }, (table) => [
   primaryKey({ columns: [table.workspaceId, table.conflictId] }),
-  index('sync_v2_conflicts_status_idx').on(table.workspaceId, table.status, table.createdAt),
-  index('sync_v2_conflicts_object_idx').on(table.workspaceId, table.objectId),
+  index('sync_conflicts_status_idx').on(table.workspaceId, table.status, table.createdAt),
+  index('sync_conflicts_object_idx').on(table.workspaceId, table.objectId),
 ])
 
-export const syncV2BootstrapSessions = pgTable('sync_v2_bootstrap_sessions', {
+export const syncBootstrapSessions = pgTable('sync_bootstrap_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   snapshotSequence: bigint('snapshot_sequence', { mode: 'bigint' }).notNull(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index('sync_v2_bootstrap_sessions_workspace_idx').on(table.workspaceId, table.expiresAt),
+  index('sync_bootstrap_sessions_workspace_idx').on(table.workspaceId, table.expiresAt),
 ])
 
-export const syncV2BootstrapObjects = pgTable('sync_v2_bootstrap_objects', {
-  sessionId: uuid('session_id').notNull().references(() => syncV2BootstrapSessions.id, { onDelete: 'cascade' }),
+export const syncBootstrapObjects = pgTable('sync_bootstrap_objects', {
+  sessionId: uuid('session_id').notNull().references(() => syncBootstrapSessions.id, { onDelete: 'cascade' }),
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   objectId: uuid('object_id').notNull(),
   revision: bigint('revision', { mode: 'bigint' }).notNull(),
@@ -952,5 +952,5 @@ export const syncV2BootstrapObjects = pgTable('sync_v2_bootstrap_objects', {
   materializedRevision: bigint('materialized_revision', { mode: 'bigint' }),
 }, (table) => [
   primaryKey({ columns: [table.sessionId, table.objectId] }),
-  index('sync_v2_bootstrap_objects_workspace_idx').on(table.workspaceId, table.sessionId, table.objectId),
+  index('sync_bootstrap_objects_workspace_idx').on(table.workspaceId, table.sessionId, table.objectId),
 ])

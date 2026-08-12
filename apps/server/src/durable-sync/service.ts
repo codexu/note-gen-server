@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto'
 import { and, asc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
 import {
-  blobs, objectVersions, objects, syncV2BootstrapObjects, syncV2BootstrapSessions,
-  syncV2Checkpoints, syncV2Commands, syncV2Conflicts, syncV2Documents, syncV2Events,
-  syncV2ResourceBindings, syncV2Updates, workspaceKeys, workspaces,
+  blobs, objectVersions, objects, syncBootstrapObjects, syncBootstrapSessions,
+  syncCheckpoints, syncCommands, syncConflicts, syncDocuments, syncEvents,
+  syncResourceBindings, syncUpdates, workspaceKeys, workspaces,
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
@@ -51,9 +51,9 @@ export class DurableSyncService {
     this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const cursor = counter(after, 'after')
-    const rows = await this.database.db.select().from(syncV2Events).where(and(
-      eq(syncV2Events.workspaceId, workspaceId), gt(syncV2Events.sequence, cursor),
-    )).orderBy(asc(syncV2Events.sequence)).limit(limit + 1)
+    const rows = await this.database.db.select().from(syncEvents).where(and(
+      eq(syncEvents.workspaceId, workspaceId), gt(syncEvents.sequence, cursor),
+    )).orderBy(asc(syncEvents.sequence)).limit(limit + 1)
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit).map(serializeEvent)
     const [workspace] = await this.database.db.select({ latestSequence: workspaces.latestSequence })
@@ -82,22 +82,22 @@ export class DurableSyncService {
       eq(objectVersions.revision, revision),
     )).limit(1)
     if (!version) throw new ApiError({ code: 'object_version_not_found', message: 'Object version not found', statusCode: 404 })
-    const bindings = await this.database.db.select().from(syncV2ResourceBindings).where(and(
-      eq(syncV2ResourceBindings.workspaceId, workspaceId),
-      eq(syncV2ResourceBindings.ownerObjectId, objectId),
-      eq(syncV2ResourceBindings.ownerRevision, revision),
+    const bindings = await this.database.db.select().from(syncResourceBindings).where(and(
+      eq(syncResourceBindings.workspaceId, workspaceId),
+      eq(syncResourceBindings.ownerObjectId, objectId),
+      eq(syncResourceBindings.ownerRevision, revision),
     ))
     const resourceRows = bindings.length === 0 ? []
       : await this.database.db.select({ version: objectVersions })
-          .from(syncV2ResourceBindings)
+          .from(syncResourceBindings)
           .innerJoin(objectVersions, and(
-            eq(objectVersions.workspaceId, syncV2ResourceBindings.workspaceId),
-            eq(objectVersions.objectId, syncV2ResourceBindings.resourceObjectId),
-            eq(objectVersions.revision, syncV2ResourceBindings.resourceRevision),
+            eq(objectVersions.workspaceId, syncResourceBindings.workspaceId),
+            eq(objectVersions.objectId, syncResourceBindings.resourceObjectId),
+            eq(objectVersions.revision, syncResourceBindings.resourceRevision),
           )).where(and(
-            eq(syncV2ResourceBindings.workspaceId, workspaceId),
-            eq(syncV2ResourceBindings.ownerObjectId, objectId),
-            eq(syncV2ResourceBindings.ownerRevision, revision),
+            eq(syncResourceBindings.workspaceId, workspaceId),
+            eq(syncResourceBindings.ownerObjectId, objectId),
+            eq(syncResourceBindings.ownerRevision, revision),
           ))
     if (resourceRows.length !== bindings.length) throw new ApiError({
       code: 'resource_version_missing',
@@ -158,11 +158,11 @@ export class DurableSyncService {
     await this.workspaces.assertOwned(accountId, workspaceId)
     const session = await this.database.db.transaction(async (tx) => {
       await assertAccountWriteAllowedInTransaction(tx, accountId)
-      await tx.delete(syncV2BootstrapSessions).where(sql`${syncV2BootstrapSessions.expiresAt} <= now()`)
+      await tx.delete(syncBootstrapSessions).where(sql`${syncBootstrapSessions.expiresAt} <= now()`)
       if (bootstrapId !== null) {
-        const [existing] = await tx.select().from(syncV2BootstrapSessions).where(and(
-          eq(syncV2BootstrapSessions.id, bootstrapId), eq(syncV2BootstrapSessions.workspaceId, workspaceId),
-          gt(syncV2BootstrapSessions.expiresAt, new Date()),
+        const [existing] = await tx.select().from(syncBootstrapSessions).where(and(
+          eq(syncBootstrapSessions.id, bootstrapId), eq(syncBootstrapSessions.workspaceId, workspaceId),
+          gt(syncBootstrapSessions.expiresAt, new Date()),
         )).limit(1)
         if (existing === undefined) {
           throw new ApiError({ code: 'bootstrap_expired', message: 'Bootstrap snapshot expired; restart bootstrap', statusCode: 409, retryable: true })
@@ -172,13 +172,13 @@ export class DurableSyncService {
       const [lockedWorkspace] = await tx.select({ latestSequence: workspaces.latestSequence }).from(workspaces)
         .where(eq(workspaces.id, workspaceId)).limit(1).for('update')
       if (lockedWorkspace === undefined) throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
-      const [created] = await tx.insert(syncV2BootstrapSessions).values({
+      const [created] = await tx.insert(syncBootstrapSessions).values({
         workspaceId, snapshotSequence: lockedWorkspace.latestSequence,
         expiresAt: new Date(Date.now() + 30 * 60_000),
       }).returning()
       if (created === undefined) throw new Error('Bootstrap session insert returned no row')
       await tx.execute(sql`
-        insert into sync_v2_bootstrap_objects(
+        insert into sync_bootstrap_objects(
           session_id, workspace_id, object_id, revision, document_id,
           latest_document_sequence, checkpoint_document_sequence, checkpoint_id,
           checkpoint_key_version, checkpoint_ciphertext, checkpoint_ciphertext_hash, materialized_revision
@@ -187,29 +187,29 @@ export class DurableSyncService {
           d.latest_document_sequence, d.checkpoint_document_sequence, d.checkpoint_id,
           d.checkpoint_key_version, d.checkpoint_ciphertext, d.checkpoint_ciphertext_hash, d.materialized_revision
         from objects o
-        left join sync_v2_documents d
+        left join sync_documents d
           on d.workspace_id = o.workspace_id and d.object_id = o.object_id
         where o.workspace_id = ${workspaceId}
       `)
       return created
     })
-    const rows = await this.database.db.select({ manifest: syncV2BootstrapObjects, object: objectVersions })
-      .from(syncV2BootstrapObjects).innerJoin(objectVersions, and(
-        eq(objectVersions.workspaceId, syncV2BootstrapObjects.workspaceId),
-        eq(objectVersions.objectId, syncV2BootstrapObjects.objectId),
-        eq(objectVersions.revision, syncV2BootstrapObjects.revision),
+    const rows = await this.database.db.select({ manifest: syncBootstrapObjects, object: objectVersions })
+      .from(syncBootstrapObjects).innerJoin(objectVersions, and(
+        eq(objectVersions.workspaceId, syncBootstrapObjects.workspaceId),
+        eq(objectVersions.objectId, syncBootstrapObjects.objectId),
+        eq(objectVersions.revision, syncBootstrapObjects.revision),
       )).where(and(
-        eq(syncV2BootstrapObjects.sessionId, session.id),
-        afterObjectId === null ? sql`true` : gt(syncV2BootstrapObjects.objectId, afterObjectId),
-      )).orderBy(asc(syncV2BootstrapObjects.objectId)).limit(limit + 1)
+        eq(syncBootstrapObjects.sessionId, session.id),
+        afterObjectId === null ? sql`true` : gt(syncBootstrapObjects.objectId, afterObjectId),
+      )).orderBy(asc(syncBootstrapObjects.objectId)).limit(limit + 1)
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit)
     const unresolved = afterObjectId === null
-      ? await this.database.db.select().from(syncV2Conflicts).where(and(
-          eq(syncV2Conflicts.workspaceId, workspaceId),
-          sql`${syncV2Conflicts.createdSequence} <= ${session.snapshotSequence}`,
-          sql`(${syncV2Conflicts.resolvedSequence} is null or ${syncV2Conflicts.resolvedSequence} > ${session.snapshotSequence})`,
-        )).orderBy(asc(syncV2Conflicts.createdSequence))
+      ? await this.database.db.select().from(syncConflicts).where(and(
+          eq(syncConflicts.workspaceId, workspaceId),
+          sql`${syncConflicts.createdSequence} <= ${session.snapshotSequence}`,
+          sql`(${syncConflicts.resolvedSequence} is null or ${syncConflicts.resolvedSequence} > ${session.snapshotSequence})`,
+        )).orderBy(asc(syncConflicts.createdSequence))
       : []
     return {
       bootstrapId: session.id,
@@ -247,10 +247,10 @@ export class DurableSyncService {
     this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertOwned(accountId, workspaceId)
     const cursor = counter(after, 'after')
-    const rows = await this.database.db.select().from(syncV2Updates).where(and(
-      eq(syncV2Updates.workspaceId, workspaceId), eq(syncV2Updates.documentId, documentId),
-      gt(syncV2Updates.documentSequence, cursor),
-    )).orderBy(asc(syncV2Updates.documentSequence)).limit(limit + 1)
+    const rows = await this.database.db.select().from(syncUpdates).where(and(
+      eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
+      gt(syncUpdates.documentSequence, cursor),
+    )).orderBy(asc(syncUpdates.documentSequence)).limit(limit + 1)
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit)
     return {
@@ -276,8 +276,8 @@ export class DurableSyncService {
         eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId), isNull(workspaces.deletedAt),
       )).limit(1).for('update')
       if (lockedWorkspace === undefined) throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
-      const [previous] = await tx.select().from(syncV2Commands).where(and(
-        eq(syncV2Commands.workspaceId, workspaceId), eq(syncV2Commands.commandId, command.commandId),
+      const [previous] = await tx.select().from(syncCommands).where(and(
+        eq(syncCommands.workspaceId, workspaceId), eq(syncCommands.commandId, command.commandId),
       )).limit(1)
       if (previous !== undefined) {
         if (previous.requestHash !== requestHash) throw new ApiError({ code: 'command_id_reused', message: 'Command ID was reused', statusCode: 409 })
@@ -285,7 +285,7 @@ export class DurableSyncService {
       }
 
       const applied = await this.#apply(tx, accountId, deviceId, workspaceId, command, storageLimit)
-      await tx.insert(syncV2Commands).values({
+      await tx.insert(syncCommands).values({
         workspaceId, commandId: command.commandId, sourceDeviceId: deviceId, requestHash,
         result: applied as unknown as Record<string, unknown>,
       })
@@ -352,11 +352,11 @@ export class DurableSyncService {
       if (command.type === 'delete-object') {
         if (command.kind === 'asset') {
           const bindings = await tx.select({
-            ownerObjectId: syncV2ResourceBindings.ownerObjectId,
-            ownerRevision: syncV2ResourceBindings.ownerRevision,
-          }).from(syncV2ResourceBindings).where(and(
-            eq(syncV2ResourceBindings.workspaceId, workspaceId),
-            eq(syncV2ResourceBindings.resourceObjectId, command.objectId),
+            ownerObjectId: syncResourceBindings.ownerObjectId,
+            ownerRevision: syncResourceBindings.ownerRevision,
+          }).from(syncResourceBindings).where(and(
+            eq(syncResourceBindings.workspaceId, workspaceId),
+            eq(syncResourceBindings.resourceObjectId, command.objectId),
           ))
           if (bindings.length > 0) {
             const ownerIds = Array.from(new Set(bindings.map(binding => binding.ownerObjectId)))
@@ -382,15 +382,15 @@ export class DurableSyncService {
             }
           }
         }
-        const [document] = await tx.select().from(syncV2Documents).where(and(
-          eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.objectId, command.objectId),
+        const [document] = await tx.select().from(syncDocuments).where(and(
+          eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.objectId, command.objectId),
         )).limit(1)
         const seen = counter(command.expectedDocumentSequence, 'expectedDocumentSequence')
         if ((document?.latestDocumentSequence ?? 0n) > seen) {
           this.#validateCiphertext(command.conflictCiphertext, command.conflictCiphertextHash)
-          const [existingConflict] = await tx.select().from(syncV2Conflicts).where(and(
-            eq(syncV2Conflicts.workspaceId, workspaceId),
-            eq(syncV2Conflicts.conflictId, command.conflictId),
+          const [existingConflict] = await tx.select().from(syncConflicts).where(and(
+            eq(syncConflicts.workspaceId, workspaceId),
+            eq(syncConflicts.conflictId, command.conflictId),
           )).limit(1)
           if (existingConflict !== undefined) {
             if (existingConflict.objectId !== command.objectId
@@ -410,7 +410,7 @@ export class DurableSyncService {
             }
           }
           const sequence = await nextSequence(tx, workspaceId)
-          await tx.insert(syncV2Conflicts).values({
+          await tx.insert(syncConflicts).values({
             workspaceId, conflictId: command.conflictId, objectId: command.objectId, kind: command.kind,
             type: 'delete-vs-edit', expectedRevision: expected, expectedDocumentSequence: seen,
             keyVersion: command.keyVersion, ciphertext: command.conflictCiphertext,
@@ -437,9 +437,9 @@ export class DurableSyncService {
           )).limit(1).then(rows => rows[0])
         : undefined
       const existingSameNameConflict = nameCollision === undefined ? undefined
-        : await tx.select({ conflictId: syncV2Conflicts.conflictId }).from(syncV2Conflicts).where(and(
-            eq(syncV2Conflicts.workspaceId, workspaceId), eq(syncV2Conflicts.objectId, command.objectId),
-            eq(syncV2Conflicts.type, 'same-name'), eq(syncV2Conflicts.status, 'unresolved'),
+        : await tx.select({ conflictId: syncConflicts.conflictId }).from(syncConflicts).where(and(
+            eq(syncConflicts.workspaceId, workspaceId), eq(syncConflicts.objectId, command.objectId),
+            eq(syncConflicts.type, 'same-name'), eq(syncConflicts.status, 'unresolved'),
           )).limit(1).then(rows => rows[0])
       const nameConflict = command.type === 'upsert-object' ? {
         id: command.nameConflictId,
@@ -491,7 +491,7 @@ export class DurableSyncService {
           deletedAt: deleted ? new Date() : null, updatedAt: new Date() },
       })
       if (!deleted && resourceRevisions.size > 0) {
-        await tx.insert(syncV2ResourceBindings).values(Array.from(resourceRevisions, ([resourceObjectId, resourceRevision]) => ({
+        await tx.insert(syncResourceBindings).values(Array.from(resourceRevisions, ([resourceObjectId, resourceRevision]) => ({
           workspaceId,
           ownerObjectId: command.objectId,
           ownerRevision: revision,
@@ -513,7 +513,7 @@ export class DurableSyncService {
       }
       if (nameCollision !== undefined) {
         const conflictSequence = await nextSequence(tx, workspaceId)
-        await tx.insert(syncV2Conflicts).values({
+        await tx.insert(syncConflicts).values({
           workspaceId, conflictId: nameConflict!.id!, objectId: command.objectId, kind: command.kind,
           type: 'same-name', expectedRevision: revision, expectedDocumentSequence: null,
           keyVersion: command.keyVersion, ciphertext: nameConflict!.ciphertext!,
@@ -586,7 +586,7 @@ export class DurableSyncService {
         })
       }
       const requested = new Map(command.objects.map(object => [object.objectId, object]))
-      const documentRows = await tx.select().from(syncV2Documents).where(eq(syncV2Documents.workspaceId, workspaceId))
+      const documentRows = await tx.select().from(syncDocuments).where(eq(syncDocuments.workspaceId, workspaceId))
       let editConflict = false
       for (const current of currentObjects.filter(object => descendants.has(object.objectId))) {
         const item = requested.get(current.objectId)
@@ -603,7 +603,7 @@ export class DurableSyncService {
       }
       if (editConflict) {
         const sequence = await nextSequence(tx, workspaceId)
-        await tx.insert(syncV2Conflicts).values({
+        await tx.insert(syncConflicts).values({
           workspaceId, conflictId: command.conflictId, objectId: root.objectId, kind: root.kind,
           type: 'delete-subtree-vs-edit', expectedRevision: root.currentRevision,
           expectedDocumentSequence: null, keyVersion: command.conflictKeyVersion,
@@ -670,8 +670,8 @@ export class DurableSyncService {
       )).limit(1)
       if (currentObject === undefined || currentObject.deletedAt !== null) throw new ApiError({ code: 'document_object_inactive', message: 'Document object is missing or deleted', statusCode: 409 })
       if (currentObject.kind !== command.kind) throw new ApiError({ code: 'object_kind_mismatch', message: 'Document kind does not match its object', statusCode: 409 })
-      const [duplicate] = await tx.select().from(syncV2Updates).where(and(
-        eq(syncV2Updates.workspaceId, workspaceId), eq(syncV2Updates.updateId, command.updateId),
+      const [duplicate] = await tx.select().from(syncUpdates).where(and(
+        eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.updateId, command.updateId),
       )).limit(1)
       if (duplicate !== undefined) {
         if (duplicate.documentId !== command.documentId || duplicate.keyVersion !== command.keyVersion
@@ -680,22 +680,22 @@ export class DurableSyncService {
         }
         return { commandId: command.commandId, status: 'applied', duplicate: true, sequence: duplicate.eventSequence.toString(), documentSequence: duplicate.documentSequence.toString() }
       }
-      const [document] = await tx.select().from(syncV2Documents).where(and(
-        eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.documentId),
+      const [document] = await tx.select().from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.documentId, command.documentId),
       )).limit(1).for('update')
       if (document !== undefined && (document.objectId !== command.objectId || document.kind !== command.kind)) {
         throw new ApiError({ code: 'document_identity_mismatch', message: 'Document ID is already bound to another object', statusCode: 409 })
       }
       const documentSequence = (document?.latestDocumentSequence ?? 0n) + 1n
       const sequence = await nextSequence(tx, workspaceId)
-      await tx.insert(syncV2Documents).values({
+      await tx.insert(syncDocuments).values({
         workspaceId, documentId: command.documentId, objectId: command.objectId, kind: command.kind,
         latestDocumentSequence: documentSequence,
       }).onConflictDoUpdate({
-        target: [syncV2Documents.workspaceId, syncV2Documents.documentId],
+        target: [syncDocuments.workspaceId, syncDocuments.documentId],
         set: { latestDocumentSequence: documentSequence, updatedAt: new Date() },
       })
-      await tx.insert(syncV2Updates).values({
+      await tx.insert(syncUpdates).values({
         workspaceId, documentId: command.documentId, documentSequence, updateId: command.updateId,
         eventSequence: sequence, sourceDeviceId: deviceId, keyVersion: command.keyVersion,
         ciphertext: command.ciphertext, ciphertextHash: command.ciphertextHash,
@@ -713,8 +713,8 @@ export class DurableSyncService {
     if (command.type === 'commit-checkpoint') {
       await this.#assertKeyAndBlobs(tx, workspaceId, command.keyVersion, [])
       const covers = counter(command.coversDocumentSequence, 'coversDocumentSequence')
-      const [document] = await tx.select().from(syncV2Documents).where(and(
-        eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.documentId),
+      const [document] = await tx.select().from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.documentId, command.documentId),
       )).limit(1).for('update')
       if (document === undefined || document.objectId !== command.objectId || document.kind !== command.kind) {
         throw new ApiError({ code: 'document_not_found', message: 'Document not found or identity does not match', statusCode: 404 })
@@ -733,17 +733,17 @@ export class DurableSyncService {
       }
       const sequence = await nextSequence(tx, workspaceId)
       const materializedRevision = command.materializedRevision === null ? null : counter(command.materializedRevision, 'materializedRevision')
-      await tx.insert(syncV2Checkpoints).values({
+      await tx.insert(syncCheckpoints).values({
         workspaceId, checkpointId: command.checkpointId, documentId: command.documentId,
         objectId: command.objectId, coversDocumentSequence: covers, eventSequence: sequence,
         materializedRevision, keyVersion: command.keyVersion, ciphertext: command.ciphertext,
         ciphertextHash: command.ciphertextHash, sourceDeviceId: deviceId,
       })
-      await tx.update(syncV2Documents).set({
+      await tx.update(syncDocuments).set({
         checkpointDocumentSequence: covers, checkpointId: command.checkpointId,
         checkpointKeyVersion: command.keyVersion, checkpointCiphertext: command.ciphertext,
         checkpointCiphertextHash: command.ciphertextHash, materializedRevision, updatedAt: new Date(),
-      }).where(and(eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.documentId)))
+      }).where(and(eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.documentId, command.documentId)))
       const prunedBytes = await this.#pruneCoveredUpdates(tx, workspaceId, command.documentId, covers)
       await this.usage?.applyActiveCrdtDelta(tx, accountId,
         BigInt(Buffer.from(command.ciphertext, 'base64url').byteLength)
@@ -764,8 +764,8 @@ export class DurableSyncService {
       const expectedRevision = command.expectedRevision === null ? null : counter(command.expectedRevision, 'expectedRevision')
       const expectedDocumentSequence = command.expectedDocumentSequence === null
         ? null : counter(command.expectedDocumentSequence, 'expectedDocumentSequence')
-      const [existingConflict] = await tx.select().from(syncV2Conflicts).where(and(
-        eq(syncV2Conflicts.workspaceId, workspaceId), eq(syncV2Conflicts.conflictId, command.conflictId),
+      const [existingConflict] = await tx.select().from(syncConflicts).where(and(
+        eq(syncConflicts.workspaceId, workspaceId), eq(syncConflicts.conflictId, command.conflictId),
       )).limit(1)
       if (existingConflict !== undefined) {
         if (existingConflict.objectId !== command.objectId
@@ -793,15 +793,15 @@ export class DurableSyncService {
       if (object === undefined || object.kind !== command.kind) {
         throw new ApiError({ code: 'conflict_object_not_found', message: 'Conflict object is missing or has another kind', statusCode: 409 })
       }
-      const [document] = await tx.select().from(syncV2Documents).where(and(
-        eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.objectId, command.objectId),
+      const [document] = await tx.select().from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.objectId, command.objectId),
       )).limit(1)
       if ((expectedRevision !== null && object.currentRevision !== expectedRevision)
         || (expectedDocumentSequence !== null && (document?.latestDocumentSequence ?? 0n) !== expectedDocumentSequence)) {
         return { commandId: command.commandId, status: 'conflict', duplicate: false, code: 'conflict_changed' }
       }
       const sequence = await nextSequence(tx, workspaceId)
-      await tx.insert(syncV2Conflicts).values({
+      await tx.insert(syncConflicts).values({
         workspaceId, conflictId: command.conflictId, objectId: command.objectId, kind: command.kind,
         type: command.conflictType,
         expectedRevision,
@@ -822,8 +822,8 @@ export class DurableSyncService {
       throw new ApiError({ code: 'request_invalid', message: 'Delete conflict resolution cannot also restore content', statusCode: 400 })
     }
     if (command.requiresCommandId !== undefined) {
-      const [required] = await tx.select({ result: syncV2Commands.result }).from(syncV2Commands).where(and(
-        eq(syncV2Commands.workspaceId, workspaceId), eq(syncV2Commands.commandId, command.requiresCommandId),
+      const [required] = await tx.select({ result: syncCommands.result }).from(syncCommands).where(and(
+        eq(syncCommands.workspaceId, workspaceId), eq(syncCommands.commandId, command.requiresCommandId),
       )).limit(1)
       if (required === undefined || required.result.status !== 'applied') {
         throw new ApiError({
@@ -832,8 +832,8 @@ export class DurableSyncService {
         })
       }
     }
-    const [conflict] = await tx.select().from(syncV2Conflicts).where(and(
-      eq(syncV2Conflicts.workspaceId, workspaceId), eq(syncV2Conflicts.conflictId, command.conflictId),
+    const [conflict] = await tx.select().from(syncConflicts).where(and(
+      eq(syncConflicts.workspaceId, workspaceId), eq(syncConflicts.conflictId, command.conflictId),
     )).limit(1).for('update')
     if (conflict === undefined) throw new ApiError({ code: 'conflict_not_found', message: 'Conflict not found', statusCode: 404 })
     const expectedCreatedSequence = counter(command.expectedCreatedSequence, 'expectedCreatedSequence')
@@ -841,12 +841,12 @@ export class DurableSyncService {
       // Older servers emitted another conflict.created event whenever the same
       // conflict envelope was retried with a fresh command ID. Those duplicate
       // event sequences are valid aliases for the conflict's original sequence.
-      const [duplicateEvent] = await tx.select({ sequence: syncV2Events.sequence }).from(syncV2Events).where(and(
-        eq(syncV2Events.workspaceId, workspaceId),
-        eq(syncV2Events.sequence, expectedCreatedSequence),
-        eq(syncV2Events.type, 'conflict.created'),
-        eq(syncV2Events.objectId, conflict.objectId),
-        sql`${syncV2Events.metadata}->>'conflictId' = ${conflict.conflictId}`,
+      const [duplicateEvent] = await tx.select({ sequence: syncEvents.sequence }).from(syncEvents).where(and(
+        eq(syncEvents.workspaceId, workspaceId),
+        eq(syncEvents.sequence, expectedCreatedSequence),
+        eq(syncEvents.type, 'conflict.created'),
+        eq(syncEvents.objectId, conflict.objectId),
+        sql`${syncEvents.metadata}->>'conflictId' = ${conflict.conflictId}`,
       )).limit(1)
       if (duplicateEvent === undefined) {
         return { commandId: command.commandId, status: 'conflict', duplicate: false, code: 'conflict_changed' }
@@ -859,15 +859,15 @@ export class DurableSyncService {
         conflictId: conflict.conflictId,
       }
     }
-    let resolutionDocument: typeof syncV2Documents.$inferSelect | undefined
+    let resolutionDocument: typeof syncDocuments.$inferSelect | undefined
     if (command.resolution !== undefined) {
       this.#validateEnvelope(command.resolution)
       await this.#assertKeyAndBlobs(tx, workspaceId, command.resolution.keyVersion, [])
       if (command.resolution.objectId !== conflict.objectId || command.resolution.kind !== conflict.kind) {
         throw new ApiError({ code: 'conflict_resolution_object_mismatch', message: 'Conflict resolution targets another object', statusCode: 409 })
       }
-      const [document] = await tx.select().from(syncV2Documents).where(and(
-        eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.resolution.documentId),
+      const [document] = await tx.select().from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.documentId, command.resolution.documentId),
       )).limit(1).for('update')
       if (document === undefined || document.objectId !== conflict.objectId) {
         throw new ApiError({ code: 'document_not_found', message: 'Conflict document not found', statusCode: 404 })
@@ -895,11 +895,11 @@ export class DurableSyncService {
       let resolvedResourceObjectIds = command.objectResolution.resourceObjectIds
       if (resolvedResourceObjectIds === undefined) {
         resolvedResourceObjectIds = (await tx.select({
-          resourceObjectId: syncV2ResourceBindings.resourceObjectId,
-        }).from(syncV2ResourceBindings).where(and(
-          eq(syncV2ResourceBindings.workspaceId, workspaceId),
-          eq(syncV2ResourceBindings.ownerObjectId, object.objectId),
-          eq(syncV2ResourceBindings.ownerRevision, object.currentRevision),
+          resourceObjectId: syncResourceBindings.resourceObjectId,
+        }).from(syncResourceBindings).where(and(
+          eq(syncResourceBindings.workspaceId, workspaceId),
+          eq(syncResourceBindings.ownerObjectId, object.objectId),
+          eq(syncResourceBindings.ownerRevision, object.currentRevision),
         ))).map(binding => binding.resourceObjectId)
       }
       resolvedResourceObjectIds = Array.from(new Set(resolvedResourceObjectIds))
@@ -979,7 +979,7 @@ export class DurableSyncService {
         deletedAt: null, updatedAt: new Date(),
       }).where(and(eq(objects.workspaceId, workspaceId), eq(objects.objectId, object.objectId)))
       if (resolvedResourceRevisions.size > 0) {
-        await tx.insert(syncV2ResourceBindings).values(Array.from(
+        await tx.insert(syncResourceBindings).values(Array.from(
           resolvedResourceRevisions,
           ([resourceObjectId, resourceRevision]) => ({
             workspaceId, ownerObjectId: object.objectId, ownerRevision: resolvedRevision!,
@@ -1040,7 +1040,7 @@ export class DurableSyncService {
       if (document === undefined) throw new Error('Validated conflict document disappeared')
       const documentSequence = document.latestDocumentSequence + 1n
       const checkpointSequence = await nextSequence(tx, workspaceId)
-      await tx.insert(syncV2Checkpoints).values({
+      await tx.insert(syncCheckpoints).values({
         workspaceId, checkpointId: command.resolution.checkpointId,
         documentId: command.resolution.documentId, objectId: conflict.objectId,
         coversDocumentSequence: documentSequence, eventSequence: checkpointSequence,
@@ -1048,13 +1048,13 @@ export class DurableSyncService {
         ciphertext: command.resolution.ciphertext, ciphertextHash: command.resolution.ciphertextHash,
         sourceDeviceId: deviceId,
       })
-      await tx.update(syncV2Documents).set({
+      await tx.update(syncDocuments).set({
         latestDocumentSequence: documentSequence, checkpointDocumentSequence: documentSequence,
         checkpointId: command.resolution.checkpointId, checkpointKeyVersion: command.resolution.keyVersion,
         checkpointCiphertext: command.resolution.ciphertext,
         checkpointCiphertextHash: command.resolution.ciphertextHash,
         materializedRevision: resolvedRevision, updatedAt: new Date(),
-      }).where(and(eq(syncV2Documents.workspaceId, workspaceId), eq(syncV2Documents.documentId, command.resolution.documentId)))
+      }).where(and(eq(syncDocuments.workspaceId, workspaceId), eq(syncDocuments.documentId, command.resolution.documentId)))
       const prunedBytes = await this.#pruneCoveredUpdates(tx, workspaceId, command.resolution.documentId, documentSequence)
       await this.usage?.applyActiveCrdtDelta(tx, accountId,
         BigInt(Buffer.from(command.resolution.ciphertext, 'base64url').byteLength)
@@ -1071,10 +1071,10 @@ export class DurableSyncService {
       })
     }
     const sequence = await nextSequence(tx, workspaceId)
-    await tx.update(syncV2Conflicts).set({
+    await tx.update(syncConflicts).set({
       status: 'resolved', resolvedSequence: sequence, resolvedByDeviceId: deviceId,
       resolvedAt: new Date(), updatedAt: new Date(),
-    }).where(and(eq(syncV2Conflicts.workspaceId, workspaceId), eq(syncV2Conflicts.conflictId, command.conflictId)))
+    }).where(and(eq(syncConflicts.workspaceId, workspaceId), eq(syncConflicts.conflictId, command.conflictId)))
     await insertEvent(tx, {
       workspaceId, sequence, commandId: command.commandId, deviceId, type: 'conflict.resolved',
       objectId: conflict.objectId, metadata: { conflictId: command.conflictId },
@@ -1114,17 +1114,17 @@ export class DurableSyncService {
   }
 
   async #pruneCoveredUpdates(tx: SyncTransaction, workspaceId: string, documentId: string, covers: bigint): Promise<bigint> {
-    const [activeBootstrap] = await tx.select({ id: syncV2BootstrapSessions.id }).from(syncV2BootstrapSessions).where(and(
-      eq(syncV2BootstrapSessions.workspaceId, workspaceId), gt(syncV2BootstrapSessions.expiresAt, new Date()),
+    const [activeBootstrap] = await tx.select({ id: syncBootstrapSessions.id }).from(syncBootstrapSessions).where(and(
+      eq(syncBootstrapSessions.workspaceId, workspaceId), gt(syncBootstrapSessions.expiresAt, new Date()),
     )).limit(1)
     if (activeBootstrap !== undefined) return 0n
-    const removed = await tx.select({ ciphertext: syncV2Updates.ciphertext }).from(syncV2Updates).where(and(
-      eq(syncV2Updates.workspaceId, workspaceId), eq(syncV2Updates.documentId, documentId),
-      sql`${syncV2Updates.documentSequence} <= ${covers}`,
+    const removed = await tx.select({ ciphertext: syncUpdates.ciphertext }).from(syncUpdates).where(and(
+      eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
+      sql`${syncUpdates.documentSequence} <= ${covers}`,
     ))
-    await tx.delete(syncV2Updates).where(and(
-      eq(syncV2Updates.workspaceId, workspaceId), eq(syncV2Updates.documentId, documentId),
-      sql`${syncV2Updates.documentSequence} <= ${covers}`,
+    await tx.delete(syncUpdates).where(and(
+      eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
+      sql`${syncUpdates.documentSequence} <= ${covers}`,
     ))
     return removed.reduce((total, row) => total + BigInt(Buffer.from(row.ciphertext, 'base64url').byteLength), 0n)
   }
@@ -1172,7 +1172,7 @@ async function insertEvent(tx: SyncTransaction, input: {
   ciphertextHash?: string
   metadata?: Record<string, unknown>
 }) {
-  await tx.insert(syncV2Events).values({
+  await tx.insert(syncEvents).values({
     workspaceId: input.workspaceId, sequence: input.sequence, commandId: input.commandId,
     sourceDeviceId: input.deviceId, type: input.type,
     ...(input.objectId === undefined ? {} : { objectId: input.objectId }),
@@ -1190,7 +1190,7 @@ function counter(value: string, field: string): bigint {
   return BigInt(value)
 }
 
-function serializeEvent(row: typeof syncV2Events.$inferSelect) {
+function serializeEvent(row: typeof syncEvents.$inferSelect) {
   return {
     eventId: row.eventId,
     commandId: row.commandId,
@@ -1216,7 +1216,7 @@ function serializeObjectVersion(row: typeof objectVersions.$inferSelect) {
   }
 }
 
-function serializeConflict(row: typeof syncV2Conflicts.$inferSelect) {
+function serializeConflict(row: typeof syncConflicts.$inferSelect) {
   return {
     ...row,
     expectedRevision: row.expectedRevision?.toString() ?? null,

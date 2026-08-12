@@ -301,7 +301,7 @@ POST /v1/web/admin/compliance/requests/:id/action
 - purge manifest 在 DB 行删除前固化；Blob/external 删除失败仍保留定位信息，多个 hold scope 正确合并。
 - legal hold 创建/释放只接受独立 Staff realm 的 `legal_hold.manage + legal_hold.approve`，不接受客户 `accounts.isAdmin`；与每个外部删除 handler 并发时按 subject lock/hold revision 串行化，不会在旧 snapshot 下误删。
 - cooling-off/purging/completed 期间，旧 generation job、晚到 Webhook 和 provider 取消回调都不能重建主体数据；quiet-window 扫描未收敛时不得 completed。
-- 删除事务与已认证的晚到写入并发时，workspace 创建/密钥变更/删除恢复、legacy 与 durable sync、durable bootstrap、blob 分片与完成、support 创建和回复都在各自提交事务中重查 subject fence；删除先提交后，写请求必须稳定拒绝且不得留下领域行。
+- 删除事务与已认证的晚到写入并发时，workspace 创建/密钥变更/删除恢复、durable sync/bootstrap、blob 分片与完成、support 创建和回复都在各自提交事务中重查 subject fence；删除先提交后，写请求必须稳定拒绝且不得留下领域行。
 - cooling-off 可取消，purging 开始后不可恢复。
 - Web step-up 与兼容原生 `DELETE /v1/account` 都必须在同一 deletion transaction 执行 authentication risk restriction；deny/lock/review 时不创建 case、不禁用账号、不撤销任何凭据。
 - deletion cancel 不受该 restriction 阻断，且取消后仍不能恢复删除前的 Web Session、refresh token、device authorization 或 pairing。

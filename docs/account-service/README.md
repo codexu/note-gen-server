@@ -33,7 +33,7 @@
 - 普通注册不再基于“当前没有有效管理员”自动提权；自托管仅能在持久 lifecycle 的 bootstrap/repair-admin 受控流程中建立管理员，官方托管普通注册固定为非管理员。管理员修复状态由 `deployment_settings.admin_repair_required` 明确暴露并受本机流程约束。
 - PostgreSQL 已承载跨实例限流、维护 advisory lock、管理员审计、后台任务和数据库备份记录，可以继续作为账号服务一期的协调基础，无需为了运营功能立即引入 Redis 或消息队列。
 - 旧管理后台 DB-only backup 与单机脚本均已停用，避免生成看似可恢复却未验证的 artifact。自托管现有受确认的 offline filesystem writer 会生成 PostgreSQL custom dump、Blob copy、v2 manifest 与 Ed25519 signature；restore preflight 只读验证 archive，实际 apply 仍未开放。
-- 当前同步实现同时保留历史 `SyncService` 和现用 `DurableSyncService`。两者共享对象/版本表，但写入日志不同。账号服务只能通过统一策略接口接入，不能把配额或审计逻辑只绑在其中一条路径上。
+- 同步写入已经收敛到 `DurableSyncService`，历史 `SyncService` 装配已删除。账号服务仍通过统一策略接口接入，配额和审计不能绕过 canonical durable command/event 路径。
 - NoteGen 客户端已校验 `instanceId`、协议范围和部分能力字段；现有 `registrationMode`、`login` 字段及错误响应需要维持兼容窗口。
 
 ## 3. 目标架构

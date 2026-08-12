@@ -16,6 +16,10 @@ import {
 
 import { AdminShell, type AdminSection } from "@/components/admin-shell"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -38,9 +42,14 @@ import {
 } from "@/components/ui/item"
 import { Spinner } from "@/components/ui/spinner"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Pagination, PaginationContent, PaginationItem, PaginationNext, PaginationPrevious } from "@/components/ui/pagination"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { toast } from "@/components/ui/toast"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { ServiceCenter } from "@/components/service-center"
+import { AdminInstanceSummary } from "@/components/admin-instance-summary"
+import { ExperimentalCenter } from "@/components/experimental-center"
 import { OperationsCenter } from "@/components/operations-center"
 import { DeviceConnection } from "@/components/device-connection"
 import { InstallationGuide, type InstallationStatus } from "@/components/installation-guide"
@@ -51,12 +60,15 @@ import {
   type Account,
   type AdminAccount,
   type AdminAccountPage,
+  type AdminBackup,
   type AdminAuditEntry,
   type AdminAuditPage,
   type AdminDevice,
   type AdminDevicePage,
   type AdminOverview,
   type AdminSystemStatus,
+  type AdminStorageReport,
+  type AdminWebSession,
   type AdminWorkspace,
   type AdminWorkspacePage,
   type Device,
@@ -78,11 +90,8 @@ export function AccountPortal() {
   const [overview, setOverview] = useState<SyncOverview | null>(null)
   const [workspaces, setWorkspaces] = useState<WebWorkspace[]>([])
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
-  const [section, setSection] = useState<AdminSection>(() => (
-    typeof window !== "undefined" && window.location.pathname.startsWith("/connect")
-      ? "connect"
-      : "overview"
-  ))
+  const [section, setSection] = useState<AdminSection>(readSectionFromUrl)
+  const [adminRefreshVersion, setAdminRefreshVersion] = useState(0)
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null)
   const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([])
   const [adminAccountTotal, setAdminAccountTotal] = useState(0)
@@ -93,13 +102,13 @@ export function AccountPortal() {
   const [adminDevices, setAdminDevices] = useState<AdminDevice[]>([])
   const [adminDeviceTotal, setAdminDeviceTotal] = useState(0)
   const [adminStatus, setAdminStatus] = useState<AdminSystemStatus | null>(null)
-  const [adminQuery, setAdminQuery] = useState("")
-  const [adminAccountStatus, setAdminAccountStatus] = useState("all")
-  const [adminAccountOffset, setAdminAccountOffset] = useState(0)
-  const [adminWorkspaceOffset, setAdminWorkspaceOffset] = useState(0)
-  const [adminDeviceOffset, setAdminDeviceOffset] = useState(0)
-  const [adminAuditOffset, setAdminAuditOffset] = useState(0)
-  const [adminAuditAction, setAdminAuditAction] = useState("")
+  const [adminQuery, setAdminQuery] = useState(() => readUrlParam("query"))
+  const [adminAccountStatus, setAdminAccountStatus] = useState(() => readUrlParam("status") || "all")
+  const [adminAccountOffset, setAdminAccountOffset] = useState(() => readUrlOffset("accountsOffset"))
+  const [adminWorkspaceOffset, setAdminWorkspaceOffset] = useState(() => readUrlOffset("workspacesOffset"))
+  const [adminDeviceOffset, setAdminDeviceOffset] = useState(() => readUrlOffset("devicesOffset"))
+  const [adminAuditOffset, setAdminAuditOffset] = useState(() => readUrlOffset("auditOffset"))
+  const [adminAuditAction, setAdminAuditAction] = useState(() => readUrlParam("auditAction"))
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminError, setAdminError] = useState("")
   const [adminBusyAccountId, setAdminBusyAccountId] = useState<string | null>(null)
@@ -108,6 +117,7 @@ export function AccountPortal() {
   const [error, setError] = useState("")
 
   const loadDashboardData = useCallback(async () => {
+    setError("")
     const [devicesResult, overviewResult, workspacesResult] = await Promise.allSettled([
       apiRequest<Device[]>("/v1/web/devices"),
       apiRequest<SyncOverview>("/v1/web/sync-overview"),
@@ -143,7 +153,7 @@ export function AccountPortal() {
       const auditQuery = new URLSearchParams(commonQuery)
       auditQuery.set("offset", String(adminAuditOffset))
       if (adminAuditAction) auditQuery.set("action", adminAuditAction)
-      const [overviewResult, accountsResult, auditResult, workspacesResult, devicesResult, statusResult] = await Promise.all([
+      const [overviewResult, accountsResult, auditResult, workspacesResult, devicesResult, statusResult] = await Promise.allSettled([
         apiRequest<AdminOverview>("/v1/web/admin/overview"),
         apiRequest<AdminAccountPage>(`/v1/web/admin/accounts?${accountQuery}`),
         apiRequest<AdminAuditPage>(`/v1/web/admin/audit?${auditQuery}`),
@@ -151,18 +161,15 @@ export function AccountPortal() {
         apiRequest<AdminDevicePage>(`/v1/web/admin/devices?${deviceQuery}`),
         apiRequest<AdminSystemStatus>("/v1/web/admin/status"),
       ])
-      setAdminOverview(overviewResult)
-      setAdminAccounts(accountsResult.accounts)
-      setAdminAccountTotal(accountsResult.total)
-      setAdminAudit(auditResult.entries)
-      setAdminAuditTotal(auditResult.total)
-      setAdminWorkspaces(workspacesResult.workspaces)
-      setAdminWorkspaceTotal(workspacesResult.total)
-      setAdminDevices(devicesResult.devices)
-      setAdminDeviceTotal(devicesResult.total)
-      setAdminStatus(statusResult)
-    } catch (cause) {
-      setAdminError(errorMessage(cause))
+      if (overviewResult.status === "fulfilled") setAdminOverview(overviewResult.value)
+      if (accountsResult.status === "fulfilled") { setAdminAccounts(accountsResult.value.accounts); setAdminAccountTotal(accountsResult.value.total) }
+      if (auditResult.status === "fulfilled") { setAdminAudit(auditResult.value.entries); setAdminAuditTotal(auditResult.value.total) }
+      if (workspacesResult.status === "fulfilled") { setAdminWorkspaces(workspacesResult.value.workspaces); setAdminWorkspaceTotal(workspacesResult.value.total) }
+      if (devicesResult.status === "fulfilled") { setAdminDevices(devicesResult.value.devices); setAdminDeviceTotal(devicesResult.value.total) }
+      if (statusResult.status === "fulfilled") setAdminStatus(statusResult.value)
+      const failed = [overviewResult, accountsResult, auditResult, workspacesResult, devicesResult, statusResult]
+        .find((result) => result.status === "rejected")
+      if (failed?.status === "rejected") setAdminError(errorMessage(failed.reason))
     } finally {
       setAdminLoading(false)
     }
@@ -219,25 +226,60 @@ export function AccountPortal() {
 
   useEffect(() => {
     if (!account) return
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void loadDashboardData()
-    }, 10_000)
-    return () => {
-      window.clearInterval(timer)
-    }
+    const onVisibility = () => { if (document.visibilityState === "visible") void loadDashboardData() }
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => document.removeEventListener("visibilitychange", onVisibility)
   }, [account, loadDashboardData])
 
   useEffect(() => {
     if (!account) return
     const timer = window.setInterval(() => {
       setRelativeTimeTick((current) => current + 1)
-    }, 1_000)
+    }, 60_000)
     return () => window.clearInterval(timer)
   }, [account])
 
   useEffect(() => {
-    if (account?.isAdmin && section === "admin") void loadAdminData()
+    if (!account?.isAdmin || section !== "admin") return
+    const timer = window.setTimeout(() => void loadAdminData(), 250)
+    return () => window.clearTimeout(timer)
   }, [account, loadAdminData, section])
+
+  useEffect(() => {
+    if (!account || account.isAdmin || !adminOnlySections.has(section)) return
+    setSection("overview")
+    const url = new URL(window.location.href)
+    url.searchParams.set("section", "overview")
+    window.history.replaceState(null, "", url)
+  }, [account, section])
+
+  useEffect(() => {
+    const onPopState = () => setSection(readSectionFromUrl())
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
+
+  useEffect(() => {
+    if (section !== "admin") return
+    const url = new URL(window.location.href)
+    setOptionalParam(url, "query", adminQuery)
+    setOptionalParam(url, "status", adminAccountStatus === "all" ? "" : adminAccountStatus)
+    setOptionalParam(url, "accountsOffset", adminAccountOffset ? String(adminAccountOffset) : "")
+    setOptionalParam(url, "workspacesOffset", adminWorkspaceOffset ? String(adminWorkspaceOffset) : "")
+    setOptionalParam(url, "devicesOffset", adminDeviceOffset ? String(adminDeviceOffset) : "")
+    setOptionalParam(url, "auditOffset", adminAuditOffset ? String(adminAuditOffset) : "")
+    setOptionalParam(url, "auditAction", adminAuditAction)
+    window.history.replaceState(null, "", url)
+  }, [section, adminQuery, adminAccountStatus, adminAccountOffset, adminWorkspaceOffset, adminDeviceOffset, adminAuditOffset, adminAuditAction])
+
+  const navigateSection = useCallback((nextSection: AdminSection) => {
+    setSection(nextSection)
+    const url = new URL(window.location.href)
+    url.pathname = nextSection === "connect" ? "/connect/" : "/"
+    url.searchParams.set("section", nextSection)
+    if (nextSection !== "connect") url.searchParams.delete("code")
+    window.history.pushState(null, "", url)
+  }, [])
 
   async function handleAuthenticated(nextAccount: Account) {
     setAccount(nextAccount)
@@ -263,6 +305,7 @@ export function AccountPortal() {
       setAdminDevices([])
       setAdminStatus(null)
       setSection("overview")
+      window.history.replaceState(null, "", window.location.pathname)
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -395,20 +438,28 @@ export function AccountPortal() {
       workspaceCount={workspaces.length}
       deviceCount={devices.filter((device) => !device.revokedAt).length}
       busy={busy}
-      onSectionChange={setSection}
+      onSectionChange={navigateSection}
       onLogout={() => void handleLogout()}
       onRefresh={() => {
         if (section === "admin" && account.isAdmin) {
           void loadAdminData()
           return
         }
+        if (["instance", "operations", "experiments"].includes(section) && account.isAdmin) {
+          setAdminRefreshVersion((value) => value + 1)
+          return
+        }
+        if (section === "overview" && account.isAdmin) {
+          setAdminRefreshVersion((value) => value + 1)
+        }
         void loadDashboardData()
       }}
     >
       {error ? <ErrorAlert message={error} /> : null}
-      {section === "overview" ? <OverviewSection overview={overview} /> : null}
-      {section === "services" ? <ServiceCenter /> : null}
-      {section === "operations" && account.isAdmin ? <OperationsCenter /> : null}
+      {section === "overview" ? <><OverviewSection overview={overview} />{account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}</> : null}
+      {section === "instance" && account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}
+      {section === "experiments" && account.isAdmin ? <ExperimentalCenter refreshVersion={adminRefreshVersion} /> : null}
+      {section === "operations" && account.isAdmin ? <OperationsCenter refreshVersion={adminRefreshVersion} /> : null}
       {section === "workspaces" ? (
         <WorkspaceManagement
           workspaces={workspaces}
@@ -536,7 +587,7 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
       <Card className="bg-card/90 shadow-sm">
         <CardHeader>
           <CardTitle>同步概览</CardTitle>
-          <CardDescription>汇总当前账号的同步对象、附件、序列和加密状态。</CardDescription>
+          <CardDescription>汇总当前账号的同步对象、物理存储、序列和加密状态；已移除附件会按保留策略延迟回收。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Metric
@@ -545,9 +596,9 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
             detail={`${overview?.deletedObjectCount ?? 0} 项删除记录 · ${formatBytes(overview?.objectBytes ?? "0")} 加密数据`}
           />
           <Metric
-            label="附件存储"
+            label="附件占用（含保留）"
             value={formatBytes(overview?.blobBytes ?? "0")}
-            detail={`${overview?.blobCount ?? 0} 个附件`}
+            detail={`${overview?.blobCount ?? 0} 个存储 Blob`}
           />
           <Metric
             label="最新序列"
@@ -619,7 +670,6 @@ function WorkspaceManagement({
   deletingWorkspaceId: string | null
   onDelete: (id: string) => Promise<void>
 }) {
-  const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null)
   const sorted = [...workspaces].sort((left, right) => (
     Number(right.isDefault) - Number(left.isDefault)
     || right.objectCount - left.objectCount
@@ -657,27 +707,14 @@ function WorkspaceManagement({
                     {workspace.isDefault ? "默认" : "历史"}
                   </Badge>
                   <Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管加密" : "E2EE"}</Badge>
-                  {!workspace.isDefault && deleteCandidateId === workspace.id ? (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={deletingWorkspaceId !== null}
-                        onClick={() => void onDelete(workspace.id)}
-                      >
-                        {deletingWorkspaceId === workspace.id ? <Spinner data-icon="inline-start" /> : <Trash2Icon data-icon="inline-start" />}
-                        确认删除
-                      </Button>
-                      <Button size="sm" variant="ghost" disabled={deletingWorkspaceId !== null} onClick={() => setDeleteCandidateId(null)}>
-                        取消
-                      </Button>
-                    </>
-                  ) : !workspace.isDefault ? (
-                    <Button size="sm" variant="destructive" disabled={deletingWorkspaceId !== null} onClick={() => setDeleteCandidateId(workspace.id)}>
-                      <Trash2Icon data-icon="inline-start" />
-                      删除
-                    </Button>
-                  ) : null}
+                  {!workspace.isDefault ? <DangerConfirmButton
+                    label="删除"
+                    title="删除这个历史工作区？"
+                    description="工作区及其同步内容将进入软删除状态。确认所有设备都不再使用它后再继续。"
+                    disabled={deletingWorkspaceId !== null}
+                    busy={deletingWorkspaceId === workspace.id}
+                    onConfirm={() => void onDelete(workspace.id)}
+                  /> : null}
                 </ItemActions>
               </Item>
             ))}
@@ -726,10 +763,13 @@ function DeviceManagement({
                   {device.revokedAt ? (
                     <Badge variant="outline">已撤销</Badge>
                   ) : (
-                    <Button size="sm" variant="destructive" disabled={busy} onClick={() => onRevoke(device.id)}>
-                      <Trash2Icon data-icon="inline-start" />
-                      撤销
-                    </Button>
+                    <DangerConfirmButton
+                      label="撤销"
+                      title={`撤销“${device.name}”的设备授权？`}
+                      description="这台设备需要重新关联才能继续同步，已经同步到服务端的内容不会删除。"
+                      disabled={busy}
+                      onConfirm={() => onRevoke(device.id)}
+                    />
                   )}
                 </ItemActions>
               </Item>
@@ -749,7 +789,6 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
   const [confirmPassword, setConfirmPassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  const [success, setSuccess] = useState(false)
   const [sessions, setSessions] = useState<Array<{
     id: string; lastSeenAt: string; lastIp: string | null; userAgent: string | null; current: boolean
   }>>([])
@@ -810,7 +849,6 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError("")
-    setSuccess(false)
     if (newPassword !== confirmPassword) {
       setError("两次输入的新密码不一致。")
       return
@@ -825,7 +863,7 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
       setCurrentPassword("")
       setNewPassword("")
       setConfirmPassword("")
-      setSuccess(true)
+      toast.add({ title: "密码修改成功", description: "其他设备需要重新登录。", type: "success" })
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -842,13 +880,6 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {error ? <ErrorAlert message={error} /> : null}
-        {success ? (
-          <Alert>
-            <ShieldCheckIcon />
-            <AlertTitle>密码修改成功</AlertTitle>
-            <AlertDescription>当前浏览器已换发新会话，其他设备需要重新登录。</AlertDescription>
-          </Alert>
-        ) : null}
         <form onSubmit={handleSubmit}>
           <FieldGroup>
             <Field>
@@ -977,20 +1008,13 @@ function SystemManagement({
   onAuditPage: (offset: number) => void
   onAuditActionChange: (value: string) => void
 }) {
-  const [disableCandidateId, setDisableCandidateId] = useState<string | null>(null)
   const [roleCandidateId, setRoleCandidateId] = useState<string | null>(null)
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([])
   const [managementError, setManagementError] = useState("")
   const [operationsLoading, setOperationsLoading] = useState(false)
-  const [webSessions, setWebSessions] = useState<Array<{
-    id: string; accountLogin: string; lastSeenAt: string; lastIp: string | null; userAgent: string | null
-  }>>([])
-  const [backups, setBackups] = useState<Array<{
-    id: string; filename: string; size: string | null; status: string; createdAt: string
-  }>>([])
-  const [storageReport, setStorageReport] = useState<{
-    checked: number; missing: string[]; orphaned: string[]
-  } | null>(null)
+  const [webSessions, setWebSessions] = useState<AdminWebSession[]>([])
+  const [backups, setBackups] = useState<AdminBackup[]>([])
+  const [storageReport, setStorageReport] = useState<AdminStorageReport | null>(null)
 
   async function batchSuspend(suspended: boolean) {
     setManagementError("")
@@ -1035,24 +1059,15 @@ function SystemManagement({
     setManagementError("")
     try {
       const [sessionsPage, backupRows, report] = await Promise.all([
-        apiRequest<{ sessions: typeof webSessions }>("/v1/web/admin/sessions?limit=50"),
-        apiRequest<typeof backups>("/v1/web/admin/backups"),
-        apiRequest<{ checked: number; missing: string[]; orphaned: string[] }>("/v1/web/admin/storage/orphans"),
+        apiRequest<{ sessions: AdminWebSession[] }>("/v1/web/admin/sessions?limit=50"),
+        apiRequest<AdminBackup[]>("/v1/web/admin/backups"),
+        apiRequest<AdminStorageReport>("/v1/web/admin/storage/orphans"),
       ])
       setWebSessions(sessionsPage.sessions)
       setBackups(backupRows)
       setStorageReport(report)
     } catch (cause) { setManagementError(errorMessage(cause)) }
     finally { setOperationsLoading(false) }
-  }
-
-  async function createBackup() {
-    setOperationsLoading(true)
-    setManagementError("")
-    try {
-      await apiRequest("/v1/web/admin/backups", { method: "POST", csrf: true })
-      await loadOperations()
-    } catch (cause) { setManagementError(errorMessage(cause)); setOperationsLoading(false) }
   }
 
   async function revokeWebSession(sessionId: string) {
@@ -1124,11 +1139,11 @@ function SystemManagement({
               共 {accountTotal} 个账号。停用后会立即注销其网页会话，并撤销设备和刷新令牌。
             </CardDescription>
             <div className="flex flex-wrap gap-2 pt-2">
-              <select className="h-9 rounded-md border bg-background px-3 text-sm" value={accountStatus} onChange={(event) => onAccountStatusChange(event.target.value)}>
-                <option value="all">全部状态</option><option value="active">正常</option>
-                <option value="suspended">已停用</option><option value="deletion">待删除</option>
-              </select>
-              <Button size="sm" variant="destructive" disabled={!selectedAccountIds.length} onClick={() => void batchSuspend(true)}>批量停用</Button>
+              <Select value={accountStatus} onValueChange={(value) => { if (value) onAccountStatusChange(value) }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectGroup>
+                <SelectItem value="all">全部状态</SelectItem><SelectItem value="active">正常</SelectItem>
+                <SelectItem value="suspended">已停用</SelectItem><SelectItem value="deletion">待删除</SelectItem>
+              </SelectGroup></SelectContent></Select>
+              <DangerConfirmButton label="批量停用" title={`停用选中的 ${selectedAccountIds.length} 个账号？`} description="这些账号的网页会话、设备凭据和刷新令牌会立即失效。" disabled={!selectedAccountIds.length} onConfirm={() => void batchSuspend(true)} />
               <Button size="sm" variant="outline" disabled={!selectedAccountIds.length} onClick={() => void batchSuspend(false)}>批量恢复</Button>
             </div>
           </CardHeader>
@@ -1141,7 +1156,6 @@ function SystemManagement({
                   const isCurrent = managedAccount.id === currentAccountId
                   const isSuspended = managedAccount.suspendedAt !== null
                   const pendingDeletion = managedAccount.deletionRequestedAt !== null
-                  const confirming = disableCandidateId === managedAccount.id
                   return (
                     <Item key={managedAccount.id} variant="outline">
                       {!isCurrent && !pendingDeletion ? (
@@ -1215,35 +1229,14 @@ function SystemManagement({
                               : <CircleCheckIcon data-icon="inline-start" />}
                             恢复
                           </Button>
-                        ) : !isCurrent && !pendingDeletion && confirming ? (
-                          <>
-                            <Button
-                              size="sm"
-                              variant="destructive"
-                              disabled={busyAccountId !== null}
-                              onClick={() => void onSetSuspended(managedAccount.id, true)}
-                            >
-                              {busyAccountId === managedAccount.id ? <Spinner data-icon="inline-start" /> : null}
-                              确认停用
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={busyAccountId !== null}
-                              onClick={() => setDisableCandidateId(null)}
-                            >
-                              取消
-                            </Button>
-                          </>
                         ) : !isCurrent && !pendingDeletion ? (
-                          <Button
-                            size="sm"
-                            variant="destructive"
+                          <DangerConfirmButton
+                            label="停用"
+                            title={`停用账号 ${managedAccount.login}？`}
+                            description="该账号的网页会话、设备凭据和刷新令牌会立即失效。"
                             disabled={busyAccountId !== null}
-                            onClick={() => setDisableCandidateId(managedAccount.id)}
-                          >
-                            停用
-                          </Button>
+                            onConfirm={() => void onSetSuspended(managedAccount.id, true)}
+                          />
                         ) : null}
                       </ItemActions>
                     </Item>
@@ -1262,12 +1255,12 @@ function SystemManagement({
             <CardTitle className="flex items-center gap-2"><ScrollTextIcon className="size-5" />操作审计</CardTitle>
             <CardDescription>保留最近 100 条后台数据变更，便于确认谁在何时执行了什么操作。</CardDescription>
             <div className="flex flex-wrap gap-2 pt-2">
-              <select className="h-9 rounded-md border bg-background px-3 text-sm" value={auditAction} onChange={(event) => onAuditActionChange(event.target.value)}>
-                <option value="">全部操作</option><option value="account.suspend">停用账号</option>
-                <option value="account.resume">恢复账号</option><option value="object.delete">删除内容</option>
-                <option value="workspace.delete">删除工作区</option><option value="data.export">数据导出</option>
-              </select>
-              <Button size="sm" variant="outline" onClick={() => void cleanupAudit()}>清理 90 天前审计</Button>
+              <Select value={auditAction || "all"} onValueChange={(value) => onAuditActionChange(value === "all" || value === null ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectGroup>
+                <SelectItem value="all">全部操作</SelectItem><SelectItem value="account.suspend">停用账号</SelectItem>
+                <SelectItem value="account.resume">恢复账号</SelectItem><SelectItem value="object.delete">删除内容</SelectItem>
+                <SelectItem value="workspace.delete">删除工作区</SelectItem><SelectItem value="data.export">数据导出</SelectItem>
+              </SelectGroup></SelectContent></Select>
+              <DangerConfirmButton label="清理审计" title="清理 90 天前的审计记录？" description="历史审计删除后无法从管理页面恢复，本次清理操作本身仍会被记录。" onConfirm={() => void cleanupAudit()} />
             </div>
           </CardHeader>
           <CardContent>
@@ -1308,30 +1301,24 @@ function SystemManagement({
 
       <Card>
         <CardHeader className="flex-row items-start justify-between gap-4">
-          <div><CardTitle>运维工具</CardTitle><CardDescription>管理浏览器会话、数据库备份和对象存储一致性。</CardDescription></div>
+          <div><CardTitle>运维工具</CardTitle><CardDescription>管理浏览器会话、旧备份记录和对象存储一致性。</CardDescription></div>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" disabled={operationsLoading} onClick={() => void loadOperations()}>
               {operationsLoading ? <Spinner data-icon="inline-start" /> : null}检查
             </Button>
-            <Button size="sm" disabled={operationsLoading} onClick={() => void createBackup()}>创建备份</Button>
           </div>
         </CardHeader>
         <CardContent className="grid gap-6 xl:grid-cols-3">
           <div><p className="mb-2 text-sm font-medium">浏览器会话（{webSessions.length}）</p>
-            <div className="space-y-2">{webSessions.slice(0, 8).map((item) => (
-              <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg border p-2 text-xs">
-                <span className="min-w-0 truncate">{item.accountLogin} · {item.lastIp ?? "未知 IP"} · {formatDate(item.lastSeenAt)}</span>
-                <Button size="sm" variant="ghost" onClick={() => void revokeWebSession(item.id)}>下线</Button>
-              </div>
-            ))}</div>
+            <Table><TableHeader><TableRow><TableHead>账号</TableHead><TableHead>最后活动</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{webSessions.slice(0, 8).map((item) => (
+              <TableRow key={item.id}><TableCell>{item.accountLogin}</TableCell><TableCell>{formatDate(item.lastSeenAt)}</TableCell><TableCell className="text-right"><Button size="sm" variant="ghost" onClick={() => void revokeWebSession(item.id)}>下线</Button></TableCell></TableRow>
+            ))}</TableBody></Table>
           </div>
-          <div><p className="mb-2 text-sm font-medium">数据库备份（{backups.length}）</p>
-            <div className="space-y-2">{backups.slice(0, 8).map((item) => (
-              <div key={item.id} className="rounded-lg border p-2 text-xs">
-                <p className="truncate font-medium">{item.filename}</p>
-                <p className="text-muted-foreground">{item.status} · {item.size ? formatBytes(item.size) : "等待生成"}</p>
-              </div>
-            ))}</div>
+          <div><p className="mb-2 text-sm font-medium">旧数据库备份记录（{backups.length}）</p>
+            <Table><TableHeader><TableRow><TableHead>文件</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{backups.slice(0, 8).map((item) => (
+              <TableRow key={item.id}><TableCell className="max-w-40 truncate">{item.filename}</TableCell><TableCell>{item.status}</TableCell></TableRow>
+            ))}</TableBody></Table>
+            {!backups.length ? <p className="text-sm text-muted-foreground">没有旧记录。统一备份的状态与门槛请查看实验功能。</p> : null}
           </div>
           <div><p className="mb-2 text-sm font-medium">对象存储</p>
             {storageReport ? <div className="rounded-lg border p-3 text-sm">
@@ -1363,7 +1350,6 @@ function GlobalWorkspaceList({ workspaces, total, offset, onPage, onDelete, onRe
   onDelete: (id: string) => Promise<void>
   onRestore: (id: string) => Promise<void>
 }) {
-  const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null)
   return (
     <Card>
       <CardHeader><CardTitle>全局工作区</CardTitle><CardDescription>跨账号确认默认、历史和已删除工作区及其占用。</CardDescription></CardHeader>
@@ -1374,7 +1360,7 @@ function GlobalWorkspaceList({ workspaces, total, offset, onPage, onDelete, onRe
             <ItemContent><ItemTitle>{workspace.accountLogin} · {workspace.id.slice(0, 8)}</ItemTitle>
               <ItemDescription>{workspace.objectCount} 项内容 · {workspace.deletedObjectCount} 项删除 · {formatBytes(workspace.objectBytes)} · {formatDate(workspace.updatedAt)}</ItemDescription>
             </ItemContent>
-            <ItemActions><Badge variant="outline">{workspace.isDefault ? "默认" : "历史"}</Badge><Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管" : "E2EE"}</Badge>{workspace.deletedAt ? <><Badge variant="destructive">已删除</Badge><Button size="sm" variant="outline" onClick={() => void onRestore(workspace.id)}>恢复</Button></> : !workspace.isDefault && deleteCandidate === workspace.id ? <><Button size="sm" variant="destructive" onClick={() => void onDelete(workspace.id).then(() => setDeleteCandidate(null))}>确认删除</Button><Button size="sm" variant="ghost" onClick={() => setDeleteCandidate(null)}>取消</Button></> : !workspace.isDefault ? <Button size="sm" variant="destructive" onClick={() => setDeleteCandidate(workspace.id)}>删除</Button> : null}</ItemActions>
+            <ItemActions><Badge variant="outline">{workspace.isDefault ? "默认" : "历史"}</Badge><Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管" : "E2EE"}</Badge>{workspace.deletedAt ? <><Badge variant="destructive">已删除</Badge><Button size="sm" variant="outline" onClick={() => void onRestore(workspace.id)}>恢复</Button></> : !workspace.isDefault ? <DangerConfirmButton label="删除" title={`删除 ${workspace.accountLogin} 的工作区？`} description="工作区及其同步内容会进入软删除状态，请确认对应设备不再使用它。" onConfirm={() => void onDelete(workspace.id)} /> : null}</ItemActions>
           </Item>
         ))}</ItemGroup>
         {!workspaces.length ? <p className="text-sm text-muted-foreground">没有匹配的工作区。</p> : null}
@@ -1391,7 +1377,6 @@ function GlobalDeviceList({ devices, total, offset, onPage, onRevoke }: {
   onPage: (offset: number) => void
   onRevoke: (id: string) => Promise<void>
 }) {
-  const [revokeCandidate, setRevokeCandidate] = useState<string | null>(null)
   return (
     <Card>
       <CardHeader><CardTitle>全局设备</CardTitle><CardDescription>跨账号检查设备身份、平台、活动时间和撤销状态。</CardDescription></CardHeader>
@@ -1400,7 +1385,7 @@ function GlobalDeviceList({ devices, total, offset, onPage, onRevoke }: {
           <Item key={device.id} variant="outline">
             <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
             <ItemContent><ItemTitle>{device.name}</ItemTitle><ItemDescription>{device.accountLogin} · {device.platform} · 最近活动 {formatDate(device.lastSeenAt)}</ItemDescription></ItemContent>
-            <ItemActions>{device.revokedAt ? <Badge variant="outline">已撤销</Badge> : revokeCandidate === device.id ? <><Button size="sm" variant="destructive" onClick={() => void onRevoke(device.id).then(() => setRevokeCandidate(null))}>确认撤销</Button><Button size="sm" variant="ghost" onClick={() => setRevokeCandidate(null)}>取消</Button></> : <Button size="sm" variant="destructive" onClick={() => setRevokeCandidate(device.id)}>撤销</Button>}</ItemActions>
+            <ItemActions>{device.revokedAt ? <Badge variant="outline">已撤销</Badge> : <DangerConfirmButton label="撤销" title={`撤销设备 ${device.name}？`} description="设备会立即失去同步权限，需要重新关联后才能继续使用。" onConfirm={() => void onRevoke(device.id)} />}</ItemActions>
           </Item>
         ))}</ItemGroup>
         {!devices.length ? <p className="text-sm text-muted-foreground">没有匹配的设备。</p> : null}
@@ -1414,11 +1399,26 @@ function AdminPagination({ total, offset, onPage }: { total: number, offset: num
   const pageSize = 25
   if (total <= pageSize) return null
   return (
-    <div className="mt-4 flex items-center justify-between gap-3 border-t pt-4">
+    <div className="mt-4 flex flex-col items-center gap-2 border-t pt-4">
       <span className="text-xs text-muted-foreground">第 {Math.floor(offset / pageSize) + 1} / {Math.ceil(total / pageSize)} 页 · 共 {total} 条</span>
-      <div className="flex gap-2"><Button size="sm" variant="outline" disabled={offset === 0} onClick={() => onPage(Math.max(0, offset - pageSize))}>上一页</Button><Button size="sm" variant="outline" disabled={offset + pageSize >= total} onClick={() => onPage(offset + pageSize)}>下一页</Button></div>
+      <Pagination><PaginationContent><PaginationItem><PaginationPrevious href="#" text="上一页" aria-disabled={offset === 0} onClick={(event) => { event.preventDefault(); if (offset > 0) onPage(Math.max(0, offset - pageSize)) }} /></PaginationItem><PaginationItem><PaginationNext href="#" text="下一页" aria-disabled={offset + pageSize >= total} onClick={(event) => { event.preventDefault(); if (offset + pageSize < total) onPage(offset + pageSize) }} /></PaginationItem></PaginationContent></Pagination>
     </div>
   )
+}
+
+function DangerConfirmButton({
+  label, title, description, disabled = false, busy = false, onConfirm,
+}: {
+  label: string
+  title: string
+  description: string
+  disabled?: boolean
+  busy?: boolean
+  onConfirm: () => void
+}) {
+  return <AlertDialog><AlertDialogTrigger render={<Button size="sm" variant="destructive" disabled={disabled} />}>
+    {busy ? <Spinner data-icon="inline-start" /> : <Trash2Icon data-icon="inline-start" />}{label}
+  </AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{title}</AlertDialogTitle><AlertDialogDescription>{description}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={onConfirm}>确认{label}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
 }
 
 async function downloadAdminExport(scope: "accounts" | "workspaces" | "devices" | "audit") {
@@ -1587,6 +1587,38 @@ function AuthCard({
 function redirectAfterAuth() {
   const next = new URLSearchParams(window.location.search).get("next")
   if (next?.startsWith("/") && !next.startsWith("//")) window.location.assign(next)
+}
+
+const adminSections = new Set<AdminSection>([
+  "overview", "workspaces", "devices", "connect", "security",
+  "instance", "operations", "admin", "experiments",
+])
+const adminOnlySections = new Set<AdminSection>(["instance", "operations", "admin", "experiments"])
+
+function readSectionFromUrl(): AdminSection {
+  if (typeof window === "undefined") return "overview"
+  const requested = new URLSearchParams(window.location.search).get("section")
+  if (requested === "services") return "experiments"
+  if (requested !== null && adminSections.has(requested as AdminSection)) {
+    return requested as AdminSection
+  }
+  // `/connect/` remains a compatibility entry point for device authorization,
+  // but an explicit section selected inside the portal must win on refresh.
+  return window.location.pathname.startsWith("/connect") ? "connect" : "overview"
+}
+
+function readUrlParam(name: string): string {
+  return typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(name) ?? ""
+}
+
+function readUrlOffset(name: string): number {
+  const value = Number(readUrlParam(name))
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+function setOptionalParam(url: URL, name: string, value: string): void {
+  if (value) url.searchParams.set(name, value)
+  else url.searchParams.delete(name)
 }
 
 function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {

@@ -4,7 +4,7 @@ import type { AppConfig } from '../config.js'
 import type { DatabaseContext } from '../database/client.js'
 import {
   blobs, blobUploads, bootstrapSessions, deviceAuthorizations, devicePairings,
-  stepUpGrants, supportDiagnosticGrants, syncV2BootstrapSessions, webSessions, workspaces,
+  stepUpGrants, supportDiagnosticGrants, syncBootstrapSessions, webSessions, workspaces,
 } from '../database/schema.js'
 import type { BlobStorage } from '../storage/blob-storage.js'
 import { BLOB_COMPLETION_LEASE_MS } from '../blobs/constants.js'
@@ -15,7 +15,7 @@ import type { DeletionLedgerStore } from '../compliance/deletion-ledger-store.js
 export interface MaintenanceResult {
   skipped: boolean
   bootstrapSessions: number
-  syncV2BootstrapSessions: number
+  syncBootstrapSessions: number
   deviceAuthorizations: number
   devicePairings: number
   webSessions: number
@@ -90,9 +90,9 @@ export class MaintenanceService {
     const removedBootstrapSessions = await this.database.db.delete(bootstrapSessions)
       .where(lt(bootstrapSessions.expiresAt, new Date()))
       .returning({ id: bootstrapSessions.id })
-    const removedSyncV2BootstrapSessions = await this.database.db.delete(syncV2BootstrapSessions)
-      .where(lt(syncV2BootstrapSessions.expiresAt, new Date()))
-      .returning({ id: syncV2BootstrapSessions.id })
+    const removedSyncBootstrapSessions = await this.database.db.delete(syncBootstrapSessions)
+      .where(lt(syncBootstrapSessions.expiresAt, new Date()))
+      .returning({ id: syncBootstrapSessions.id })
     const removedDeviceAuthorizations = await this.database.db.delete(deviceAuthorizations)
       .where(lt(deviceAuthorizations.expiresAt, new Date()))
       .returning({ id: deviceAuthorizations.id })
@@ -181,36 +181,36 @@ export class MaintenanceService {
           ) returning id`
         const removedVersions = await sql`
           delete from object_versions v where (v.workspace_id, v.object_id, v.revision) in (
-            select v2.workspace_id, v2.object_id, v2.revision
-            from object_versions v2
-            left join objects o on o.workspace_id = v2.workspace_id and o.object_id = v2.object_id
-            where v2.created_at < ${versionCutoff.toISOString()}::timestamptz
-              and (o.object_id is null or v2.revision <> o.current_revision)
+            select version_row.workspace_id, version_row.object_id, version_row.revision
+            from object_versions version_row
+            left join objects o on o.workspace_id = version_row.workspace_id and o.object_id = version_row.object_id
+            where version_row.created_at < ${versionCutoff.toISOString()}::timestamptz
+              and (o.object_id is null or version_row.revision <> o.current_revision)
               and not exists (
                 select 1 from changes c
-                where c.workspace_id = v2.workspace_id
-                  and c.object_id = v2.object_id
-                  and c.revision = v2.revision
+                where c.workspace_id = version_row.workspace_id
+                  and c.object_id = version_row.object_id
+                  and c.revision = version_row.revision
               )
               and not exists (
                 select 1 from bootstrap_sessions s
-                where s.workspace_id = v2.workspace_id
+                where s.workspace_id = version_row.workspace_id
                   and s.expires_at > now()
-                  and v2.sequence <= s.snapshot_sequence
+                  and version_row.sequence <= s.snapshot_sequence
               )
               and not exists (
-                select 1 from sync_v2_bootstrap_objects bo
-                join sync_v2_bootstrap_sessions bs on bs.id = bo.session_id
-                where bo.workspace_id = v2.workspace_id
-                  and bo.object_id = v2.object_id
-                  and bo.revision = v2.revision
+                select 1 from sync_bootstrap_objects bo
+                join sync_bootstrap_sessions bs on bs.id = bo.session_id
+                where bo.workspace_id = version_row.workspace_id
+                  and bo.object_id = version_row.object_id
+                  and bo.revision = version_row.revision
                   and bs.expires_at > now()
               )
               and not exists (
-                select 1 from sync_v2_resource_bindings rb
-                where rb.workspace_id = v2.workspace_id
-                  and rb.resource_object_id = v2.object_id
-                  and rb.resource_revision = v2.revision
+                select 1 from sync_resource_bindings rb
+                where rb.workspace_id = version_row.workspace_id
+                  and rb.resource_object_id = version_row.object_id
+                  and rb.resource_revision = version_row.revision
               )
             limit 5000
           ) returning revision`
@@ -252,7 +252,7 @@ export class MaintenanceService {
     return {
       skipped: false,
       bootstrapSessions: removedBootstrapSessions.length,
-      syncV2BootstrapSessions: removedSyncV2BootstrapSessions.length,
+      syncBootstrapSessions: removedSyncBootstrapSessions.length,
       deviceAuthorizations: removedDeviceAuthorizations.length,
       devicePairings: removedDevicePairings.length,
       webSessions: removedWebSessions.length,
@@ -654,7 +654,7 @@ function emptyMaintenanceResult(): MaintenanceResult {
   return {
     skipped: true,
     bootstrapSessions: 0,
-    syncV2BootstrapSessions: 0,
+    syncBootstrapSessions: 0,
     deviceAuthorizations: 0,
     devicePairings: 0,
     webSessions: 0,

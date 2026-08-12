@@ -244,8 +244,9 @@ export class WorkspaceService {
             where w.account_id = ${accountId} and w.deleted_at is null and b.state = 'ready') as blob_bytes,
           (select coalesce(max(w.latest_sequence), 0)::text from workspaces w
             where w.account_id = ${accountId} and w.deleted_at is null) as latest_sequence,
-          (select max(c.created_at) from changes c join workspaces w on w.id = c.workspace_id
-            where w.account_id = ${accountId} and w.deleted_at is null) as last_activity_at,
+          (select max(e.created_at) from sync_events e join workspaces w on w.id = e.workspace_id
+            where w.account_id = ${accountId} and w.deleted_at is null
+              and e.event_type in ('object.upserted', 'object.deleted')) as last_activity_at,
           (select case
               when count(*) = 0 then null
               when bool_and(exists(select 1 from workspace_key_envelopes e
@@ -279,16 +280,18 @@ export class WorkspaceService {
         device_name: string
         device_platform: string
       }>>`
-        select c.sequence::text as sequence, v.kind::text as kind,
-          c.change_type, c.created_at, d.id as device_id,
+        select e.sequence::text as sequence, v.kind::text as kind,
+          case when e.event_type = 'object.deleted' then 'delete' else 'upsert' end as change_type,
+          e.created_at, d.id as device_id,
           d.name as device_name, d.platform as device_platform
-        from changes c
-        join workspaces w on w.id = c.workspace_id
-        join object_versions v on v.workspace_id = c.workspace_id
-          and v.object_id = c.object_id and v.revision = c.revision
-        join devices d on d.id = c.source_device_id
+        from sync_events e
+        join workspaces w on w.id = e.workspace_id
+        join object_versions v on v.workspace_id = e.workspace_id
+          and v.object_id = e.object_id and v.sequence = e.sequence
+        join devices d on d.id = e.source_device_id
         where w.account_id = ${accountId} and w.deleted_at is null
-        order by c.created_at desc, c.sequence desc limit 30
+          and e.event_type in ('object.upserted', 'object.deleted')
+        order by e.created_at desc, e.sequence desc limit 30
       `,
     ])
     const summary = summaries[0]

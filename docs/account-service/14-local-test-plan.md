@@ -110,7 +110,7 @@ pnpm --filter @notegen/server restore -- preflight \
 | ID | 步骤 | 预期结果 |
 | --- | --- | --- |
 | T3.1 | 创建 deletion request；缺密码、缺 step-up、request-hash 不匹配及重复请求分别提交。 | 前三种拒绝；同幂等键同请求收敛，不同请求冲突。 |
-| T3.2 | deletion fence 写入后并发进行 Workspace/Blob/legacy/durable sync/support message 写入。 | 所有晚提交写入拒绝；不留下半写对象或 message。 |
+| T3.2 | deletion fence 写入后并发进行 Workspace/Blob/durable sync/support message 写入。 | 所有晚提交写入拒绝；不留下半写对象或 message。 |
 | T3.3 | 在冷静期取消删除；另建 legal hold 后尝试 purge/取消/释放 hold。 | 取消仅在允许状态生效；hold 阻断 purge；创建/释放需要独立 Staff 双权限和审计。 |
 | T3.4 | 用本地 ledger fixture 故意使 receipt 写入失败、重放 outbox、再恢复成功。 | case 不在 receipt delivered 前 completed；重放按幂等 key 收敛，无重复 receipt。 |
 | T3.5 | 客户创建 support case、诊断 grant、撤销；Staff 读取 grant，随后过期或账户删除。 | snapshot 仅允许 `sync-summary-v1`；最长七天；单 grant 读取需 `support.diagnostics` 并审计；撤销/过期/删除后密文擦除。 |

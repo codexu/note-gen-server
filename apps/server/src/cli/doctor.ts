@@ -250,16 +250,15 @@ function compareMigrationSet(expected: MigrationSet, applied: Array<{ hash: stri
     const next = expected.entries[applied.length]
     return { id: 'database_migrations', status: 'blocking', detail: `migration_required: ${applied.length}/${expected.entries.length} applied${next === undefined ? '' : `; next ${next.tag}`}` }
   }
-  if (applied.length > expected.entries.length) {
-    return { id: 'database_migrations', status: 'blocking', detail: `binary_too_old: database has ${applied.length} migration records; binary knows ${expected.entries.length}` }
-  }
-  for (const [index, actual] of applied.entries()) {
+  const compatibleTail = applied.slice(-expected.entries.length)
+  for (const [index, actual] of compatibleTail.entries()) {
     const entry = expected.entries[index]
     if (entry === undefined || actual.created_at !== entry.when || actual.hash !== entry.hash) {
-      return { id: 'database_migrations', status: 'blocking', detail: `schema_drift: migration record ${index + 1} does not match local ${entry?.tag ?? 'journal'}` }
+      return { id: 'database_migrations', status: 'blocking', detail: `schema_drift: migration tail record ${index + 1} does not match local ${entry?.tag ?? 'journal'}` }
     }
   }
-  return { id: 'database_migrations', status: 'ok', detail: `${applied.length} applied records match ordered local SQL hashes` }
+  const preserved = applied.length - expected.entries.length
+  return { id: 'database_migrations', status: 'ok', detail: `${expected.entries.length} current records match ordered local SQL hashes${preserved > 0 ? `; ${preserved} pre-squash records preserved` : ''}` }
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }

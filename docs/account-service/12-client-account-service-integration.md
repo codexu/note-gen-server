@@ -301,7 +301,7 @@ Restore metadata 至少包括 `restoredFromBackupId`、`backupEpoch`、`restored
 
 ### 14.3 本地持久化与 staging
 
-- `sync_v2_state` 按 instance/workspace 保存 syncEpoch；staging namespace 另含 target epoch、bootstrap cursor、恢复 phase、checksums。
+- `sync_state` 按 instance/workspace 保存 syncEpoch；staging namespace 另含 target epoch、bootstrap cursor、恢复 phase、checksums。
 - 每个恢复 generation 使用一个独立 root，内含 staged SQLite、Markdown/附件物化、journal 和 signed/checksummed generation manifest；cursor/epoch 只写 staged SQLite，不提前修改 live generation。每个 page 可重放，完成后依次 fsync 文件、SQLite/WAL、sealed generation manifest 和目录；sealed 只表示内容不可再改，不表示已经 live。
 - `activeGeneration` 是唯一提交事实，位于不随 generation 切换的 application-support control area。提交前停止 watcher、关闭旧/新 SQLite handle，并在 control journal 记录 prepared；随后只原子 replace 这一个 pointer并 fsync 其父目录，该 replace 本身就是 commit，不再写第二个“已提交”marker。所有 DB/Markdown/附件路径都通过该 pointer 解析，禁止分别切 DB pointer 和目录 marker。
 - 启动先验证 pointer 指向 sealed generation 的 manifest/checksums，再以只读方式打开 SQLite 完成 bootstrap validation；验证完成前 UI 编辑、filesystem watcher、Push 与任何写连接都保持 disabled。只有 validation 成功并把 control journal 置 `validated` 后，才重开可写 SQLite、启动 watcher/UI 并允许 Push。pointer 缺失、指向 unsealed/incomplete generation 或校验失败时，关闭新 handle、根据 control journal 原子回指 previousGeneration并保持 Push 停止；因为验证窗口从未接受编辑，不存在需要从失败 generation 回放的新本地修改。旧 generation 至少保留到该步骤完成后再清理。

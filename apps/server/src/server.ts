@@ -11,7 +11,6 @@ import { TokenService } from './auth/tokens.js'
 import { AuthService } from './auth/service.js'
 import { WorkspaceService } from './workspaces/service.js'
 import { PostgresChangeNotifier } from './sync/notifier.js'
-import { SyncService } from './sync/service.js'
 import type { BlobStorage } from './storage/blob-storage.js'
 import { S3BlobStorage } from './storage/s3-blob-storage.js'
 import { BlobService } from './blobs/service.js'
@@ -207,8 +206,6 @@ async function main(): Promise<void> {
     await notifier.initialize()
     const workspaces = new WorkspaceService(database, notifier,
       config.deploymentMode === 'hosted' ? usage : undefined, hardWorkspaceLimitResolver)
-    const sync = new SyncService(database, workspaces, notifier, () => config.maxObjectBytes,
-      config.deploymentMode === 'hosted' ? usage : undefined, hardUsageLimitResolver)
     const syncProtocol = new DurableSyncService(database, workspaces, notifier, () => config.maxObjectBytes,
       config.deploymentMode === 'hosted' ? usage : undefined, hardUsageLimitResolver, syncEpoch)
     const blobService = new BlobService(
@@ -234,7 +231,6 @@ async function main(): Promise<void> {
       tokens,
       auth,
       workspaces,
-      sync,
       syncProtocol,
       notifier,
       blobs: blobService,

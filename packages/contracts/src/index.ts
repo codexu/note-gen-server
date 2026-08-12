@@ -102,6 +102,151 @@ export interface AdminSystemStatusContract {
   checkedAt: string
 }
 
+export type AdminAttentionSeverityContract = "info" | "warning" | "blocking"
+
+export interface AdminAttentionContract {
+  code: string
+  severity: AdminAttentionSeverityContract
+  count: number
+  details: Record<string, string | number | boolean | null>
+}
+
+export interface AdminSummaryContract {
+  serverVersion: string
+  generatedAt: string
+  overview: AdminOverviewContract
+  system: AdminSystemStatusContract
+  operations: {
+    activeJobs: number
+    failedJobs: number
+    pendingMail: number
+    failedMail: number
+    maintenanceMode: string
+    latestBackupStatus: string | null
+    latestBackupAt: string | null
+    latestRestoreDrillStatus: string | null
+    latestRestoreDrillAt: string | null
+  }
+  attention: AdminAttentionContract[]
+}
+
+export type AdminCapabilityStatusContract =
+  | "available" | "disabled" | "unavailable" | "degraded"
+
+export interface AdminCapabilityContract {
+  id: string
+  lifecycle: "stable" | "experimental"
+  status: AdminCapabilityStatusContract
+  requestedBy: "enabled_override" | "disabled_override" | "default" | "lifecycle"
+  reasons: string[]
+  dependencies: Array<{ id: string; available: boolean }>
+}
+
+export interface AdminCapabilitiesContract {
+  deploymentMode: "self-hosted" | "hosted"
+  generatedAt: string
+  capabilities: AdminCapabilityContract[]
+}
+
+export interface AdminJobContract {
+  id: string
+  actorAccountId: string
+  type: string
+  status: string
+  progress: number
+  result: Record<string, unknown> | null
+  error: string | null
+  startedAt: string | null
+  finishedAt: string | null
+  createdAt: string
+}
+
+export interface AdminBackupContract {
+  id: string
+  jobId: string
+  filename: string
+  size: string | null
+  status: string
+  createdAt: string
+  completedAt: string | null
+}
+
+export interface AdminWebSessionContract {
+  id: string
+  accountId: string
+  accountLogin: string
+  expiresAt: string
+  lastSeenAt: string
+  lastIp: string | null
+  userAgent: string | null
+  createdAt: string
+}
+
+export interface AdminStorageReportContract {
+  checked: number
+  missing: string[]
+  orphaned: string[]
+  deleted?: number
+}
+
+export interface AdminInvitationContract {
+  id: string
+  tokenHint: string
+  expiresAt: string
+  revokedAt: string | null
+  maxUses: number
+  useCount: number
+  delivery: { status: string; errorCode: string | null } | null
+}
+
+export interface AdminMailStatusContract {
+  configured: boolean
+  health: string
+  queue: Record<string, number>
+}
+
+export interface AdminMailItemContract {
+  id: string
+  template: string
+  status: string
+  attempts: number
+  maxAttempts: number
+  errorCode: string | null
+  createdAt: string
+  nextAttemptAt: string
+}
+
+export interface RuntimeConfigurationContract {
+  serverName: string
+  maxObjectBytes: number
+  maxBlobBytes: number
+  changeRetentionDays: number
+  versionRetentionDays: number
+  tombstoneRetentionDays: number
+  mailDefaultLocale: "en" | "zh-CN"
+  pendingEmailVerificationDays: number
+  accountDeletionCoolingOffDays: number
+  accountDeletionRetentionDays: number
+  mailDriver: "disabled" | "smtp"
+  mailFromAddress: string
+  mailFromName: string
+  mailReplyTo: string
+  smtpHost: string
+  smtpPort: number
+  smtpTlsMode: "starttls-required" | "starttls" | "tls" | "none"
+  smtpUsername: string
+  smtpPasswordConfigured: boolean
+  smtpConnectTimeoutMs: number
+  smtpCommandTimeoutMs: number
+  smtpTlsRejectUnauthorized: boolean
+}
+
+export interface RuntimeConfigurationResponseContract {
+  editable: boolean
+  revision: string
+  runtimeConfiguration: RuntimeConfigurationContract | null
+}
+
 export interface DeviceContract {
   id: string
   name: string
@@ -207,8 +352,10 @@ export interface ApiErrorContract {
 export interface ServerCapabilitiesContract {
   service: "note-gen-server"
   instanceId: string
+  syncEpoch: string
   serverName: string
   serverVersion: string
+  serverTime: string
   publicBaseUrl: string
   protocol: { minimum: 1, maximum: 1 }
   features: {
@@ -218,6 +365,16 @@ export interface ServerCapabilitiesContract {
     [key: string]: boolean
   }
   registrationMode: "closed" | "open"
+  capabilitySchema: 2
+  instanceCapabilityRevision: string
+  registrationPolicyRevision: string
+  requiredSyncFeatures: string[]
+  registration: {
+    policy: "bootstrap" | "disabled" | "invitation" | "public"
+    methods: string[]
+    emailVerificationRequired: boolean
+  }
+  instanceCapabilities: Record<string, boolean>
   deploymentMode: "self-hosted" | "hosted"
   web: {
     accountUrl: string

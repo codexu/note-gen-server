@@ -3,10 +3,11 @@
 import type { ReactNode } from "react"
 import {
   DatabaseIcon,
+  FlaskConicalIcon,
+  GaugeIcon,
   LayoutDashboardIcon,
   LaptopIcon,
   KeyRoundIcon,
-  LifeBuoyIcon,
   MailIcon,
   LogOutIcon,
   RefreshCwIcon,
@@ -47,17 +48,18 @@ import { Spinner } from "@/components/ui/spinner"
 import { ThemeToggle } from "@/components/theme-toggle"
 import type { Account, ServerCapabilities } from "@/lib/api"
 
-export type AdminSection = "overview" | "services" | "workspaces" | "devices" | "connect" | "security" | "operations" | "admin"
+export type AdminSection = "overview" | "workspaces" | "devices" | "connect" | "security" | "instance" | "operations" | "admin" | "experiments"
 
 const sectionDetails: Record<AdminSection, { title: string; description: string }> = {
   overview: { title: "仪表盘", description: "查看同步服务、存储和最近活动。" },
-  services: { title: "账号服务", description: "管理权益、政策、数据请求与内部测试支持工单。" },
   workspaces: { title: "工作区管理", description: "检查默认与历史工作区，并清理测试数据。" },
   devices: { title: "设备管理", description: "查看关联设备并撤销不再使用的会话。" },
   connect: { title: "关联新设备", description: "输入客户端验证码或扫描二维码，安全地关联新设备。" },
   security: { title: "账户安全", description: "修改账号密码并更新登录凭据。" },
-  operations: { title: "实例运维", description: "管理自托管邀请和 SMTP 内部测试状态。" },
-  admin: { title: "系统管理", description: "管理服务器账号、全局数据概览和后台操作审计。" },
+  instance: { title: "实例状态", description: "查看服务健康、存储、任务以及需要处理的事项。" },
+  operations: { title: "访问与配置", description: "管理注册、邀请、运行参数和邮件投递。" },
+  admin: { title: "账号与数据", description: "管理服务器账号、全局同步数据和操作审计。" },
+  experiments: { title: "实验功能", description: "检查尚未稳定开放的能力、状态和启用条件。" },
 }
 
 export function AdminShell({
@@ -84,16 +86,43 @@ export function AdminShell({
   children: ReactNode
 }) {
   const details = sectionDetails[section]
-  const navigation = [
+  type NavigationItem = { section: AdminSection; label: string; icon: typeof LayoutDashboardIcon; count?: number }
+  const personalNavigation: NavigationItem[] = [
     { section: "overview" as const, label: "仪表盘", icon: LayoutDashboardIcon },
-    { section: "services" as const, label: "账号服务", icon: LifeBuoyIcon },
-    { section: "workspaces" as const, label: "工作区管理", icon: DatabaseIcon, count: workspaceCount },
-    { section: "devices" as const, label: "设备管理", icon: LaptopIcon, count: deviceCount },
     { section: "connect" as const, label: "关联新设备", icon: LaptopIcon },
+    { section: "devices" as const, label: "设备管理", icon: LaptopIcon, count: deviceCount },
+    { section: "workspaces" as const, label: "工作区管理", icon: DatabaseIcon, count: workspaceCount },
     { section: "security" as const, label: "账户安全", icon: KeyRoundIcon },
-    ...(account.isAdmin ? [{ section: "operations" as const, label: "实例运维", icon: MailIcon }] : []),
-    ...(account.isAdmin ? [{ section: "admin" as const, label: "系统管理", icon: UsersIcon }] : []),
   ]
+  const instanceNavigation: NavigationItem[] = account.isAdmin ? [
+    { section: "instance" as const, label: "实例状态", icon: GaugeIcon },
+    { section: "admin" as const, label: "账号与数据", icon: UsersIcon },
+    { section: "operations" as const, label: "访问与配置", icon: MailIcon },
+  ] : []
+  const experimentNavigation: NavigationItem[] = account.isAdmin ? [
+    { section: "experiments" as const, label: "实验功能", icon: FlaskConicalIcon },
+  ] : []
+
+  function renderNavigation(items: NavigationItem[]) {
+    return items.map((item) => {
+      const Icon = item.icon
+      return (
+        <SidebarMenuItem key={item.section}>
+          <SidebarMenuButton
+            isActive={section === item.section}
+            tooltip={item.label}
+            onClick={() => onSectionChange(item.section)}
+          >
+            <Icon />
+            <span>{item.label}</span>
+          </SidebarMenuButton>
+          {typeof item.count === "number" ? (
+            <SidebarMenuBadge>{item.count}</SidebarMenuBadge>
+          ) : null}
+        </SidebarMenuItem>
+      )
+    })
+  }
 
   return (
     <SidebarProvider>
@@ -115,30 +144,13 @@ export function AdminShell({
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
-            <SidebarGroupLabel>管理</SidebarGroupLabel>
+            <SidebarGroupLabel>我的同步</SidebarGroupLabel>
             <SidebarGroupContent>
-              <SidebarMenu>
-                {navigation.map((item) => {
-                  const Icon = item.icon
-                  return (
-                    <SidebarMenuItem key={item.section}>
-                      <SidebarMenuButton
-                        isActive={section === item.section}
-                        tooltip={item.label}
-                        onClick={() => onSectionChange(item.section)}
-                      >
-                        <Icon />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                      {typeof item.count === "number" ? (
-                        <SidebarMenuBadge>{item.count}</SidebarMenuBadge>
-                      ) : null}
-                    </SidebarMenuItem>
-                  )
-                })}
-              </SidebarMenu>
+              <SidebarMenu>{renderNavigation(personalNavigation)}</SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
+          {account.isAdmin ? <SidebarGroup><SidebarGroupLabel>服务器管理</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{renderNavigation(instanceNavigation)}</SidebarMenu></SidebarGroupContent></SidebarGroup> : null}
+          {account.isAdmin ? <SidebarGroup><SidebarGroupLabel>实验功能</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{renderNavigation(experimentNavigation)}</SidebarMenu></SidebarGroupContent></SidebarGroup> : null}
         </SidebarContent>
         <SidebarFooter>
           <SidebarMenu>

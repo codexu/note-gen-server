@@ -573,12 +573,20 @@ export class AuthService {
         eq(devices.id, deviceId), eq(devices.accountId, accountId), isNull(devices.revokedAt),
       )).limit(1)
       if (device === undefined) throw new ApiError({ code: 'device_revoked', message: 'Device session has been revoked', statusCode: 401 })
+      const issuedAt = new Date()
+      // Re-authorizing the same physical device replaces its previous login
+      // instead of accumulating several independently usable refresh tokens.
+      await tx.update(refreshTokens).set({ revokedAt: issuedAt }).where(and(
+        eq(refreshTokens.accountId, accountId),
+        eq(refreshTokens.deviceId, deviceId),
+        isNull(refreshTokens.revokedAt),
+      ))
       await tx.insert(refreshTokens).values({
         accountId,
         deviceId,
         tokenHash: this.tokens.hashRefreshToken(refreshToken),
-        expiresAt: addDays(new Date(), 30),
-        issuedInstanceAuthEpoch: instanceAuth.epoch, issuedAt: new Date(),
+        expiresAt: addDays(issuedAt, 30),
+        issuedInstanceAuthEpoch: instanceAuth.epoch, issuedAt,
       })
       return {
         accountId,

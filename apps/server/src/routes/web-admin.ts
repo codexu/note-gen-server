@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import { Type } from '@sinclair/typebox'
 import type { AdminService } from '../admin/service.js'
 import type { AppConfig } from '../config.js'
+import { capabilityIds, type CapabilityRegistry } from '../deployment/capabilities.js'
 import type { WebSessionService } from '../auth/web-session-service.js'
 import type { WebStepUpService } from '../step-up/service.js'
 import { NullableTimestamp, Timestamp } from './api-schemas.js'
@@ -20,6 +21,29 @@ const AdminOverviewResponse = Type.Object({
   deletedObjectCount: Type.Integer(),
   activeDeviceCount: Type.Integer(),
   auditCount: Type.Integer(),
+})
+const AdminSystemStatusResponse = Type.Object({
+  status: Type.Literal('ok'), databaseLatencyMs: Type.Number(), uptimeSeconds: Type.Integer(),
+  memoryRssBytes: Type.String(), heapUsedBytes: Type.String(), databaseBytes: Type.String(),
+  blobCount: Type.Integer(), blobBytes: Type.String(), objectBytes: Type.String(),
+  versionCount: Type.Integer(), changeCount: Type.Integer(), checkedAt: Timestamp,
+})
+const AdminSummaryResponse = Type.Object({
+  serverVersion: Type.String(), generatedAt: Timestamp,
+  overview: AdminOverviewResponse,
+  system: AdminSystemStatusResponse,
+  operations: Type.Object({
+    activeJobs: Type.Integer(), failedJobs: Type.Integer(), pendingMail: Type.Integer(), failedMail: Type.Integer(),
+    maintenanceMode: Type.String(), latestBackupStatus: Type.Union([Type.String(), Type.Null()]),
+    latestBackupAt: NullableTimestamp, latestRestoreDrillStatus: Type.Union([Type.String(), Type.Null()]),
+    latestRestoreDrillAt: NullableTimestamp,
+  }),
+  attention: Type.Array(Type.Object({
+    code: Type.String(), severity: Type.Union([Type.Literal('info'), Type.Literal('warning'), Type.Literal('blocking')]),
+    count: Type.Integer(), details: Type.Record(Type.String(), Type.Union([
+      Type.String(), Type.Number(), Type.Boolean(), Type.Null(),
+    ])),
+  })),
 })
 
 const AdminAccount = Type.Object({
@@ -125,8 +149,63 @@ export function createWebAdminRoutes(
   admin: AdminService,
   webSessions: WebSessionService,
   stepUps: WebStepUpService,
+  capabilities: CapabilityRegistry | undefined,
+  serverVersion: string,
 ): FastifyPluginAsyncTypebox {
   return async function webAdminRoutes(app) {
+    app.get('/v1/web/admin/summary', {
+      schema: { response: { 200: AdminSummaryResponse } },
+    }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      return admin.getSummary(session.accountId, serverVersion)
+    })
+
+    app.get('/v1/web/admin/capabilities', {
+      schema: { response: { 200: Type.Object({
+        deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
+        generatedAt: Timestamp,
+        capabilities: Type.Array(Type.Object({
+          id: Type.String(), lifecycle: Type.Union([Type.Literal('stable'), Type.Literal('experimental')]),
+          status: Type.Union([Type.Literal('available'), Type.Literal('disabled'), Type.Literal('unavailable'), Type.Literal('degraded')]),
+          requestedBy: Type.Union([Type.Literal('enabled_override'), Type.Literal('disabled_override'), Type.Literal('default'), Type.Literal('lifecycle')]),
+          reasons: Type.Array(Type.String()),
+          dependencies: Type.Array(Type.Object({ id: Type.String(), available: Type.Boolean() })),
+        })),
+      }) } },
+    }, async (request) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      await admin.assertAdmin(session.accountId)
+      const experimental = new Set([
+        'identity.email', 'identity.emailVerification', 'identity.passwordReset', 'risk.advanced',
+        'usage.enforcement', 'billing.subscription', 'compliance.requests', 'support.cases',
+        'operations.unifiedBackup', 'operations.upgradeAssistant', 'operations.preserveRestore',
+      ])
+      const rows = capabilityIds.map((id) => {
+        const explanation = capabilities?.explain(id) ?? {
+          id, available: false, deploymentMode: _config.deploymentMode, requestedBy: 'default' as const,
+          reasons: ['capability_registry_unavailable'], dependencies: [],
+        }
+        const status = explanation.available
+          ? 'available' as const
+          : explanation.reasons.includes('unsupported_deployment_mode') || explanation.reasons.includes('restore_safety_gated')
+            ? 'unavailable' as const
+            : 'disabled' as const
+        return {
+          id,
+          lifecycle: experimental.has(id) ? 'experimental' as const : 'stable' as const,
+          status,
+          requestedBy: explanation.requestedBy,
+          reasons: explanation.reasons,
+          dependencies: explanation.dependencies,
+        }
+      })
+      return {
+        deploymentMode: capabilities?.explain(capabilityIds[0]).deploymentMode ?? _config.deploymentMode,
+        generatedAt: new Date(),
+        capabilities: rows,
+      }
+    })
+
     app.get('/v1/web/admin/overview', {
       schema: { response: { 200: AdminOverviewResponse } },
     }, async (request) => {
@@ -177,12 +256,7 @@ export function createWebAdminRoutes(
       })
     })
 
-    app.get('/v1/web/admin/status', { schema: { response: { 200: Type.Object({
-      status: Type.Literal('ok'), databaseLatencyMs: Type.Number(), uptimeSeconds: Type.Integer(),
-      memoryRssBytes: Type.String(), heapUsedBytes: Type.String(), databaseBytes: Type.String(),
-      blobCount: Type.Integer(), blobBytes: Type.String(), objectBytes: Type.String(),
-      versionCount: Type.Integer(), changeCount: Type.Integer(), checkedAt: Timestamp,
-    }) } } }, async (request) => {
+    app.get('/v1/web/admin/status', { schema: { response: { 200: AdminSystemStatusResponse } } }, async (request) => {
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       return admin.getSystemStatus(session.accountId)
     })
