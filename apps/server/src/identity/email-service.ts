@@ -239,7 +239,7 @@ export class EmailIdentityService {
       to: email,
       template,
       locale: this.config.mailDefaultLocale,
-      variables: { actionUrl: `${this.config.publicBaseUrl.replace(/\/$/, '')}/account/${purpose === 'verify_email' ? 'verify-email' : 'reset-password'}?token=${encodeURIComponent(issued.token)}` },
+      variables: { actionUrl: `${this.config.webPublicBaseUrl.replace(/\/$/, '')}/account/${purpose === 'verify_email' ? 'verify-email' : 'reset-password'}/?token=${encodeURIComponent(issued.token)}` },
     }, issued.expiresAt)
     await this.mailOutbox.enqueueInTransaction(tx, {
       template,

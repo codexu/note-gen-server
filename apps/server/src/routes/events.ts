@@ -4,14 +4,12 @@ import type { TokenService } from '../auth/tokens.js'
 import type { AuthService } from '../auth/service.js'
 import type { ChangeNotifier } from '../sync/types.js'
 import type { WorkspaceService } from '../workspaces/service.js'
-import type { MaintenanceCoordinator } from '../maintenance/coordinator.js'
-import { ApiError } from '../errors.js'
 
 interface AuthenticateMessage {
   type: 'authenticate'
   accessToken: string
   workspaceIds: string[]
-  expectedSyncEpoch?: string
+  expectedSyncEpoch: string
 }
 
 interface PresenceUpdateMessage {
@@ -21,22 +19,13 @@ interface PresenceUpdateMessage {
   anchor: number
   head: number
   label: string
+  canvas: {
+    nodes: Array<{ id: string; x: number; y: number }>
+  } | null
 }
 
 interface PresenceClearMessage {
   type: 'presence.clear'
-}
-
-interface DocumentUpdateMessage {
-  type: 'document.update'
-  workspaceId: string
-  documentId: string
-  objectId: string
-  kind: string
-  updateId: string
-  keyVersion: number
-  ciphertext: string
-  ciphertextHash: string
 }
 
 interface DocumentSubscriptionMessage {
@@ -46,7 +35,8 @@ interface DocumentSubscriptionMessage {
 }
 
 type RealtimeMessage = PresenceUpdateMessage | PresenceClearMessage
-  | DocumentUpdateMessage | DocumentSubscriptionMessage
+  | DocumentSubscriptionMessage
+type PresenceMessage = PresenceUpdateMessage | PresenceClearMessage
 
 interface PresenceState extends PresenceUpdateMessage {
   deviceId: string
@@ -58,14 +48,23 @@ interface PresenceConnection {
   workspaceIds: Set<string>
   documentIds: Set<string>
   presence: PresenceState | null
+  accountId: string
+  credentialEpoch: string
+  instanceAuthEpoch?: string
+  issuedAt?: number
+  rateTokens: number
+  rateUpdatedAt: number
 }
+
+const REALTIME_BURST_BYTES = 4 * 1024 * 1024
+const REALTIME_BYTES_PER_SECOND = 1024 * 1024
+const MAX_SOCKET_BUFFERED_BYTES = 8 * 1024 * 1024
 
 export function createEventRoutes(
   tokens: TokenService,
   auth: AuthService,
   workspaces: WorkspaceService,
   notifier: ChangeNotifier,
-  maintenance?: MaintenanceCoordinator,
   syncEpoch?: string,
 ): FastifyPluginAsyncTypebox {
   const presenceRooms = new Map<string, Set<PresenceConnection>>()
@@ -114,26 +113,23 @@ export function createEventRoutes(
         if (authenticated) {
           if (!presenceConnection) return
           try {
+            consumeRealtimeBudget(presenceConnection, Buffer.byteLength(raw.toString()))
             const message = parseRealtimeMessage(raw)
-            if (message.type === 'document.update') {
-              await assertRealtimeMutationAllowed(maintenance, currentSocket)
-              relayDocumentUpdate(message, presenceConnection, presenceRooms)
-            } else if (message.type === 'document.subscribe'
+            if (message.type === 'document.subscribe'
               || message.type === 'document.unsubscribe') {
               handleDocumentSubscription(message, presenceConnection, presenceRooms)
             } else {
               handlePresenceMessage(message, presenceConnection, presenceRooms)
             }
-          } catch (error) {
-            if (error instanceof ApiError && error.code === 'server_maintenance') return
+          } catch {
             currentSocket.close(1008, 'Invalid realtime message')
           }
           return
         }
         try {
           const message = parseAuthenticateMessage(raw)
-          if (message.expectedSyncEpoch !== undefined && syncEpoch !== undefined && message.expectedSyncEpoch !== syncEpoch) {
-            currentSocket.send(JSON.stringify({ type: 'sync.epoch-changed', code: 'sync_epoch_changed', retryable: false }))
+          if (syncEpoch !== undefined && message.expectedSyncEpoch !== syncEpoch) {
+            sendWithBackpressure(currentSocket, JSON.stringify({ type: 'sync.epoch-changed', code: 'sync_epoch_changed', retryable: false }))
             currentSocket.close(1008, 'Sync epoch changed')
             return
           }
@@ -141,15 +137,27 @@ export function createEventRoutes(
           await auth.assertDeviceActive(claims.accountId, claims.deviceId, claims.credentialEpoch, claims.instanceAuthEpoch, claims.issuedAt)
           const uniqueWorkspaceIds = [...new Set(message.workspaceIds)]
           if (uniqueWorkspaceIds.length > 100) throw new Error('Too many workspace subscriptions')
-          await Promise.all(uniqueWorkspaceIds.map((id) => workspaces.assertOwned(claims.accountId, id)))
+          await Promise.all(uniqueWorkspaceIds.map((id) => (
+            workspaces.assertCapability(claims.accountId, id, 'content.read')
+          )))
           unsubscribe.push(notifier.subscribeAccount(claims.accountId, () => {
             if (currentSocket.readyState === currentSocket.OPEN) {
-              currentSocket.send(JSON.stringify({ type: 'account.workspaces-changed' }))
+              sendWithBackpressure(currentSocket, JSON.stringify({ type: 'account.workspaces-changed' }))
             }
           }))
           for (const workspaceId of uniqueWorkspaceIds) {
             unsubscribe.push(notifier.subscribeWorkspace(workspaceId, (notice) => {
-              if (currentSocket.readyState === currentSocket.OPEN) currentSocket.send(JSON.stringify(notice))
+              if (currentSocket.readyState === currentSocket.OPEN) sendWithBackpressure(currentSocket, JSON.stringify(notice))
+              if (notice.type === 'workspace.members-changed') {
+                void workspaces.assertCapability(claims.accountId, workspaceId, 'content.read').catch(() => {
+                  if (currentSocket.readyState === currentSocket.OPEN) {
+                    sendWithBackpressure(currentSocket, JSON.stringify({
+                      type: 'workspace.access-revoked', workspaceId,
+                    }))
+                    currentSocket.close(1008, 'Workspace access revoked')
+                  }
+                })
+              }
             }))
           }
           authenticated = true
@@ -159,6 +167,12 @@ export function createEventRoutes(
             workspaceIds: new Set(uniqueWorkspaceIds),
             documentIds: new Set(),
             presence: null,
+            accountId: claims.accountId,
+            credentialEpoch: claims.credentialEpoch,
+            instanceAuthEpoch: claims.instanceAuthEpoch,
+            issuedAt: claims.issuedAt,
+            rateTokens: REALTIME_BURST_BYTES,
+            rateUpdatedAt: Date.now(),
           }
           for (const workspaceId of uniqueWorkspaceIds) {
             const room = presenceRooms.get(workspaceId) ?? new Set<PresenceConnection>()
@@ -169,7 +183,7 @@ export function createEventRoutes(
           sessionTimeout = setTimeout(() => {
             currentSocket.close(1008, 'Access token expired')
           }, Math.max(1, claims.expiresAt * 1_000 - Date.now()))
-          currentSocket.send(JSON.stringify({
+          sendWithBackpressure(currentSocket, JSON.stringify({
             type: 'authenticated',
             workspaceIds: uniqueWorkspaceIds,
             accessTokenExpiresAt: new Date(claims.expiresAt * 1_000).toISOString(),
@@ -182,21 +196,6 @@ export function createEventRoutes(
   }
 }
 
-async function assertRealtimeMutationAllowed(maintenance: MaintenanceCoordinator | undefined, socket: WebSocket): Promise<void> {
-  if (maintenance === undefined) return
-  try {
-    await maintenance.requireMutationAllowed('/v1/sync/events')
-  } catch (error) {
-    if (error instanceof ApiError && error.code === 'server_maintenance') {
-      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({
-        type: 'server.maintenance', code: error.code, retryable: error.retryable, details: error.details,
-      }))
-      socket.close(1013, 'Server maintenance')
-    }
-    throw error
-  }
-}
-
 function parseAuthenticateMessage(raw: RawData): AuthenticateMessage {
   const value: unknown = JSON.parse(raw.toString())
   if (typeof value !== 'object' || value === null) throw new Error('Message must be an object')
@@ -204,16 +203,15 @@ function parseAuthenticateMessage(raw: RawData): AuthenticateMessage {
   if (candidate.type !== 'authenticate' || typeof candidate.accessToken !== 'string'
     || !Array.isArray(candidate.workspaceIds)
     || !candidate.workspaceIds.every((id) => typeof id === 'string')
-    || (candidate.expectedSyncEpoch !== undefined
-      && (typeof candidate.expectedSyncEpoch !== 'string'
-        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.expectedSyncEpoch)))) {
+    || typeof candidate.expectedSyncEpoch !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.expectedSyncEpoch)) {
     throw new Error('Authentication message is invalid')
   }
   return {
     type: 'authenticate',
     accessToken: candidate.accessToken,
     workspaceIds: candidate.workspaceIds,
-    ...(candidate.expectedSyncEpoch === undefined ? {} : { expectedSyncEpoch: candidate.expectedSyncEpoch as string }),
+    expectedSyncEpoch: candidate.expectedSyncEpoch,
   }
 }
 
@@ -232,31 +230,6 @@ function parseRealtimeMessage(raw: RawData): RealtimeMessage {
       documentId: candidate.documentId.slice(0, 200),
     }
   }
-  if (candidate.type === 'document.update') {
-    if (typeof candidate.workspaceId !== 'string'
-      || typeof candidate.documentId !== 'string'
-      || typeof candidate.objectId !== 'string'
-      || typeof candidate.kind !== 'string'
-      || typeof candidate.updateId !== 'string'
-      || typeof candidate.keyVersion !== 'number' || !Number.isSafeInteger(candidate.keyVersion)
-      || candidate.keyVersion < 1
-      || typeof candidate.ciphertext !== 'string'
-      || typeof candidate.ciphertextHash !== 'string'
-      || candidate.ciphertext.length > 4 * 1024 * 1024) {
-      throw new Error('Document update message is invalid')
-    }
-    return {
-      type: 'document.update',
-      workspaceId: candidate.workspaceId,
-      documentId: candidate.documentId.slice(0, 200),
-      objectId: candidate.objectId.slice(0, 200),
-      kind: candidate.kind.slice(0, 40),
-      updateId: candidate.updateId.slice(0, 200),
-      keyVersion: candidate.keyVersion,
-      ciphertext: candidate.ciphertext,
-      ciphertextHash: candidate.ciphertextHash.slice(0, 200),
-    }
-  }
   if (candidate.type !== 'presence.update'
     || typeof candidate.workspaceId !== 'string'
     || typeof candidate.documentId !== 'string'
@@ -273,6 +246,26 @@ function parseRealtimeMessage(raw: RawData): RealtimeMessage {
     anchor: candidate.anchor,
     head: candidate.head,
     label: candidate.label.trim().slice(0, 40) || '其他设备',
+    canvas: parseCanvasPresence(candidate.canvas),
+  }
+}
+
+function parseCanvasPresence(value: unknown): PresenceUpdateMessage['canvas'] {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'object' || value === null) throw new Error('Canvas presence is invalid')
+  const nodes = (value as Record<string, unknown>).nodes
+  if (!Array.isArray(nodes) || nodes.length > 100) throw new Error('Canvas presence is invalid')
+  return {
+    nodes: nodes.map((node) => {
+      if (typeof node !== 'object' || node === null) throw new Error('Canvas presence node is invalid')
+      const candidate = node as Record<string, unknown>
+      if (typeof candidate.id !== 'string' || candidate.id.length === 0 || candidate.id.length > 200
+        || typeof candidate.x !== 'number' || !Number.isFinite(candidate.x)
+        || typeof candidate.y !== 'number' || !Number.isFinite(candidate.y)) {
+        throw new Error('Canvas presence node is invalid')
+      }
+      return { id: candidate.id, x: candidate.x, y: candidate.y }
+    }),
   }
 }
 
@@ -298,31 +291,28 @@ function handleDocumentSubscription(
   for (const peer of rooms.get(message.workspaceId) ?? []) {
     if (peer !== connection && peer.documentIds.has(key)
       && peer.socket.readyState === peer.socket.OPEN) {
-      peer.socket.send(payload)
+      sendWithBackpressure(peer.socket, payload)
     }
   }
 }
 
-function relayDocumentUpdate(
-  message: DocumentUpdateMessage,
-  connection: PresenceConnection,
-  rooms: Map<string, Set<PresenceConnection>>,
-): void {
-  if (!connection.workspaceIds.has(message.workspaceId)) throw new Error('Workspace is not subscribed')
-  const room = rooms.get(message.workspaceId)
-  if (!room) return
-  const payload = JSON.stringify({
-    ...message,
-    type: 'document.updated.realtime',
-    deviceId: connection.deviceId,
-  })
-  for (const peer of room) {
-    if (peer !== connection
-      && peer.documentIds.has(`${message.workspaceId}\0${message.documentId}`)
-      && peer.socket.readyState === peer.socket.OPEN) {
-      peer.socket.send(payload)
-    }
+function consumeRealtimeBudget(connection: PresenceConnection, bytes: number): void {
+  const now = Date.now()
+  const replenished = Math.min(
+    REALTIME_BURST_BYTES,
+    connection.rateTokens + ((now - connection.rateUpdatedAt) / 1_000) * REALTIME_BYTES_PER_SECOND,
+  )
+  connection.rateUpdatedAt = now
+  connection.rateTokens = replenished - bytes
+  if (connection.rateTokens < 0) throw new Error('Realtime rate limit exceeded')
+}
+
+function sendWithBackpressure(socket: WebSocket, payload: string): void {
+  if (socket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) {
+    socket.close(1013, 'Realtime consumer is too slow')
+    return
   }
+  socket.send(payload)
 }
 
 function handlePresenceMessage(
@@ -375,13 +365,13 @@ function clearPresence(
     deviceId: connection.deviceId,
   })
   for (const peer of room) {
-    if (peer !== connection && peer.socket.readyState === peer.socket.OPEN) peer.socket.send(payload)
+    if (peer !== connection && peer.socket.readyState === peer.socket.OPEN) sendWithBackpressure(peer.socket, payload)
   }
 }
 
 function sendPresence(presence: PresenceState, socket: WebSocket): void {
   if (socket.readyState !== socket.OPEN) return
-  socket.send(JSON.stringify({
+  sendWithBackpressure(socket, JSON.stringify({
     type: 'presence.updated',
     workspaceId: presence.workspaceId,
     documentId: presence.documentId,
@@ -389,5 +379,6 @@ function sendPresence(presence: PresenceState, socket: WebSocket): void {
     label: presence.label,
     anchor: presence.anchor,
     head: presence.head,
+    canvas: presence.canvas,
   }))
 }

@@ -18,7 +18,7 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
     const stored = window.localStorage.getItem("notegen-locale")
     const nextLocale = stored === "en" || stored === "zh-CN"
       ? stored
-      : window.navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en"
+      : "zh-CN"
     setLocaleState(nextLocale)
     document.documentElement.lang = nextLocale
   }, [])

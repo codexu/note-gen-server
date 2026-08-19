@@ -19,13 +19,16 @@ integration('NoteGen sync protocol durability', () => {
     const workspace = await api<{ id: string }>(baseUrl, '/v1/workspaces', {
       method: 'POST', expectedStatus: 201, headers: authorization,
       body: {
-        nameCiphertext: 'sync-test-workspace', keyVersion: 1,
-        envelopes: [{ type: 'passphrase', recipientId: null, wrappedKey: 'test-envelope',
-          kdfSalt: 'test-salt', kdfParams: { memorySize: 65536, iterations: 3, parallelism: 1 } },
-        { type: 'recovery', recipientId: null, wrappedKey: 'test-recovery-envelope',
-          kdfSalt: null, kdfParams: null }],
+        nameCiphertext: 'sync-test-workspace',
+        managedKey: Buffer.alloc(32, 1).toString('base64url'),
       },
     })
+    const protocolSession = await api<{ syncEpoch: string }>(
+      baseUrl,
+      `/v1/workspaces/${workspace.id}/sync/session?protocolVersion=1&cursor=0`,
+      { headers: authorization },
+    )
+    syncEpochs.set(workspace.id, protocolSession.syncEpoch)
     const objectId = randomUUID()
     const objectEnvelope = encryptedTestEnvelope('object-v1')
     const command = {
@@ -55,7 +58,7 @@ integration('NoteGen sync protocol durability', () => {
     const deleteResult = await syncCommands(baseUrl, workspace.id, authorization, [deletion])
     expect(deleteResult[0]).toMatchObject({ status: 'conflict', code: 'delete_edit_conflict', conflictId })
     const events = await api<{ events: Array<{ type: string }> }>(
-      baseUrl, `/v1/workspaces/${workspace.id}/sync/events?after=0`, { headers: authorization },
+      baseUrl, `/v1/workspaces/${workspace.id}/sync/events?after=0&expectedSyncEpoch=${syncEpoch(workspace.id)}`, { headers: authorization },
     )
     expect(events.events.map(event => event.type)).toContain('conflict.created')
 
@@ -69,7 +72,7 @@ integration('NoteGen sync protocol durability', () => {
     const firstBootstrap = await api<{
       bootstrapId: string, snapshotSequence: string, objects: Array<{ objectId: string }>,
       nextObjectId: string | null, hasMore: boolean,
-    }>(baseUrl, `/v1/workspaces/${workspace.id}/sync/bootstrap?limit=1`, { headers: authorization })
+    }>(baseUrl, `/v1/workspaces/${workspace.id}/sync/bootstrap?limit=1&expectedSyncEpoch=${syncEpoch(workspace.id)}`, { headers: authorization })
     expect(firstBootstrap.hasMore).toBe(true)
     const laterObjectId = randomUUID()
     const laterEnvelope = encryptedTestEnvelope('created-after-bootstrap')
@@ -84,7 +87,7 @@ integration('NoteGen sync protocol durability', () => {
       const page = await api<{
         bootstrapId: string, snapshotSequence: string, objects: Array<{ objectId: string }>,
         nextObjectId: string | null, hasMore: boolean,
-      }>(baseUrl, `/v1/workspaces/${workspace.id}/sync/bootstrap?limit=1&bootstrapId=${firstBootstrap.bootstrapId}&afterObjectId=${afterObjectId}`,
+      }>(baseUrl, `/v1/workspaces/${workspace.id}/sync/bootstrap?limit=1&expectedSyncEpoch=${syncEpoch(workspace.id)}&bootstrapId=${firstBootstrap.bootstrapId}&afterObjectId=${afterObjectId}`,
       { headers: authorization })
       expect(page.bootstrapId).toBe(firstBootstrap.bootstrapId)
       expect(page.snapshotSequence).toBe(firstBootstrap.snapshotSequence)
@@ -135,10 +138,64 @@ integration('NoteGen sync protocol durability', () => {
       status: 'conflict', code: 'delete_edit_conflict', conflictId: subtreeConflictId,
     })
     const afterSubtreeConflict = await api<{ objects: Array<{ objectId: string, deletedAt: string | null }> }>(
-      baseUrl, `/v1/workspaces/${workspace.id}/sync/bootstrap?limit=1000`, { headers: authorization },
+      baseUrl, `/v1/workspaces/${workspace.id}/sync/bootstrap?limit=1000&expectedSyncEpoch=${syncEpoch(workspace.id)}`, { headers: authorization },
     )
     expect(afterSubtreeConflict.objects.find(item => item.objectId === subtreeRootId)?.deletedAt).toBeNull()
     expect(afterSubtreeConflict.objects.find(item => item.objectId === subtreeNoteId)?.deletedAt).toBeNull()
+  }, 30_000)
+
+  it('enforces member capabilities, invitation revocation, and removal', async () => {
+    if (baseUrl === undefined) throw new Error('INTEGRATION_BASE_URL is required')
+    const owner = await registerIntegrationAccount(baseUrl, 'owner')
+    const viewer = await registerIntegrationAccount(baseUrl, 'viewer')
+    const workspace = await api<{ id: string }>(baseUrl, '/v1/workspaces', {
+      method: 'POST', expectedStatus: 201, headers: owner.headers,
+      body: {
+        nameCiphertext: 'shared-library',
+        managedKey: Buffer.alloc(32, 2).toString('base64url'),
+      },
+    })
+    const invitation = await api<{ id: string }>(
+      baseUrl, `/v1/workspaces/${workspace.id}/invitations/account`, {
+        method: 'POST', expectedStatus: 201, headers: owner.headers,
+        body: { login: viewer.login, role: 'viewer' },
+      },
+    )
+    await api(baseUrl, `/v1/workspace-invitations/${invitation.id}/accept`, {
+      method: 'POST', headers: viewer.headers,
+    })
+    const session = await api<{ syncEpoch: string }>(
+      baseUrl, `/v1/workspaces/${workspace.id}/sync/session?protocolVersion=1&cursor=0`,
+      { headers: viewer.headers },
+    )
+    syncEpochs.set(workspace.id, session.syncEpoch)
+    const envelope = encryptedTestEnvelope('viewer-write')
+    const [rejected] = await syncCommands(baseUrl, workspace.id, viewer.headers, [{
+      type: 'upsert-object', commandId: randomUUID(), objectId: randomUUID(), kind: 'note',
+      parentObjectId: null, nameCiphertext: envelope.ciphertext, baseRevision: null,
+      blobRefs: [], keyVersion: 1, ...envelope,
+    }])
+    expect(rejected).toMatchObject({ status: 'rejected', code: 'workspace_capability_denied' })
+
+    const link = await api<{ id: string; token: string }>(
+      baseUrl, `/v1/workspaces/${workspace.id}/invitations/link`, {
+        method: 'POST', expectedStatus: 201, headers: owner.headers,
+        body: { role: 'editor' },
+      },
+    )
+    await api(baseUrl, `/v1/workspaces/${workspace.id}/invitations/${link.id}`, {
+      method: 'DELETE', expectedStatus: 204, headers: owner.headers,
+    })
+    await api(baseUrl, '/v1/workspace-invitations/accept-link', {
+      method: 'POST', expectedStatus: 404, headers: viewer.headers, body: { token: link.token },
+    })
+
+    await api(baseUrl, `/v1/workspaces/${workspace.id}/members/${viewer.accountId}`, {
+      method: 'DELETE', expectedStatus: 204, headers: owner.headers,
+    })
+    await api(baseUrl, `/v1/workspaces/${workspace.id}/sync/session?protocolVersion=1&cursor=0`, {
+      expectedStatus: 404, headers: viewer.headers,
+    })
   }, 30_000)
 })
 
@@ -152,12 +209,37 @@ function encryptedTestEnvelope(value: string) {
 
 async function syncCommands(origin: string, workspaceId: string, headers: Record<string, string>, commands: unknown[]) {
   const response = await api<{ results: Array<Record<string, unknown>> }>(
-    origin, `/v1/workspaces/${workspaceId}/sync/commands`, { method: 'POST', headers, body: { commands } },
+    origin, `/v1/workspaces/${workspaceId}/sync/commands`, {
+      method: 'POST', headers, body: { commands, expectedSyncEpoch: syncEpoch(workspaceId) },
+    },
   )
   return response.results
 }
 
+const syncEpochs = new Map<string, string>()
+
+function syncEpoch(workspaceId: string) {
+  const value = syncEpochs.get(workspaceId)
+  if (!value) throw new Error(`Missing sync epoch for ${workspaceId}`)
+  return value
+}
+
 interface Session { accessToken: string }
+
+async function registerIntegrationAccount(origin: string, label: string) {
+  const login = `${label}-${randomUUID()}@example.test`
+  const session = await api<Session>(origin, '/v1/auth/register', {
+    method: 'POST', expectedStatus: 201,
+    headers: { 'x-setup-token': process.env.INTEGRATION_SETUP_TOKEN ?? 'integration-setup-token' },
+    body: {
+      login, password: 'integration-password', deviceId: randomUUID(),
+      deviceName: `${label} integration device`, platform: 'test',
+    },
+  })
+  const headers = { authorization: `Bearer ${session.accessToken}` }
+  const account = await api<{ id: string }>(origin, '/v1/account', { headers })
+  return { login, accountId: account.id, headers }
+}
 
 async function api<T>(
   origin: string,
@@ -175,5 +257,6 @@ async function api<T>(
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
   })
   expect(response.status, await response.clone().text()).toBe(options.expectedStatus ?? 200)
+  if (response.status === 204) return undefined as T
   return await response.json() as T
 }

@@ -1,7 +1,7 @@
 import argon2 from 'argon2'
 import { and, eq, isNull, ne, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
-import { accountIdentities, accountLoginClaimConflicts, accountLoginClaims, accounts, deploymentSettings, devicePairings, devices, refreshTokens, workspaces } from '../database/schema.js'
+import { accountIdentities, accountLoginClaimConflicts, accountLoginClaims, accounts, deploymentSettings, devicePairings, devices, refreshTokens, syncDeviceCursors, workspaces } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { normalizeLoginKey } from '../identity/service.js'
 import type { TokenService } from './tokens.js'
@@ -544,7 +544,7 @@ export class AuthService {
   }
 
   async listDevices(accountId: string, currentDeviceId?: string) {
-    const rows = await this.database.db.select({
+    const [rows, cursors] = await Promise.all([this.database.db.select({
       id: devices.id,
       name: devices.name,
       platform: devices.platform,
@@ -552,8 +552,35 @@ export class AuthService {
       lastSeenAt: devices.lastSeenAt,
       createdAt: devices.createdAt,
       revokedAt: devices.revokedAt,
-    }).from(devices).where(eq(devices.accountId, accountId)).orderBy(devices.createdAt)
-    return rows.map((device) => ({ ...device, current: currentDeviceId !== undefined && device.id === currentDeviceId }))
+    }).from(devices).where(eq(devices.accountId, accountId)).orderBy(devices.createdAt),
+    this.database.db.select({
+      deviceId: syncDeviceCursors.deviceId,
+      acknowledgedSequence: syncDeviceCursors.acknowledgedSequence,
+      latestSequence: workspaces.latestSequence,
+      acknowledgedAt: syncDeviceCursors.updatedAt,
+    }).from(syncDeviceCursors).innerJoin(workspaces, and(
+      eq(workspaces.id, syncDeviceCursors.workspaceId),
+      eq(workspaces.accountId, accountId),
+      isNull(workspaces.deletedAt),
+    )),])
+    return rows.map((device) => {
+      const deviceCursors = cursors.filter(cursor => cursor.deviceId === device.id)
+      const pendingEventCount = deviceCursors.reduce((total, cursor) => (
+        total + (cursor.latestSequence > cursor.acknowledgedSequence
+          ? cursor.latestSequence - cursor.acknowledgedSequence : 0n)
+      ), 0n)
+      const acknowledgedAt = deviceCursors.reduce<Date | null>((latest, cursor) => (
+        latest === null || cursor.acknowledgedAt > latest ? cursor.acknowledgedAt : latest
+      ), null)
+      return {
+        ...device,
+        current: currentDeviceId !== undefined && device.id === currentDeviceId,
+        syncStatus: deviceCursors.length === 0 ? 'never-acknowledged' as const
+          : pendingEventCount === 0n ? 'caught-up' as const : 'behind' as const,
+        pendingEventCount: pendingEventCount.toString(),
+        acknowledgedAt,
+      }
+    })
   }
 
   async #issueSession(accountId: string, deviceId: string, expectedCredentialEpoch?: string): Promise<SessionResult> {

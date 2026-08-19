@@ -5,6 +5,8 @@
 - 面向读者：NoteGen 客户端与同步服务开发者、部署维护者
 - 目标：确定第一版可实施的同步协议、服务端边界、数据模型、加密模型与交付顺序
 
+> 本文保留早期设计背景。已经冻结的发布协议以 [protocol-v1.md](protocol-v1.md) 与 `/openapi.json` 为准；其中“无多人共享/无成员/无 presence”等早期非目标已经被 protocol v1 取代。
+
 ## 1. 概述
 
 NoteGen Sync Server 是一个无界面、可 Docker 自托管的同步服务。NoteGen 桌面端、移动端和 Web 端均作为本地优先客户端，通过同一套协议与服务端交换变更。

@@ -143,7 +143,7 @@ export interface AdminCapabilityContract {
 }
 
 export interface AdminCapabilitiesContract {
-  deploymentMode: "self-hosted" | "hosted"
+  deploymentMode: "self-hosted"
   generatedAt: string
   capabilities: AdminCapabilityContract[]
 }
@@ -256,6 +256,9 @@ export interface DeviceContract {
   createdAt: string
   revokedAt: string | null
   current: boolean
+  syncStatus: "caught-up" | "behind" | "never-acknowledged"
+  pendingEventCount: string
+  acknowledgedAt: string | null
 }
 
 export interface SyncOverviewContract {
@@ -268,6 +271,13 @@ export interface SyncOverviewContract {
   latestSequence: string
   lastActivityAt: string | null
   encryptionMode: "managed" | "e2ee" | "mixed" | null
+  storageUsage: {
+    activeObjectBytes: string
+    activeCrdtBytes: string
+    activeBlobBytes: string
+    reservedBlobBytes: string
+    retainedBytes: string
+  } | null
   kinds: Array<{
     kind: string
     activeCount: number
@@ -288,8 +298,45 @@ export interface SyncOverviewContract {
 }
 
 export type SyncObjectKindContract =
-  | "note" | "folder" | "asset" | "canvas" | "record" | "tag" | "mark"
-  | "conversation" | "memory" | "setting" | "yjs-checkpoint" | "yjs-update"
+  | "note" | "folder" | "asset" | "canvas" | "tag" | "mark"
+  | "conversation" | "message" | "memory" | "setting" | "yjs-checkpoint" | "yjs-update"
+
+export type WorkspaceTypeContract = "account-data" | "library"
+export type WorkspaceRoleContract = "owner" | "viewer" | "editor" | "manager"
+export type WorkspaceCapabilityContract =
+  | "content.read" | "content.create" | "content.update" | "content.delete"
+  | "history.view" | "history.restore"
+  | "member.invite" | "member.update" | "member.remove"
+  | "workspace.rename" | "workspace.delete"
+
+export interface SyncSessionContract {
+  protocol: { requestedVersion: number, selectedVersion: 1, compatible: boolean }
+  workspace: {
+    id: string
+    type: WorkspaceTypeContract
+    role: WorkspaceRoleContract
+    owner: boolean
+    capabilities: WorkspaceCapabilityContract[]
+  }
+  cursor: {
+    supplied: string
+    state: "valid" | "ahead" | "expired"
+    acknowledged: string
+    oldestAvailableSequence: string | null
+  }
+  latestSequence: string
+  bootstrap: { required: boolean, reason: "cursor_ahead" | "cursor_expired" | null }
+  limits: {
+    maxCommandsPerBatch: number
+    maxEventsPerPage: number
+    maxBootstrapObjectsPerPage: number
+    maxDocumentUpdatesPerPage: number
+    maxObjectBytes: number
+  }
+  keyVersions: Array<{ keyVersion: number, createdAt: string }>
+  syncEpoch: string
+  websocketUrl: string
+}
 
 export interface WebWorkspaceContract {
   id: string
@@ -375,7 +422,7 @@ export interface ServerCapabilitiesContract {
     emailVerificationRequired: boolean
   }
   instanceCapabilities: Record<string, boolean>
-  deploymentMode: "self-hosted" | "hosted"
+  deploymentMode: "self-hosted"
   web: {
     accountUrl: string
     deviceAuthorizationUrl: string

@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
-import { devices, objects, workspaceKeyEnvelopes, workspaceKeys, workspaces } from '../database/schema.js'
+import { devices, objects, workspaceKeyEnvelopes, workspaceKeys, workspaceMembers, workspaces } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
 import type { ChangeNotifier } from '../sync/types.js'
 import type { UsageService } from '../usage/service.js'
+import { workspaceCapabilities, type WorkspaceCapability } from './capabilities.js'
 
 export interface CreateWorkspaceInput {
   nameCiphertext: string
@@ -22,6 +23,14 @@ export interface KeyEnvelopeInput {
   kdfParams: Record<string, number> | null
 }
 
+export interface WorkspaceAccess {
+  ownerAccountId: string
+  owner: boolean
+  role: 'owner' | 'viewer' | 'editor' | 'manager'
+  capabilities: WorkspaceCapability[]
+  type: 'account-data' | 'library'
+}
+
 export class WorkspaceService {
   constructor(
     private readonly database: DatabaseContext,
@@ -31,7 +40,8 @@ export class WorkspaceService {
   ) {}
 
   async create(accountId: string, input: CreateWorkspaceInput): Promise<{ id: string, createdAt: Date, latestSequence: string, nameCiphertext: string, created: boolean }> {
-    validateKeyEnvelopes(input.envelopes, true)
+    const managed = input.envelopes.length === 1 && input.envelopes[0]?.type === 'managed'
+    validateKeyEnvelopes(input.envelopes, !managed, managed)
     await this.#validateDeviceRecipients(accountId, input.envelopes)
     const workspaceLimit = await this.#workspaceLimit(accountId)
     const requestHash = input.idempotencyKey === undefined ? undefined : workspaceCreationHash(input)
@@ -52,16 +62,12 @@ export class WorkspaceService {
           return { ...existing, latestSequence: existing.latestSequence.toString(), created: false }
         }
       }
-      const [currentDefault] = await tx.select({ id: workspaces.id }).from(workspaces).where(and(
-        eq(workspaces.accountId, accountId),
-        eq(workspaces.isDefault, true),
-        isNull(workspaces.deletedAt),
-      )).limit(1)
       await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
       const [workspace] = await tx.insert(workspaces).values({
         accountId,
+        type: 'library',
         nameCiphertext: input.nameCiphertext,
-        isDefault: currentDefault === undefined,
+        isDefault: false,
         ...(input.idempotencyKey === undefined ? {} : {
           creationIdempotencyKey: input.idempotencyKey,
           creationRequestHash: requestHash,
@@ -76,6 +82,29 @@ export class WorkspaceService {
     })
     if (created.created) await this.#publishWorkspaceListChanged(accountId)
     return created
+  }
+
+  async createManagedLibrary(accountId: string, input: {
+    nameCiphertext: string
+    managedKey: string
+    idempotencyKey?: string
+  }) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(input.managedKey)) {
+      throw new ApiError({
+        code: 'managed_key_invalid',
+        message: 'Managed key must be a 256-bit Base64URL value',
+        statusCode: 400,
+      })
+    }
+    return this.create(accountId, {
+      nameCiphertext: input.nameCiphertext,
+      keyVersion: 1,
+      envelopes: [{
+        type: 'managed', recipientId: null, wrappedKey: input.managedKey,
+        kdfSalt: null, kdfParams: null,
+      }],
+      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+    })
   }
 
   async getCreationRequest(accountId: string, idempotencyKey: string): Promise<{ id: string, createdAt: Date } | undefined> {
@@ -116,7 +145,7 @@ export class WorkspaceService {
         nameCiphertext: workspaces.nameCiphertext,
       }).from(workspaces).where(and(
         eq(workspaces.accountId, accountId),
-        eq(workspaces.isDefault, true),
+        eq(workspaces.type, 'account-data'),
         isNull(workspaces.deletedAt),
       )).limit(1)
       if (existing !== undefined) {
@@ -141,6 +170,7 @@ export class WorkspaceService {
 
       const [workspace] = await tx.insert(workspaces).values({
         accountId,
+        type: 'account-data',
         nameCiphertext: input.nameCiphertext,
         isDefault: true,
       }).returning({
@@ -170,13 +200,20 @@ export class WorkspaceService {
   async list(accountId: string, deviceId: string, includeDeleted: boolean) {
     const rows = await this.database.db.select({
       id: workspaces.id,
+      ownerAccountId: workspaces.accountId,
+      type: workspaces.type,
       nameCiphertext: workspaces.nameCiphertext,
       latestSequence: workspaces.latestSequence,
       createdAt: workspaces.createdAt,
       updatedAt: workspaces.updatedAt,
       deletedAt: workspaces.deletedAt,
-    }).from(workspaces).where(and(
-      eq(workspaces.accountId, accountId),
+      memberRole: workspaceMembers.role,
+      memberCapabilities: workspaceMembers.capabilities,
+    }).from(workspaces).leftJoin(workspaceMembers, and(
+      eq(workspaceMembers.workspaceId, workspaces.id),
+      eq(workspaceMembers.accountId, accountId),
+    )).where(and(
+      or(eq(workspaces.accountId, accountId), eq(workspaceMembers.accountId, accountId)),
       ...(includeDeleted ? [] : [isNull(workspaces.deletedAt)]),
     ))
       .orderBy(desc(workspaces.updatedAt))
@@ -208,6 +245,11 @@ export class WorkspaceService {
     const managedWorkspaceIds = new Set(managedEnvelopes.map((item) => item.workspaceId))
     return rows.map((row) => ({
       ...row,
+      owner: row.ownerAccountId === accountId,
+      role: row.ownerAccountId === accountId ? 'owner' as const : row.memberRole,
+      capabilities: row.ownerAccountId === accountId
+        ? [...workspaceCapabilities]
+        : row.memberCapabilities ?? [],
       latestSequence: row.latestSequence.toString(),
       latestKeyVersion: latestKeyVersionByWorkspace.get(row.id) ?? 0,
       hasDeviceEnvelope: deviceWorkspaceIds.has(row.id),
@@ -216,7 +258,7 @@ export class WorkspaceService {
   }
 
   async getAccountSyncOverview(accountId: string) {
-    const [summaries, kinds, recentActivity] = await Promise.all([
+    const [summaries, kinds, recentActivity, usage] = await Promise.all([
       this.database.sql<Array<{
         workspace_count: number
         object_count: number
@@ -293,6 +335,7 @@ export class WorkspaceService {
           and e.event_type in ('object.upserted', 'object.deleted')
         order by e.created_at desc, e.sequence desc limit 30
       `,
+      this.usage?.getSnapshot(accountId) ?? null,
     ])
     const summary = summaries[0]
     return {
@@ -305,6 +348,13 @@ export class WorkspaceService {
       latestSequence: summary?.latest_sequence ?? '0',
       lastActivityAt: summary?.last_activity_at ?? null,
       encryptionMode: summary?.encryption_mode ?? null,
+      storageUsage: usage === null ? null : {
+        activeObjectBytes: usage.metrics.activeObjectBytes ?? '0',
+        activeCrdtBytes: usage.metrics.activeCrdtBytes ?? '0',
+        activeBlobBytes: usage.metrics.activeBlobBytes ?? '0',
+        reservedBlobBytes: usage.metrics.reservedBlobBytes ?? '0',
+        retainedBytes: usage.metrics.retainedBytes ?? '0',
+      },
       kinds: kinds.map((item) => ({
         kind: item.kind,
         activeCount: item.active_count,
@@ -384,8 +434,63 @@ export class WorkspaceService {
     }
   }
 
+  async access(accountId: string, workspaceId: string): Promise<WorkspaceAccess> {
+    const [workspace] = await this.database.db.select({
+      ownerAccountId: workspaces.accountId,
+      type: workspaces.type,
+      memberRole: workspaceMembers.role,
+      memberCapabilities: workspaceMembers.capabilities,
+    }).from(workspaces).leftJoin(workspaceMembers, and(
+      eq(workspaceMembers.workspaceId, workspaces.id),
+      eq(workspaceMembers.accountId, accountId),
+    )).where(and(
+      eq(workspaces.id, workspaceId),
+      isNull(workspaces.deletedAt),
+      or(eq(workspaces.accountId, accountId), eq(workspaceMembers.accountId, accountId)),
+    )).limit(1)
+    if (workspace === undefined) {
+      throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+    }
+    if (workspace.ownerAccountId === accountId) {
+      return {
+        ownerAccountId: workspace.ownerAccountId,
+        owner: true,
+        role: 'owner',
+        capabilities: [...workspaceCapabilities],
+        type: workspace.type,
+      }
+    }
+    if (workspace.memberRole === null) {
+      throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+    }
+    return {
+      ownerAccountId: workspace.ownerAccountId,
+      owner: false,
+      role: workspace.memberRole,
+      capabilities: workspace.memberCapabilities as WorkspaceCapability[],
+      type: workspace.type,
+    }
+  }
+
+  async assertCapability(
+    accountId: string,
+    workspaceId: string,
+    capability: WorkspaceCapability,
+  ): Promise<WorkspaceAccess> {
+    const access = await this.access(accountId, workspaceId)
+    if (!access.capabilities.includes(capability)) {
+      throw new ApiError({
+        code: 'workspace_capability_denied',
+        message: `Workspace capability ${capability} is required`,
+        statusCode: 403,
+        details: { capability },
+      })
+    }
+    return access
+  }
+
   async listKeys(accountId: string, workspaceId: string) {
-    await this.assertOwned(accountId, workspaceId)
+    await this.assertCapability(accountId, workspaceId, 'content.read')
     const keys = await this.database.db.select({
       keyVersion: workspaceKeys.keyVersion,
       createdAt: workspaceKeys.createdAt,
@@ -610,18 +715,28 @@ export class WorkspaceService {
     workspaceId: string,
     options: { allowDefault?: boolean } = {},
   ): Promise<void> {
-    await this.assertOwned(accountId, workspaceId)
+    const access = await this.assertCapability(accountId, workspaceId, 'workspace.delete')
     const removed = await this.database.db.transaction(async (tx) => {
       await assertAccountWriteAllowedInTransaction(tx, accountId)
-      const [current] = await tx.select({ id: workspaces.id, deletedAt: workspaces.deletedAt }).from(workspaces)
-        .where(and(eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId),
+      const [current] = await tx.select({
+        id: workspaces.id, deletedAt: workspaces.deletedAt,
+        type: workspaces.type, ownerAccountId: workspaces.accountId,
+      }).from(workspaces)
+        .where(and(eq(workspaces.id, workspaceId),
           ...(options.allowDefault === false ? [eq(workspaces.isDefault, false)] : [])))
         .limit(1).for('update')
       if (current === undefined) return undefined
+      if (current.type === 'account-data') {
+        throw new ApiError({
+          code: 'account_data_workspace_delete_forbidden',
+          message: 'Personal account-data workspace cannot be deleted',
+          statusCode: 409,
+        })
+      }
       if (current.deletedAt === null) {
         await tx.update(workspaces).set({ deletedAt: new Date(), updatedAt: new Date() })
           .where(eq(workspaces.id, workspaceId))
-        await this.usage?.releaseWorkspace(tx, accountId)
+        await this.usage?.releaseWorkspace(tx, access.ownerAccountId)
       }
       return current
     })
@@ -636,6 +751,24 @@ export class WorkspaceService {
       type: 'workspace.state-changed', workspaceId, deleted: true,
     }).catch(() => undefined)
     await this.#publishWorkspaceListChanged(accountId)
+    if (access.ownerAccountId !== accountId) await this.#publishWorkspaceListChanged(access.ownerAccountId)
+  }
+
+  async rename(accountId: string, workspaceId: string, nameCiphertext: string) {
+    await this.assertCapability(accountId, workspaceId, 'workspace.rename')
+    const [updated] = await this.database.db.update(workspaces).set({
+      nameCiphertext,
+      updatedAt: new Date(),
+    }).where(and(eq(workspaces.id, workspaceId), isNull(workspaces.deletedAt))).returning({
+      id: workspaces.id,
+      nameCiphertext: workspaces.nameCiphertext,
+      updatedAt: workspaces.updatedAt,
+    })
+    if (updated === undefined) {
+      throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+    }
+    await this.notifier.publish({ type: 'workspace.metadata-changed', workspaceId }).catch(() => undefined)
+    return updated
   }
 
   async restore(accountId: string, workspaceId: string): Promise<void> {

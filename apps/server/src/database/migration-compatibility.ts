@@ -40,6 +40,11 @@ export async function adoptSquashedMigrationBaseline(database: DatabaseContext):
   if (migrations.missing.length > 0 || migrations.entries.length === 0) return
   const baseline = migrations.entries[0]!
   await database.sql.begin(async (transaction) => {
+    const [migrationTable] = await transaction<Array<{ table_name: string | null }>>`
+      select to_regclass('drizzle.__drizzle_migrations')::text as table_name`
+    // A brand-new database has no migration ledger yet. Drizzle creates both
+    // the ledger and schema while applying the first migration below.
+    if (migrationTable?.table_name === null) return
     await transaction`lock table drizzle.__drizzle_migrations in exclusive mode`
     const applied = await transaction<Array<{ hash: string, created_at: string }>>`
       select hash, created_at::text as created_at

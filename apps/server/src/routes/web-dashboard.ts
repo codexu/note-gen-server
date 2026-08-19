@@ -41,6 +41,13 @@ export function createWebDashboardRoutes(
             encryptionMode: Type.Union([
               Type.Literal('managed'), Type.Literal('e2ee'), Type.Literal('mixed'), Type.Null(),
             ]),
+            storageUsage: Type.Union([Type.Object({
+              activeObjectBytes: CounterString,
+              activeCrdtBytes: CounterString,
+              activeBlobBytes: CounterString,
+              reservedBlobBytes: CounterString,
+              retainedBytes: CounterString,
+            }), Type.Null()]),
             kinds: Type.Array(Type.Object({
               kind: Type.String(),
               activeCount: Type.Integer(),
@@ -94,6 +101,25 @@ export function createWebDashboardRoutes(
       await workspaces.remove(session.accountId, request.params.workspaceId, { allowDefault: false })
       await admin?.recordAudit(session.accountId, 'workspace.delete', 'workspace', request.params.workspaceId)
         .catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record workspace deletion audit'))
+      return reply.status(204).send(null)
+    })
+
+    app.post('/v1/web/workspaces/:workspaceId/restore', {
+      schema: {
+        params: Type.Object({ workspaceId: Type.String({ format: 'uuid' }) }),
+        response: { 204: Type.Null() },
+      },
+    }, async (request, reply) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      requireCsrf(
+        request.headers['x-csrf-token'],
+        request.cookies[WEB_CSRF_COOKIE],
+        session,
+        webSessions,
+      )
+      await workspaces.restore(session.accountId, request.params.workspaceId)
+      await admin?.recordAudit(session.accountId, 'workspace.restore', 'workspace', request.params.workspaceId)
+        .catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record workspace restoration audit'))
       return reply.status(204).send(null)
     })
   }

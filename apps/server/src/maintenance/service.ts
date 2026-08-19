@@ -4,7 +4,8 @@ import type { AppConfig } from '../config.js'
 import type { DatabaseContext } from '../database/client.js'
 import {
   blobs, blobUploads, bootstrapSessions, deviceAuthorizations, devicePairings,
-  stepUpGrants, supportDiagnosticGrants, syncBootstrapSessions, webSessions, workspaces,
+  stepUpGrants, supportDiagnosticGrants, syncBootstrapSessions, syncDeviceCursors,
+  webSessions, workspaces,
 } from '../database/schema.js'
 import type { BlobStorage } from '../storage/blob-storage.js'
 import { BLOB_COMPLETION_LEASE_MS } from '../blobs/constants.js'
@@ -28,6 +29,11 @@ export interface MaintenanceResult {
   changes: number
   versions: number
   operations: number
+  syncEvents: number
+  syncCommands: number
+  syncCheckpoints: number
+  syncConflicts: number
+  syncDeviceCursors: number
   tombstones: number
   blobs: number
   deletionCases: number
@@ -173,7 +179,8 @@ export class MaintenanceService {
         and not exists (select 1 from workspaces w where w.account_id = a.id)
         and not exists (select 1 from account_deletion_cases c where c.account_id = a.id)
       returning a.id`
-    const [changesResult, versionsResult, operationsResult, tombstonesResult, blobsResult] =
+    const [changesResult, versionsResult, operationsResult, syncEventsResult, syncCommandsResult,
+      syncCheckpointsResult, syncConflictsResult, tombstonesResult, blobsResult] =
       await this.database.sql.begin(async (sql) => {
         const removedChanges = await sql`
           delete from changes where id in (
@@ -219,6 +226,42 @@ export class MaintenanceService {
             select workspace_id, operation_id from operations
             where created_at < ${changeCutoff.toISOString()}::timestamptz limit 10000
           ) returning operation_id`
+        const removedSyncEvents = await sql`
+          delete from sync_events where id in (
+            select id from sync_events
+            where created_at < ${changeCutoff.toISOString()}::timestamptz
+            order by id limit 10000
+          ) returning id`
+        const removedSyncCommands = await sql`
+          delete from sync_commands where (workspace_id, command_id) in (
+            select workspace_id, command_id from sync_commands
+            where created_at < ${changeCutoff.toISOString()}::timestamptz
+            order by created_at limit 10000
+          ) returning command_id`
+        const removedSyncCheckpoints = await sql`
+          delete from sync_checkpoints checkpoint where (workspace_id, checkpoint_id) in (
+            select candidate.workspace_id, candidate.checkpoint_id
+            from sync_checkpoints candidate
+            left join sync_documents document
+              on document.workspace_id = candidate.workspace_id
+              and document.checkpoint_id = candidate.checkpoint_id
+            where candidate.created_at < ${versionCutoff.toISOString()}::timestamptz
+              and document.checkpoint_id is null
+              and not exists (
+                select 1 from sync_bootstrap_objects snapshot
+                join sync_bootstrap_sessions session on session.id = snapshot.session_id
+                where snapshot.workspace_id = candidate.workspace_id
+                  and snapshot.checkpoint_id = candidate.checkpoint_id
+                  and session.expires_at > now()
+              )
+            order by candidate.created_at limit 5000
+          ) returning checkpoint_id`
+        const removedSyncConflicts = await sql`
+          delete from sync_conflicts where (workspace_id, conflict_id) in (
+            select workspace_id, conflict_id from sync_conflicts
+            where status = 'resolved' and resolved_at < ${changeCutoff.toISOString()}::timestamptz
+            order by resolved_at limit 5000
+          ) returning conflict_id`
         const removedTombstones = await sql`
           delete from objects where (workspace_id, object_id) in (
             select workspace_id, object_id from objects
@@ -238,8 +281,14 @@ export class MaintenanceService {
               where v.workspace_id = b.workspace_id and v.blob_refs ? b.blob_id
             )
           limit 1000`
-        return [removedChanges, removedVersions, removedOperations, removedTombstones, candidates] as const
+        return [removedChanges, removedVersions, removedOperations, removedSyncEvents,
+          removedSyncCommands, removedSyncCheckpoints, removedSyncConflicts,
+          removedTombstones, candidates] as const
       })
+
+    const removedSyncDeviceCursors = await this.database.db.delete(syncDeviceCursors)
+      .where(lt(syncDeviceCursors.updatedAt, changeCutoff))
+      .returning({ deviceId: syncDeviceCursors.deviceId })
 
     let removedBlobs = 0
     for (const blob of blobsResult) {
@@ -265,6 +314,11 @@ export class MaintenanceService {
       changes: changesResult.length,
       versions: versionsResult.length,
       operations: operationsResult.length,
+      syncEvents: syncEventsResult.length,
+      syncCommands: syncCommandsResult.length,
+      syncCheckpoints: syncCheckpointsResult.length,
+      syncConflicts: syncConflictsResult.length,
+      syncDeviceCursors: removedSyncDeviceCursors.length,
       tombstones: tombstonesResult.length,
       blobs: removedBlobs,
       deletionCases: advancedDeletionCases + purgingDeletionCases + finalizedDeletionAccounts,
@@ -667,6 +721,11 @@ function emptyMaintenanceResult(): MaintenanceResult {
     changes: 0,
     versions: 0,
     operations: 0,
+    syncEvents: 0,
+    syncCommands: 0,
+    syncCheckpoints: 0,
+    syncConflicts: 0,
+    syncDeviceCursors: 0,
     tombstones: 0,
     blobs: 0,
     deletionCases: 0,

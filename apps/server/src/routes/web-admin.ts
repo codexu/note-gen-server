@@ -162,7 +162,7 @@ export function createWebAdminRoutes(
 
     app.get('/v1/web/admin/capabilities', {
       schema: { response: { 200: Type.Object({
-        deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
+        deploymentMode: Type.Literal('self-hosted'),
         generatedAt: Timestamp,
         capabilities: Type.Array(Type.Object({
           id: Type.String(), lifecycle: Type.Union([Type.Literal('stable'), Type.Literal('experimental')]),
@@ -176,13 +176,12 @@ export function createWebAdminRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       await admin.assertAdmin(session.accountId)
       const experimental = new Set([
-        'identity.email', 'identity.emailVerification', 'identity.passwordReset', 'risk.advanced',
-        'usage.enforcement', 'billing.subscription', 'compliance.requests', 'support.cases',
+        'identity.email', 'identity.emailVerification', 'identity.passwordReset',
         'operations.unifiedBackup', 'operations.upgradeAssistant', 'operations.preserveRestore',
       ])
       const rows = capabilityIds.map((id) => {
         const explanation = capabilities?.explain(id) ?? {
-          id, available: false, deploymentMode: _config.deploymentMode, requestedBy: 'default' as const,
+          id, available: false, deploymentMode: 'self-hosted' as const, requestedBy: 'default' as const,
           reasons: ['capability_registry_unavailable'], dependencies: [],
         }
         const status = explanation.available
@@ -200,7 +199,7 @@ export function createWebAdminRoutes(
         }
       })
       return {
-        deploymentMode: capabilities?.explain(capabilityIds[0]).deploymentMode ?? _config.deploymentMode,
+        deploymentMode: 'self-hosted' as const,
         generatedAt: new Date(),
         capabilities: rows,
       }

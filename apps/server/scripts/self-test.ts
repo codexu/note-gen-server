@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto'
 import WebSocket from 'ws'
 
 const baseUrl = normalizeOrigin(process.env.SELF_TEST_BASE_URL ?? 'http://127.0.0.1:3789')
-const setupToken = process.env.SELF_TEST_SETUP_TOKEN
 const keepData = process.env.SELF_TEST_KEEP_DATA === 'true'
 const password = 'notegen-self-test-password'
 
@@ -20,6 +19,7 @@ async function main(): Promise<void> {
   const capabilities = await request<Capabilities>('/v1/capabilities')
   assert(capabilities.service === 'note-gen-server', '目标地址不是 NoteGen Sync Server')
   assert(capabilities.protocol.minimum <= 1 && capabilities.protocol.maximum >= 1, '服务端不支持协议 v1')
+  assert(capabilities.registration.methods.includes('password'), '自动验收需要管理员临时启用公开注册；完成后请恢复为仅邀请或关闭')
   console.log(`✓ 服务可用：${capabilities.serverName} ${capabilities.serverVersion}`)
   console.log(`✓ 实例身份：${capabilities.instanceId}`)
 
@@ -29,7 +29,6 @@ async function main(): Promise<void> {
   const deviceA = await request<Session>('/v1/auth/register', {
     method: 'POST',
     expectedStatus: 201,
-    ...(setupToken === undefined ? {} : { headers: { 'x-setup-token': setupToken } }),
     body: {
       login,
       password,
@@ -208,16 +207,7 @@ async function request<T = unknown>(
   })
   const text = await response.text()
   if (response.status !== (options.expectedStatus ?? 200)) {
-    let hint = ''
-    try {
-      const error = JSON.parse(text) as { code?: string }
-      if (error.code === 'registration_closed' && setupToken === undefined) {
-        hint = '\n请设置 SELF_TEST_SETUP_TOKEN；它应与服务端 SETUP_TOKEN 一致。'
-      }
-    } catch {
-      // Preserve the raw response below.
-    }
-    throw new Error(`${options.method ?? 'GET'} ${path} 返回 ${response.status}: ${text}${hint}`)
+    throw new Error(`${options.method ?? 'GET'} ${path} 返回 ${response.status}: ${text}`)
   }
   if (response.status === 204 || text.length === 0) return undefined as T
   return JSON.parse(text) as T
@@ -272,6 +262,7 @@ interface Capabilities {
   serverName: string
   serverVersion: string
   protocol: { minimum: number, maximum: number }
+  registration: { methods: string[] }
 }
 
 interface Session { accessToken: string }

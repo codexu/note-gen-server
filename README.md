@@ -1,8 +1,16 @@
 # NoteGen Sync Server
 
-NoteGen Sync Server 是 NoteGen 客户端使用的同步服务，可用于自行部署，也可用于运营官方托管服务。
+NoteGen Sync Server 是 NoteGen 客户端使用的免费同步服务。官方公共测试服务和用户自行部署使用同一套独立实例运行方式。
 
 项目包含同步 API 和账号管理 Web。Web 负责注册、登录、设备关联、同步统计和账号管理，不包含 Markdown 编辑器、AI 功能或多人协作功能。
+
+## 项目定位
+
+- 项目免费且不以商业化为目标，不提供付费订阅、套餐或商业 SLA。
+- 官方只提供供社区体验的公共测试实例；它与用户自行部署使用相同代码和运行方式。
+- 每个实例由自己的管理员负责注册策略、邀请、数据保留、备份和滥用处理。
+- 邮件不是基础依赖。SMTP 默认关闭；未配置时仍可使用账号密码和一次性邀请链接。
+- 客户端应继续保留本地数据，公共测试实例不应被视为唯一备份。
 
 ## Monorepo 结构
 
@@ -20,6 +28,7 @@ apps/web     Next.js + shadcn/ui 账号管理页面
 - [NoteGen 客户端接入协议](docs/client-protocol.md)
 - [NoteGen 接入与配置同步体验](docs/notegen-integration.md)
 - [部署后的个人验收用例](docs/self-test.md)
+- [公共测试实例上线清单](docs/production-checklist.md)
 - [账号服务开发计划总览](docs/account-service/README.md)
 
 ## 已确定技术栈
@@ -70,7 +79,7 @@ createuser notegen
 createdb -O notegen notegen
 ```
 
-复制并填写本地配置。`DATABASE_URL`、`AUTH_SECRET` 与 `SETUP_TOKEN` 必须设置为自己的值：
+复制并填写本地配置。`DATABASE_URL`、`AUTH_SECRET` 与 `PUBLIC_BASE_URL` 必须设置为自己的值：
 
 ```bash
 cp .env.example .env

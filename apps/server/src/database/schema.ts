@@ -15,6 +15,19 @@ export const serverMetadata = pgTable('server_metadata', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
+/** Durable, multi-process rate-limit counters. Raw client identifiers are
+ * HMACed before reaching this table. */
+export const rateLimitBuckets = pgTable('rate_limit_buckets', {
+  scope: text('scope').notNull(),
+  rateKey: text('rate_key').notNull(),
+  windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  hits: integer('hits').notNull().default(0),
+}, (table) => [
+  primaryKey({ columns: [table.scope, table.rateKey, table.windowStart] }),
+  index('rate_limit_buckets_expiry_idx').on(table.expiresAt),
+])
+
 export const deploymentMode = pgEnum('deployment_mode', ['hosted', 'self-hosted'])
 export const registrationPolicy = pgEnum('registration_policy', ['bootstrap', 'disabled', 'invitation', 'public'])
 export const selfHostedLifecycle = pgEnum('self_hosted_lifecycle', ['uninitialized', 'ready'])
@@ -119,9 +132,13 @@ export const maintenanceState = pgTable('maintenance_state', {
 })
 
 export const objectKind = pgEnum('object_kind', [
-  'note', 'folder', 'asset', 'canvas', 'record', 'tag', 'mark', 'conversation',
+  'note', 'folder', 'asset', 'canvas', 'tag', 'mark', 'conversation', 'message',
   'memory', 'setting', 'yjs-checkpoint', 'yjs-update',
 ])
+export const workspaceType = pgEnum('workspace_type', ['account-data', 'library'])
+export const workspaceMemberRole = pgEnum('workspace_member_role', ['viewer', 'editor', 'manager'])
+export const workspaceInvitationKind = pgEnum('workspace_invitation_kind', ['account', 'link'])
+export const workspaceInvitationStatus = pgEnum('workspace_invitation_status', ['pending', 'accepted', 'revoked', 'expired'])
 export const changeType = pgEnum('change_type', ['upsert', 'delete'])
 export const blobState = pgEnum('blob_state', ['uploading', 'ready', 'deleting'])
 export const keyEnvelopeType = pgEnum('key_envelope_type', ['passphrase', 'recovery', 'device', 'managed'])
@@ -578,6 +595,7 @@ export const devicePairings = pgTable('device_pairings', {
 export const workspaces = pgTable('workspaces', {
   id: uuid('id').primaryKey().defaultRandom(),
   accountId: uuid('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  type: workspaceType('workspace_type').notNull().default('library'),
   nameCiphertext: text('name_ciphertext').notNull(),
   creationIdempotencyKey: text('creation_idempotency_key'),
   creationRequestHash: text('creation_request_hash'),
@@ -593,6 +611,50 @@ export const workspaces = pgTable('workspaces', {
   uniqueIndex('workspaces_account_creation_idempotency_unique')
     .on(table.accountId, table.creationIdempotencyKey)
     .where(sql`${table.creationIdempotencyKey} is not null`),
+  uniqueIndex('workspaces_account_data_unique')
+    .on(table.accountId)
+    .where(sql`${table.type} = 'account-data' and ${table.deletedAt} is null`),
+])
+
+/** Owners are represented by workspaces.account_id and always have every
+ * capability. Only accepted, non-owner members are stored here. */
+export const workspaceMembers = pgTable('workspace_members', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  accountId: uuid('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  role: workspaceMemberRole('role').notNull(),
+  capabilities: text('capabilities').array().notNull(),
+  invitedByAccountId: uuid('invited_by_account_id').notNull().references(() => accounts.id, { onDelete: 'restrict' }),
+  joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.accountId] }),
+  index('workspace_members_account_idx').on(table.accountId, table.updatedAt),
+])
+
+export const workspaceInvitations = pgTable('workspace_invitations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  kind: workspaceInvitationKind('kind').notNull(),
+  inviteeAccountId: uuid('invitee_account_id').references(() => accounts.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash'),
+  tokenHint: text('token_hint'),
+  role: workspaceMemberRole('role').notNull(),
+  capabilities: text('capabilities').array().notNull(),
+  status: workspaceInvitationStatus('status').notNull().default('pending'),
+  invitedByAccountId: uuid('invited_by_account_id').notNull().references(() => accounts.id, { onDelete: 'restrict' }),
+  acceptedByAccountId: uuid('accepted_by_account_id').references(() => accounts.id, { onDelete: 'set null' }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('workspace_invitations_workspace_idx').on(table.workspaceId, table.status, table.createdAt),
+  index('workspace_invitations_invitee_idx').on(table.inviteeAccountId, table.status, table.createdAt),
+  uniqueIndex('workspace_invitations_token_unique').on(table.tokenHash).where(sql`${table.tokenHash} is not null`),
+  uniqueIndex('workspace_invitations_pending_account_unique')
+    .on(table.workspaceId, table.inviteeAccountId)
+    .where(sql`${table.kind} = 'account' and ${table.status} = 'pending'`),
 ])
 
 export const workspaceKeys = pgTable('workspace_keys', {
@@ -821,6 +883,9 @@ export const syncCommands = pgTable('sync_commands', {
   commandId: uuid('command_id').notNull(),
   sourceDeviceId: uuid('source_device_id').notNull().references(() => devices.id),
   requestHash: text('request_hash').notNull(),
+  /** Epoch in which the command result was committed. Null denotes a legacy
+   * pre-fencing result and must not deduplicate a post-restore command. */
+  syncEpoch: uuid('sync_epoch'),
   result: jsonb('result').$type<Record<string, unknown>>().notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -849,6 +914,19 @@ export const syncEvents = pgTable('sync_events', {
   uniqueIndex('sync_events_workspace_event_unique').on(table.workspaceId, table.eventId),
   index('sync_events_document_idx').on(table.workspaceId, table.documentId, table.documentSequence),
   index('sync_events_created_idx').on(table.createdAt),
+])
+
+/** Highest durable event sequence explicitly acknowledged by each device.
+ * Delivery alone is not an acknowledgement: clients advance this only after
+ * the corresponding inbox rows have been committed locally. */
+export const syncDeviceCursors = pgTable('sync_device_cursors', {
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  deviceId: uuid('device_id').notNull().references(() => devices.id, { onDelete: 'cascade' }),
+  acknowledgedSequence: bigint('acknowledged_sequence', { mode: 'bigint' }).notNull().default(sql`0`),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.deviceId] }),
+  index('sync_device_cursors_updated_idx').on(table.workspaceId, table.updatedAt),
 ])
 
 export const syncDocuments = pgTable('sync_documents', {

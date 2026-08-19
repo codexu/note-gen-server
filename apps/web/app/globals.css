@@ -127,7 +127,6 @@
 
   body {
     @apply min-h-svh bg-background text-foreground;
-    background-image: radial-gradient(circle at top, color-mix(in oklch, var(--primary) 8%, transparent), transparent 32rem);
   }
 
   button:not(:disabled),

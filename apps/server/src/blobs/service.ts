@@ -27,7 +27,7 @@ export class BlobService {
     input: { blobId: string, expectedSize: string, ciphertextHash: string, expectedSyncEpoch?: string },
   ) {
     this.#assertExpectedSyncEpoch(input.expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.create')
     const expectedSize = parseSize(input.expectedSize)
     if (expectedSize === 0n) {
       throw new ApiError({ code: 'blob_empty', message: 'Blob must contain at least one byte', statusCode: 400 })
@@ -149,7 +149,7 @@ export class BlobService {
     partNumber: number,
     data: Buffer,
   ) {
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.update')
     if (data.byteLength === 0 || data.byteLength > this.partBytes) {
       throw new ApiError({ code: 'blob_part_invalid', message: 'Blob part size is invalid', statusCode: 400 })
     }
@@ -192,7 +192,7 @@ export class BlobService {
 
   async complete(accountId: string, workspaceId: string, uploadId: string, expectedSyncEpoch?: string) {
     this.#assertExpectedSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.update')
     const existing = await this.#getUpload(workspaceId, uploadId)
     this.#assertUploadEpoch(existing.syncEpoch)
     if (existing.completedAt !== null) {
@@ -287,7 +287,7 @@ export class BlobService {
   }
 
   async get(accountId: string, workspaceId: string, blobId: string) {
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const [blob] = await this.database.db.select().from(blobs).where(and(
       eq(blobs.workspaceId, workspaceId), eq(blobs.blobId, blobId), eq(blobs.state, 'ready'),
     )).limit(1)
@@ -296,7 +296,7 @@ export class BlobService {
   }
 
   #assertExpectedSyncEpoch(expected: string | undefined): void {
-    if (expected !== undefined && this.syncEpoch !== undefined && expected !== this.syncEpoch) {
+    if (this.syncEpoch !== undefined && expected !== this.syncEpoch) {
       throw new ApiError({ code: 'sync_epoch_changed', message: 'Server restore epoch changed; re-bootstrap before writing', statusCode: 409 })
     }
   }
@@ -310,7 +310,7 @@ export class BlobService {
   }
 
   async uploadStatus(accountId: string, workspaceId: string, uploadId: string) {
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const upload = await this.#getUpload(workspaceId, uploadId)
     return {
       uploadId: upload.id,
@@ -339,7 +339,7 @@ export class BlobService {
   }
 
   async abort(accountId: string, workspaceId: string, uploadId: string): Promise<void> {
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.delete')
     const upload = await this.#getActiveUpload(workspaceId, uploadId)
     await this.storage.abortUpload(upload.storageKey, upload.providerUploadId)
     await this.database.db.transaction(async (tx) => {

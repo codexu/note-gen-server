@@ -1,5 +1,5 @@
 export const syncObjectKinds = [
-  'note', 'folder', 'asset', 'canvas', 'record', 'tag', 'mark', 'conversation',
+  'note', 'folder', 'asset', 'canvas', 'tag', 'mark', 'conversation', 'message',
   'memory', 'setting', 'yjs-checkpoint', 'yjs-update',
 ] as const
 
@@ -40,8 +40,19 @@ export interface AccountWorkspacesChangedNotice {
   accountId: string
 }
 
+export interface WorkspaceMembersChangedNotice {
+  type: 'workspace.members-changed'
+  workspaceId: string
+}
+
+export interface WorkspaceMetadataChangedNotice {
+  type: 'workspace.metadata-changed'
+  workspaceId: string
+}
+
 export type SyncNotice = WorkspaceChangeNotice | WorkspaceKeysChangedNotice
-  | WorkspaceStateChangedNotice | AccountWorkspacesChangedNotice
+  | WorkspaceStateChangedNotice | AccountWorkspacesChangedNotice | WorkspaceMembersChangedNotice
+  | WorkspaceMetadataChangedNotice
 
 export interface ChangeNotifier {
   publish(notice: SyncNotice): Promise<void>

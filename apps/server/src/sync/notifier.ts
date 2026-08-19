@@ -91,6 +91,12 @@ function parseNotice(payload: string): SyncNotice | null {
     if (candidate.type === 'workspace.state-changed' && typeof candidate.deleted === 'boolean') {
       return { type: 'workspace.state-changed', workspaceId: candidate.workspaceId, deleted: candidate.deleted }
     }
+    if (candidate.type === 'workspace.members-changed') {
+      return { type: 'workspace.members-changed', workspaceId: candidate.workspaceId }
+    }
+    if (candidate.type === 'workspace.metadata-changed') {
+      return { type: 'workspace.metadata-changed', workspaceId: candidate.workspaceId }
+    }
     return null
   } catch {
     return null

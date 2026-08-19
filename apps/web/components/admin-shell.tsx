@@ -2,20 +2,21 @@
 
 import type { ReactNode } from "react"
 import {
+  BookOpenIcon,
   DatabaseIcon,
+  ExternalLinkIcon,
   FlaskConicalIcon,
   GaugeIcon,
   LayoutDashboardIcon,
-  LaptopIcon,
+  LinkIcon,
   KeyRoundIcon,
+  MonitorSmartphoneIcon,
   MailIcon,
   LogOutIcon,
   RefreshCwIcon,
-  ServerIcon,
   UsersIcon,
 } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -26,7 +27,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Separator } from "@/components/ui/separator"
 import {
   Sidebar,
   SidebarContent,
@@ -46,7 +46,15 @@ import {
 } from "@/components/ui/sidebar"
 import { Spinner } from "@/components/ui/spinner"
 import { ThemeToggle } from "@/components/theme-toggle"
+import {
+  NOTEGEN_DOCS_URL,
+  NOTEGEN_SITE_URL,
+  GitHubMark,
+  NoteGenMark,
+  NoteGenWordmark,
+} from "@/components/notegen-brand"
 import type { Account, ServerCapabilities } from "@/lib/api"
+import { SiteFooter } from "@/components/site-chrome"
 
 export type AdminSection = "overview" | "workspaces" | "devices" | "connect" | "security" | "instance" | "operations" | "admin" | "experiments"
 
@@ -89,8 +97,8 @@ export function AdminShell({
   type NavigationItem = { section: AdminSection; label: string; icon: typeof LayoutDashboardIcon; count?: number }
   const personalNavigation: NavigationItem[] = [
     { section: "overview" as const, label: "仪表盘", icon: LayoutDashboardIcon },
-    { section: "connect" as const, label: "关联新设备", icon: LaptopIcon },
-    { section: "devices" as const, label: "设备管理", icon: LaptopIcon, count: deviceCount },
+    { section: "connect" as const, label: "关联新设备", icon: LinkIcon },
+    { section: "devices" as const, label: "设备管理", icon: MonitorSmartphoneIcon, count: deviceCount },
     { section: "workspaces" as const, label: "工作区管理", icon: DatabaseIcon, count: workspaceCount },
     { section: "security" as const, label: "账户安全", icon: KeyRoundIcon },
   ]
@@ -130,14 +138,19 @@ export function AdminShell({
         <SidebarHeader>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton size="lg" tooltip={capabilities?.serverName ?? "NoteGen 管理后台"}>
-                <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                  <ServerIcon />
-                </span>
+              <SidebarMenuButton
+                size="lg"
+                tooltip="访问 NoteGen 官网"
+                render={<a href={NOTEGEN_SITE_URL} target="_blank" rel="noreferrer" />}
+              >
+                <NoteGenMark />
                 <span className="flex min-w-0 flex-col">
-                  <span className="truncate font-medium">{capabilities?.serverName ?? "NoteGen"}</span>
-                  <span className="truncate text-xs text-muted-foreground">同步管理后台</span>
+                  <NoteGenWordmark className="truncate" />
+                  <span className="truncate text-xs text-muted-foreground">
+                    {capabilities?.serverName ?? "同步服务"}
+                  </span>
                 </span>
+                <ExternalLinkIcon className="ml-auto text-muted-foreground" />
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
@@ -175,7 +188,7 @@ export function AdminShell({
                       账户安全
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => onSectionChange("connect")}>
-                      <LaptopIcon />
+                      <LinkIcon />
                       关联新设备
                     </DropdownMenuItem>
                   </DropdownMenuGroup>
@@ -194,26 +207,46 @@ export function AdminShell({
         <SidebarRail />
       </Sidebar>
 
-      <SidebarInset className="bg-background/70">
-        <header className="flex min-h-16 shrink-0 items-center justify-between gap-3 px-4 md:px-6">
+      <SidebarInset className="bg-background">
+        <header className="sticky top-0 z-30 flex min-h-16 shrink-0 items-center justify-between gap-3 border-b bg-background/90 px-4 backdrop-blur-md md:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <SidebarTrigger />
             <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold">{details.title}</h1>
+              <h1 className="truncate text-lg font-semibold tracking-tight">{details.title}</h1>
               <p className="hidden truncate text-sm text-muted-foreground sm:block">{details.description}</p>
             </div>
           </div>
-          <div className="flex items-center gap-1">
-            {capabilities ? (
-              <>
-                <Badge variant="secondary">
-                  {capabilities.deploymentMode === "hosted" ? "官方托管" : "自托管"}
-                </Badge>
-                <Badge variant="outline">
-                  {capabilities.registrationMode === "open" ? "开放注册" : "关闭注册"}
-                </Badge>
-              </>
-            ) : null}
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              className="hidden sm:inline-flex"
+              variant="ghost"
+              size="sm"
+              nativeButton={false}
+              render={<a href={NOTEGEN_SITE_URL} target="_blank" rel="noreferrer" />}
+            >
+              官网
+              <ExternalLinkIcon data-icon="inline-end" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="查看 NoteGen 文档"
+              title="查看 NoteGen 文档"
+              nativeButton={false}
+              render={<a href={NOTEGEN_DOCS_URL} target="_blank" rel="noreferrer" />}
+            >
+              <BookOpenIcon />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="查看 NoteGen GitHub"
+              title="查看 NoteGen GitHub"
+              nativeButton={false}
+              render={<a href="https://github.com/codexu/note-gen" target="_blank" rel="noreferrer" />}
+            >
+              <GitHubMark />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -227,8 +260,8 @@ export function AdminShell({
             <ThemeToggle />
           </div>
         </header>
-        <Separator />
-        <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 md:p-6">{children}</div>
+        <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-5 p-4 md:gap-6 md:p-6">{children}</div>
+        <SiteFooter />
       </SidebarInset>
     </SidebarProvider>
   )

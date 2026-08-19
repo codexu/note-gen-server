@@ -36,6 +36,7 @@ import type { StaffSessionService } from './staff/session-service.js'
 import type { WebStepUpService } from './step-up/service.js'
 import type { AccountServiceAudit } from './audit/service.js'
 import type { InstallationService } from './installation/service.js'
+import type { WorkspaceCollaborationService } from './workspaces/collaboration-service.js'
 
 export interface ServiceDependencies {
   readonly version: string
@@ -47,6 +48,7 @@ export interface ServiceDependencies {
   readonly auth?: AuthService
   readonly tokens?: TokenService
   readonly workspaces?: WorkspaceService
+  readonly workspaceCollaboration?: WorkspaceCollaborationService
   readonly notifier?: ChangeNotifier
   readonly blobs?: BlobService
   readonly webSessions?: WebSessionService

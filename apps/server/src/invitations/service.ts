@@ -56,7 +56,7 @@ export class InvitationService {
           to: boundEmail,
           template: 'invitation',
           locale: this.config.mailDefaultLocale,
-          variables: { actionUrl: `${this.config.publicBaseUrl.replace(/\/$/, '')}/#/accept-invite/${token}` },
+          variables: { actionUrl: `${this.config.webPublicBaseUrl.replace(/\/$/, '')}/account/accept-invite/?token=${encodeURIComponent(token)}` },
         }, invitation.expiresAt)
         await this.mail.outbox.enqueueInTransaction(tx, {
           template: 'invitation',
@@ -70,7 +70,7 @@ export class InvitationService {
       return [invitation]
     })
     if (created === undefined) throw new Error('Invitation transaction returned no row')
-    return { id: created.id, token, url: `${this.config.webPublicBaseUrl}/#/accept-invite/${token}`, expiresAt: created.expiresAt, deliveryQueued: input.send === true }
+    return { id: created.id, token, url: `${this.config.webPublicBaseUrl.replace(/\/$/, '')}/account/accept-invite/?token=${encodeURIComponent(token)}`, expiresAt: created.expiresAt, deliveryQueued: input.send === true }
   }
 
   async inspect(token: string): Promise<{ canContinue: boolean, requiresEmail: boolean, serverName: string }> {
@@ -183,7 +183,7 @@ export class InvitationService {
         idempotencyKey,
         to: old.boundEmailNormalized,
         template: 'invitation', locale: this.config.mailDefaultLocale,
-        variables: { actionUrl: `${this.config.publicBaseUrl.replace(/\/$/, '')}/#/accept-invite/${token}` },
+        variables: { actionUrl: `${this.config.webPublicBaseUrl.replace(/\/$/, '')}/account/accept-invite/?token=${encodeURIComponent(token)}` },
       }, replacement.expiresAt)
       await this.mail.outbox.enqueueInTransaction(tx, {
         template: 'invitation',
