@@ -1,9 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 
 const baseUrl = process.env.INTEGRATION_BASE_URL
 const integration = baseUrl === undefined ? describe.skip : describe
 integration('NoteGen sync protocol durability', () => {
+  beforeAll(async () => {
+    if (baseUrl !== undefined) await prepareIntegrationInstance(baseUrl)
+  }, 30_000)
+
   it('deduplicates commands and turns delete-after-edit into a durable conflict', async () => {
     if (baseUrl === undefined) throw new Error('INTEGRATION_BASE_URL is required')
     const deviceId = randomUUID()
@@ -198,6 +202,79 @@ integration('NoteGen sync protocol durability', () => {
     })
   }, 30_000)
 })
+
+async function prepareIntegrationInstance(origin: string): Promise<void> {
+  const statusResponse = await fetch(`${origin}/v1/installation/status`)
+  expect(statusResponse.status, await statusResponse.clone().text()).toBe(200)
+  const status = await statusResponse.json() as { installationRequired: boolean }
+  if (!status.installationRequired) return
+
+  const login = `admin-${randomUUID()}@example.test`
+  const password = 'integration-password'
+  const installationResponse = await fetch(`${origin}/v1/installation/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      serverName: 'NoteGen CI Server',
+      administrator: { login, password },
+    }),
+  })
+  expect(installationResponse.status, await installationResponse.clone().text()).toBe(201)
+
+  const loginResponse = await waitForInstalledServer(origin, login, password)
+  const cookies = loginResponse.headers.getSetCookie().map(cookie => cookie.split(';', 1)[0]!)
+  const csrfCookie = cookies.find(cookie => cookie.startsWith('notegen_csrf='))
+  if (csrfCookie === undefined) throw new Error('Installation login did not return a CSRF cookie')
+  const csrfToken = decodeURIComponent(csrfCookie.slice('notegen_csrf='.length))
+  const cookieHeader = cookies.join('; ')
+  const requestHash = createHash('sha256').update('{"policy":"public"}').digest('base64url')
+  const stepUpResponse = await fetch(`${origin}/v1/web/auth/step-up`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      cookie: cookieHeader,
+      'x-csrf-token': csrfToken,
+    },
+    body: JSON.stringify({
+      audience: 'registration.policy.update',
+      requestHash,
+      password,
+    }),
+  })
+  expect(stepUpResponse.status, await stepUpResponse.clone().text()).toBe(201)
+  const stepUp = await stepUpResponse.json() as { token: string }
+  const policyResponse = await fetch(`${origin}/v1/web/admin/registration-policy`, {
+    method: 'PUT',
+    headers: {
+      'content-type': 'application/json',
+      cookie: cookieHeader,
+      'x-csrf-token': csrfToken,
+      'x-step-up-token': stepUp.token,
+    },
+    body: JSON.stringify({ policy: 'public' }),
+  })
+  expect(policyResponse.status, await policyResponse.clone().text()).toBe(204)
+}
+
+async function waitForInstalledServer(origin: string, login: string, password: string): Promise<Response> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const response = await fetch(`${origin}/v1/web/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ login, password }),
+      })
+      if (response.status === 200) return response
+      if (![404, 503].includes(response.status)) {
+        throw new Error(`Installed server login failed: ${response.status} ${await response.text()}`)
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('Installed server login failed:')) throw error
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  throw new Error('Installed server did not become ready')
+}
 
 function encryptedTestEnvelope(value: string) {
   const bytes = Buffer.from(value)
