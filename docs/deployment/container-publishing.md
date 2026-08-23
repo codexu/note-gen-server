@@ -8,7 +8,7 @@ ghcr.io/codexu/note-gen-server
 
 ## 自动发布规则
 
-- 推送到仓库主开发分支 `feat/sync-foundation`：发布 `edge` 与 `sha-<commit>`。
+- 推送到 `main`：发布 `edge` 与 `sha-<commit>`。
 - 推送 `v0.1.0` 形式的 Git tag：发布 `0.1.0`、`0.1` 与对应 `sha-<commit>`。
 - 手动运行 workflow：发布提交 SHA 标签，用于排查构建或分发问题。
 - 每次同时构建 `linux/amd64` 与 `linux/arm64`，并生成 provenance、SBOM 和 artifact attestation。

@@ -10,13 +10,14 @@ NoteGen Sync Server 是 NoteGen 客户端使用的免费同步服务。官方公
 
 ### Docker Compose（推荐体验）
 
-适合快速搭建个人测试实例。官方 Compose 默认拉取 GHCR 的 `edge` 镜像，并启动 NoteGen Server 与 PostgreSQL 17：
+适合快速搭建个人测试实例。官方 Compose 默认拉取 GHCR 的 `edge` 镜像，并启动 NoteGen Server 与 PostgreSQL 17。镜像地址为 `ghcr.io/codexu/note-gen-server:edge`，支持 `linux/amd64` 和 `linux/arm64`，服务器无需安装 Node.js 或 pnpm：
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git
 cd note-gen-server
 cp .env.docker.example .env
 # 编辑 .env，设置 POSTGRES_PASSWORD、AUTH_SECRET 和 PUBLIC_BASE_URL
+docker compose pull
 docker compose up -d
 docker compose ps
 ```
