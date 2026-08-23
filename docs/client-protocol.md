@@ -19,13 +19,13 @@ workspace_key_versions
 
 ## 登录与设备
 
-1. 每次安装生成并持久化一个 UUID device ID 和 X25519 设备密钥对，登录时上传 Base64URL 公钥。
+1. 每次安装生成并持久化一个 UUID device ID 和 X25519 设备密钥对；device ID 应与密钥材料分开保存，以便密钥丢失后仍能恢复同一设备身份。登录时上传 Base64URL 公钥。
 2. Access Token 只保存在内存或安全系统存储中。
 3. Refresh Token 必须使用系统安全存储；每次刷新都会轮换。
 4. 收到 `401` 时最多刷新并重试一次，不能无限循环。
 5. 设备被撤销后清除该服务器的 token，但不删除本地笔记。
 6. 保存 `/v1/capabilities` 返回的 `instanceId`；同一 URL 的实例身份变化时必须停止自动同步。
-7. device ID 与设备公钥绑定；`device_key_conflict` 时生成新的设备身份，不能覆盖旧公钥及其 envelopes。
+7. device ID 属于安装身份。同一账号重新完成浏览器授权或密码认证后，可以用新的设备公钥恢复已撤销设备或替换丢失的密钥；服务端覆盖公钥并撤销该设备的旧 Refresh Token，不创建重复设备记录。不同账号不能认领同一 device ID。
 
 推荐使用浏览器设备授权，账号密码直接登录作为备用方式：
 
@@ -38,6 +38,10 @@ workspace_key_versions
 7. 换取设备会话后调用 `GET /v1/account` 获取规范化账号名，不从浏览器页面或 URL 传递账号身份。
 
 Web Session 与 NoteGen Device Session 是两套独立凭据。浏览器使用 HttpOnly Cookie 和 CSRF Token；NoteGen 使用 Bearer Access Token 和按设备轮换的 Refresh Token。
+
+## 默认工作区
+
+每个账号的 NoteGen 默认本地工作区必须使用固定的 `notegen.default-library.v1` 幂等键创建或查询云端工作区。不同设备不得根据本地绑定情况各自创建默认云端工作区。升级前若已有多个工作区且尚无该幂等键，服务端选择最早创建的有效工作区作为账号级默认；各设备保留本地文件并重新绑定、扫描和合并，不自动删除其余远端工作区。
 
 ## 端到端加密
 
@@ -92,7 +96,7 @@ WebSocket 连接后第一条消息必须是：
 
 WebSocket 消息只表示状态可能变化。`workspace.changed` 触发 Pull，`workspace.keys-changed` 触发重新获取 envelope，`workspace.state-changed` 与 `account.workspaces-changed` 触发刷新 Workspace 列表。任何消息都不能直接推进 cursor，也不能假设每条 change 都会收到通知。
 
-Canvas 拖拽期间可以在 `presence.update.canvas.nodes` 中发送最多 100 个 `{ id, x, y }` 临时位置；拖拽结束后的最终位置仍须使用 durable Yjs command 持久化。
+文本光标的 `presence.update` 需携带 `coordinateSpace: "markdown" | "prosemirror"`，接收端只在相同坐标空间渲染；Canvas 使用 `coordinateSpace: "canvas"`。Canvas 拖拽期间可以在 `presence.update.canvas.nodes` 中发送最多 100 个 `{ id, x, y }` 临时位置；拖拽结束后的最终位置仍须使用 durable Yjs command 持久化。
 
 ## Push 与幂等
 

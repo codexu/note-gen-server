@@ -284,16 +284,19 @@ export interface SyncOverviewContract {
     deletedCount: number
     updatedAt: string
   }>
-  recentActivity: Array<{
-    sequence: string
+  activityTimeline: Array<{
+    startedAt: string
+    updates: number
+    deletes: number
+    kinds: Array<{
+      kind: string
+      updates: number
+      deletes: number
+    }>
+  }>
+  activityKinds: Array<{
     kind: string
-    changeType: "upsert" | "delete"
-    createdAt: string
-    device: {
-      id: string
-      name: string
-      platform: string
-    }
+    count: number
   }>
 }
 
@@ -325,7 +328,10 @@ export interface SyncSessionContract {
     oldestAvailableSequence: string | null
   }
   latestSequence: string
-  bootstrap: { required: boolean, reason: "cursor_ahead" | "cursor_expired" | null }
+  bootstrap: {
+    required: boolean
+    reason: "cursor_ahead" | "cursor_expired" | "device_uninitialized" | "lag_too_large" | null
+  }
   limits: {
     maxCommandsPerBatch: number
     maxEventsPerPage: number
@@ -341,7 +347,9 @@ export interface SyncSessionContract {
 export interface WebWorkspaceContract {
   id: string
   nameCiphertext: string
+  type: "account-data" | "library"
   isDefault: boolean
+  isNoteGenDefault: boolean
   latestSequence: string
   latestKeyVersion: number
   encryptionMode: "managed" | "e2ee"

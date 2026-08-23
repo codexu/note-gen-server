@@ -8,7 +8,7 @@ import {
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
-import type { ChangeNotifier } from '../sync/types.js'
+import type { ChangeNotifier, SyncObjectKind } from '../sync/types.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import type { CiphertextEnvelope, SyncCommand, SyncCommandResult } from './types.js'
 import type { UsageService } from '../usage/service.js'
@@ -18,8 +18,47 @@ const cacheableRejectionCodes = new Set([
   'request_invalid', 'object_too_large', 'ciphertext_hash_mismatch',
   'object_kind_mismatch', 'update_id_reused', 'conflict_id_reused',
   'document_identity_mismatch', 'asset_cannot_bind_resources',
-  'name_blind_index_key_mismatch',
+  'name_blind_index_key_mismatch', 'workspace_object_kind_invalid',
 ])
+// Library events materialize to the filesystem and require atomic writes and
+// fsync. A long stream of intermediate snapshots is therefore much more
+// expensive on mobile than structured account-data events. Switch libraries
+// to a fixed bootstrap snapshot earlier so reconnecting devices catch up to
+// the current tree instead of replaying thousands of obsolete file versions.
+const maxLibraryIncrementalLag = 250n
+const maxAccountDataIncrementalLag = 10_000n
+
+const accountDataObjectKinds = new Set<SyncObjectKind>([
+  'asset', 'canvas', 'tag', 'mark', 'conversation', 'message', 'memory', 'setting',
+  'yjs-checkpoint', 'yjs-update',
+])
+const libraryObjectKinds = new Set<SyncObjectKind>([
+  'asset', 'folder', 'note', 'yjs-checkpoint', 'yjs-update',
+])
+
+function assertCommandWorkspaceType(
+  workspaceType: 'account-data' | 'library',
+  command: SyncCommand,
+): void {
+  const kind = command.type === 'upsert-object'
+    || command.type === 'initialize-document'
+    || command.type === 'append-update'
+    || command.type === 'commit-checkpoint'
+    || command.type === 'create-conflict'
+    ? command.kind
+    : command.type === 'resolve-conflict'
+      ? command.objectResolution?.kind ?? command.resolution?.kind
+      : undefined
+  if (kind === undefined) return
+  const allowed = workspaceType === 'account-data' ? accountDataObjectKinds : libraryObjectKinds
+  if (allowed.has(kind)) return
+  throw new ApiError({
+    code: 'workspace_object_kind_invalid',
+    message: `Object kind ${kind} is not valid in a ${workspaceType} workspace`,
+    statusCode: 409,
+    details: { workspaceType, kind },
+  })
+}
 
 function assertCommandCapability(capabilities: readonly WorkspaceCapability[], command: SyncCommand): void {
   let required: WorkspaceCapability
@@ -34,6 +73,7 @@ function assertCommandCapability(capabilities: readonly WorkspaceCapability[], c
     case 'resolve-conflict':
       required = 'history.restore'
       break
+    case 'initialize-document':
     case 'append-update':
     case 'commit-checkpoint':
     case 'create-conflict':
@@ -95,6 +135,19 @@ export class DurableSyncService {
       : oldestEvent !== undefined && cursor + 1n < oldestEvent.sequence
         ? 'expired' as const
         : 'valid' as const
+    const uninitializedDevice = deviceCursor === undefined && workspace.latestSequence > 0n
+    const maxIncrementalLag = access.type === 'library'
+      ? maxLibraryIncrementalLag
+      : maxAccountDataIncrementalLag
+    const lagTooLarge = workspace.latestSequence > cursor
+      && workspace.latestSequence - cursor > maxIncrementalLag
+    const bootstrapReason = cursorState === 'ahead'
+      ? 'cursor_ahead' as const
+      : cursorState === 'expired'
+        ? 'cursor_expired' as const
+        : uninitializedDevice
+          ? 'device_uninitialized' as const
+          : lagTooLarge ? 'lag_too_large' as const : null
     return {
       protocol: {
         requestedVersion: protocolVersion,
@@ -116,8 +169,8 @@ export class DurableSyncService {
       },
       latestSequence: workspace.latestSequence.toString(),
       bootstrap: {
-        required: cursorState !== 'valid',
-        reason: cursorState === 'valid' ? null : cursorState === 'ahead' ? 'cursor_ahead' : 'cursor_expired',
+        required: bootstrapReason !== null,
+        reason: bootstrapReason,
       },
       limits: {
         maxCommandsPerBatch: 100,
@@ -138,6 +191,7 @@ export class DurableSyncService {
     for (const command of commands) {
       try {
         assertCommandCapability(access.capabilities, command)
+        assertCommandWorkspaceType(access.type, command)
         results.push(await this.#command(access.ownerAccountId, deviceId, workspaceId, command))
       } catch (error) {
         if (!(error instanceof ApiError)) throw error
@@ -415,14 +469,42 @@ export class DurableSyncService {
     this.#assertSyncEpoch(expectedSyncEpoch)
     await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const cursor = counter(after, 'after')
-    const rows = await this.database.db.select().from(syncUpdates).where(and(
-      eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
-      gt(syncUpdates.documentSequence, cursor),
-    )).orderBy(asc(syncUpdates.documentSequence)).limit(limit + 1)
+    const [rows, documents] = await Promise.all([
+      this.database.db.select().from(syncUpdates).where(and(
+        eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
+        gt(syncUpdates.documentSequence, cursor),
+      )).orderBy(asc(syncUpdates.documentSequence)).limit(limit + 1),
+      this.database.db.select({
+        objectId: syncDocuments.objectId,
+        checkpointDocumentSequence: syncDocuments.checkpointDocumentSequence,
+        checkpointId: syncDocuments.checkpointId,
+        checkpointKeyVersion: syncDocuments.checkpointKeyVersion,
+        checkpointCiphertext: syncDocuments.checkpointCiphertext,
+        checkpointCiphertextHash: syncDocuments.checkpointCiphertextHash,
+      }).from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId),
+        eq(syncDocuments.documentId, documentId),
+      )).limit(1),
+    ])
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit)
+    const document = documents[0]
+    const checkpoint = document?.checkpointId
+      && document.checkpointKeyVersion !== null
+      && document.checkpointCiphertext !== null
+      && document.checkpointCiphertextHash !== null
+      ? {
+          objectId: document.objectId,
+          documentSequence: document.checkpointDocumentSequence.toString(),
+          checkpointId: document.checkpointId,
+          keyVersion: document.checkpointKeyVersion,
+          ciphertext: document.checkpointCiphertext,
+          ciphertextHash: document.checkpointCiphertextHash,
+        }
+      : null
     return {
       updates: page.map(row => ({ ...row, documentSequence: row.documentSequence.toString(), eventSequence: row.eventSequence.toString() })),
+      checkpoint,
       nextDocumentSequence: page.at(-1)?.documentSequence.toString() ?? after,
       hasMore,
       ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
@@ -525,6 +607,14 @@ export class DurableSyncService {
       if (expected !== actual) return {
         commandId: command.commandId, status: 'conflict', duplicate: false, code: 'revision_conflict',
         ...(actual === null ? {} : { revision: actual.toString() }),
+      }
+      if (command.type === 'delete-object' && current?.deletedAt !== null && current?.deletedAt !== undefined) {
+        return {
+          commandId: command.commandId,
+          status: 'applied',
+          duplicate: true,
+          revision: current.currentRevision.toString(),
+        }
       }
       const parentObjectId = command.parentObjectId === undefined
         ? current?.parentObjectId ?? null : command.parentObjectId
@@ -886,7 +976,7 @@ export class DurableSyncService {
       return { commandId: command.commandId, status: 'applied', duplicate: false, sequence: finalSequence.toString() }
     }
 
-    if (command.type === 'append-update') {
+    if (command.type === 'initialize-document' || command.type === 'append-update') {
       await this.#assertKeyAndBlobs(tx, workspaceId, command.keyVersion, [])
       const [currentObject] = await tx.select({ deletedAt: objects.deletedAt, kind: objects.kind }).from(objects).where(and(
         eq(objects.workspaceId, workspaceId), eq(objects.objectId, command.objectId),
@@ -908,6 +998,16 @@ export class DurableSyncService {
       )).limit(1).for('update')
       if (document !== undefined && (document.objectId !== command.objectId || document.kind !== command.kind)) {
         throw new ApiError({ code: 'document_identity_mismatch', message: 'Document ID is already bound to another object', statusCode: 409 })
+      }
+      if (command.type === 'initialize-document'
+        && document !== undefined
+        && (document.latestDocumentSequence > 0n || document.checkpointDocumentSequence > 0n)) {
+        throw new ApiError({
+          code: 'document_already_initialized',
+          message: 'Document already has an authoritative collaborative baseline',
+          statusCode: 409,
+          details: { latestDocumentSequence: document.latestDocumentSequence.toString() },
+        })
       }
       const documentSequence = (document?.latestDocumentSequence ?? 0n) + 1n
       const sequence = await nextSequence(tx, workspaceId)

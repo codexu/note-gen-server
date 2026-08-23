@@ -19,6 +19,7 @@ interface PresenceUpdateMessage {
   anchor: number
   head: number
   label: string
+  coordinateSpace: 'markdown' | 'prosemirror' | 'canvas'
   canvas: {
     nodes: Array<{ id: string; x: number; y: number }>
   } | null
@@ -246,8 +247,17 @@ function parseRealtimeMessage(raw: RawData): RealtimeMessage {
     anchor: candidate.anchor,
     head: candidate.head,
     label: candidate.label.trim().slice(0, 40) || '其他设备',
+    coordinateSpace: parsePresenceCoordinateSpace(candidate.coordinateSpace, candidate.canvas),
     canvas: parseCanvasPresence(candidate.canvas),
   }
+}
+
+function parsePresenceCoordinateSpace(
+  value: unknown,
+  canvas: unknown,
+): PresenceUpdateMessage['coordinateSpace'] {
+  if (value === 'markdown' || value === 'prosemirror' || value === 'canvas') return value
+  return canvas === undefined || canvas === null ? 'prosemirror' : 'canvas'
 }
 
 function parseCanvasPresence(value: unknown): PresenceUpdateMessage['canvas'] {
@@ -379,6 +389,7 @@ function sendPresence(presence: PresenceState, socket: WebSocket): void {
     label: presence.label,
     anchor: presence.anchor,
     head: presence.head,
+    coordinateSpace: presence.coordinateSpace,
     canvas: presence.canvas,
   }))
 }

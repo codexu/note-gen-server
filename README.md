@@ -2,7 +2,42 @@
 
 NoteGen Sync Server 是 NoteGen 客户端使用的免费同步服务。官方公共测试服务和用户自行部署使用同一套独立实例运行方式。
 
+> 自托管服务目前处于实验阶段，部署方式、配置和数据库结构仍可能变化。请保留 NoteGen 本地 Markdown，不要把实验实例作为重要数据的唯一副本。
+
 项目包含同步 API 和账号管理 Web。Web 负责注册、登录、设备关联、同步统计和账号管理，不包含 Markdown 编辑器、AI 功能或多人协作功能。
+
+## 开始使用
+
+### Docker Compose（推荐体验）
+
+适合快速搭建个人测试实例。官方 Compose 默认拉取 GHCR 的 `edge` 镜像，并启动 NoteGen Server 与 PostgreSQL 17：
+
+```bash
+git clone https://github.com/codexu/note-gen-server.git
+cd note-gen-server
+cp .env.docker.example .env
+# 编辑 .env，设置 POSTGRES_PASSWORD、AUTH_SECRET 和 PUBLIC_BASE_URL
+docker compose up -d
+docker compose ps
+```
+
+详细的首次初始化、HTTPS、日志和数据说明见 [Docker Compose 部署](docs/deployment/docker.md)。
+
+### 从源码运行（开发者）
+
+适合调试服务端、修改功能和提交贡献。需要 Node.js 22 或更高版本、pnpm 10.20.0 和 PostgreSQL 17：
+
+```bash
+git clone https://github.com/codexu/note-gen-server.git
+cd note-gen-server
+createuser notegen
+createdb -O notegen notegen
+pnpm install
+cp .env.example .env
+pnpm dev
+```
+
+贡献约定、仓库结构与本地容器构建方法见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 项目定位
 
@@ -23,6 +58,9 @@ apps/web     Next.js + shadcn/ui 账号管理页面
 
 当前项目已完成首个可部署的服务端基线，详细方案见：
 
+- [Docker Compose 部署](docs/deployment/docker.md)
+- [容器镜像发布](docs/deployment/container-publishing.md)
+- [参与服务端开发](CONTRIBUTING.md)
 - [同步服务技术规格](docs/sync-server-spec.md)
 - [本地运行与运维](docs/operations.md)
 - [NoteGen 客户端接入协议](docs/client-protocol.md)

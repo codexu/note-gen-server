@@ -1,0 +1,55 @@
+name: notegen-server
+
+services:
+  server:
+    image: ${NOTEGEN_SERVER_IMAGE:-ghcr.io/codexu/note-gen-server:edge}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://notegen:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/notegen
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      BLOB_STORAGE_DRIVER: filesystem
+      BLOB_STORAGE_PATH: /app/data/blobs
+      BACKUP_PATH: /app/data/backups
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      METRICS_ENABLED: ${METRICS_ENABLED:-false}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      OPENAPI_ENABLED: ${OPENAPI_ENABLED:-false}
+    ports:
+      - "${SERVER_BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-3789}:3789"
+    volumes:
+      - notegen_data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3789/health/ready').then((response) => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: notegen
+      POSTGRES_USER: notegen
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notegen -d notegen"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  notegen_data:
+  postgres_data:

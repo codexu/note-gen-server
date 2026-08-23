@@ -8,18 +8,6 @@ import {
   requireCsrf, requireWebSession, WEB_CSRF_COOKIE, WEB_SESSION_COOKIE,
 } from './web-auth.js'
 
-const Activity = Type.Object({
-  sequence: CounterString,
-  kind: Type.String(),
-  changeType: Type.Union([Type.Literal('upsert'), Type.Literal('delete')]),
-  createdAt: Timestamp,
-  device: Type.Object({
-    id: Type.String({ format: 'uuid' }),
-    name: Type.String(),
-    platform: Type.String(),
-  }),
-})
-
 export function createWebDashboardRoutes(
   workspaces: WorkspaceService,
   webSessions: WebSessionService,
@@ -54,7 +42,20 @@ export function createWebDashboardRoutes(
               deletedCount: Type.Integer(),
               updatedAt: Timestamp,
             })),
-            recentActivity: Type.Array(Activity),
+            activityTimeline: Type.Array(Type.Object({
+              startedAt: Timestamp,
+              updates: Type.Integer(),
+              deletes: Type.Integer(),
+              kinds: Type.Array(Type.Object({
+                kind: Type.String(),
+                updates: Type.Integer(),
+                deletes: Type.Integer(),
+              })),
+            })),
+            activityKinds: Type.Array(Type.Object({
+              kind: Type.String(),
+              count: Type.Integer(),
+            })),
           }),
         },
       },
@@ -69,7 +70,9 @@ export function createWebDashboardRoutes(
           200: Type.Array(Type.Object({
             id: Type.String({ format: 'uuid' }),
             nameCiphertext: Type.String(),
+            type: Type.Union([Type.Literal('account-data'), Type.Literal('library')]),
             isDefault: Type.Boolean(),
+            isNoteGenDefault: Type.Boolean(),
             latestSequence: CounterString,
             latestKeyVersion: Type.Integer(),
             encryptionMode: Type.Union([Type.Literal('managed'), Type.Literal('e2ee')]),

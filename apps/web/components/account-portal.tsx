@@ -15,6 +15,7 @@ import {
   UsersIcon,
 } from "lucide-react"
 import QRCode from "react-qr-code"
+import { Bar, BarChart, CartesianGrid, XAxis } from "recharts"
 
 import { AdminShell, type AdminSection } from "@/components/admin-shell"
 import { NOTEGEN_SITE_URL } from "@/components/notegen-brand"
@@ -26,6 +27,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import {
   Card,
   CardContent,
@@ -33,6 +35,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
@@ -87,6 +97,19 @@ import { cn } from "@/lib/utils"
 type AuthMode = "login" | "register"
 type AuthStep = "credentials" | "totp" | "forgot" | "reset" | "verify" | "verification-pending"
 type AdminDataView = "overview" | "accounts" | "data" | "audit" | "tools"
+
+const syncActivityKindDefinitions: ChartConfig = {
+  note: { label: "写作", color: "var(--activity-note)" },
+  folder: { label: "目录", color: "var(--activity-folder)" },
+  asset: { label: "附件", color: "var(--activity-asset)" },
+  canvas: { label: "画布", color: "var(--activity-canvas)" },
+  record: { label: "记录", color: "var(--activity-record)" },
+  tag: { label: "标签", color: "var(--activity-tag)" },
+  conversation: { label: "对话", color: "var(--activity-conversation)" },
+  memory: { label: "记忆", color: "var(--activity-memory)" },
+  setting: { label: "设置", color: "var(--activity-setting)" },
+  collaboration: { label: "实时文档", color: "var(--activity-collaboration)" },
+} satisfies ChartConfig
 
 export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthenticationFlow?: boolean }) {
   const [, setRelativeTimeTick] = useState(0)
@@ -243,6 +266,14 @@ export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthen
     document.addEventListener("visibilitychange", onVisibility)
     return () => document.removeEventListener("visibilitychange", onVisibility)
   }, [account, loadDashboardData])
+
+  useEffect(() => {
+    if (!account || !["overview", "devices", "workspaces"].includes(section)) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadDashboardData()
+    }, 15_000)
+    return () => window.clearInterval(timer)
+  }, [account, loadDashboardData, section])
 
   useEffect(() => {
     if (!account) return
@@ -605,6 +636,10 @@ function OverviewSection({ overview, devices, onNavigate }: {
   onNavigate: (section: AdminSection) => void
 }) {
   const contentStats = summarizeContentKinds(overview?.kinds ?? [])
+  const activityChart = summarizeSyncActivity(
+    overview?.activityTimeline ?? [],
+    overview?.activityKinds ?? [],
+  )
   const storage = overview?.storageUsage
   const activeBytes = storage ? sumByteStrings(
     storage.activeObjectBytes, storage.activeCrdtBytes, storage.activeBlobBytes,
@@ -703,22 +738,61 @@ function OverviewSection({ overview, devices, onNavigate }: {
         <Card>
           <CardHeader>
             <CardTitle>最近同步活动</CardTitle>
-            <CardDescription>显示设备、内容类型和操作，不展示文件名或正文。</CardDescription>
+            <CardDescription>按分钟汇总最近 1 小时内发生变化的对象，不展示文件名或正文。</CardDescription>
           </CardHeader>
           <CardContent>
-            {overview?.recentActivity.length ? (
-              <ItemGroup>
-                {overview.recentActivity.slice(0, 10).map((activity) => (
-                  <Item key={`${activity.sequence}-${activity.device.id}`} variant="outline">
-                    <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
-                    <ItemContent>
-                      <ItemTitle>{activity.changeType === "delete" ? "删除" : "更新"} {kindLabel(activity.kind)}</ItemTitle>
-                      <ItemDescription>{activity.device.name} · {formatDate(activity.createdAt)}</ItemDescription>
-                    </ItemContent>
-                    <ItemActions><Badge variant="outline">#{activity.sequence}</Badge></ItemActions>
-                  </Item>
-                ))}
-              </ItemGroup>
+            {activityChart.total ? (
+              <div className="grid gap-5">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <Metric label="对象变更" value={`${activityChart.total} 次`} detail="同一分钟内的重复操作已合并" />
+                  <Metric label="更新" value={`${activityChart.updates} 次`} detail="新增或修改对象" />
+                  <Metric label="删除" value={`${activityChart.deletes} 次`} detail="删除对象" />
+                  <Metric label="时间范围" value="1 小时" detail="包含没有同步活动的分钟" />
+                </div>
+
+                <div className="rounded-xl border bg-muted/15 p-4">
+                  <div className="mb-2">
+                    <div>
+                      <div className="text-sm font-medium">活动趋势</div>
+                      <div className="text-xs text-muted-foreground">每根细柱表示一分钟内发生变化的唯一对象，不同颜色代表不同内容类型</div>
+                    </div>
+                  </div>
+                  <ChartContainer
+                    config={activityChart.config}
+                    className="h-56 w-full"
+                    aria-label={`最近同步活动：${activityChart.updates} 次更新，${activityChart.deletes} 次删除；按内容类型着色`}
+                  >
+                    <BarChart accessibilityLayer data={activityChart.buckets} margin={{ left: 8, right: 8 }}>
+                      <CartesianGrid vertical={false} />
+                      <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={28} />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <ChartLegend content={<ChartLegendContent className="flex-wrap" />} />
+                      {activityChart.series.map((item) => (
+                        <Bar
+                          key={item.key}
+                          dataKey={item.key}
+                          stackId="activity"
+                          fill={`var(--color-${item.key})`}
+                          radius={2}
+                          maxBarSize={10}
+                        />
+                      ))}
+                    </BarChart>
+                  </ChartContainer>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {activityChart.kinds.map((item) => (
+                      <Badge key={item.key} variant="outline">
+                        <span
+                          aria-hidden="true"
+                          className="size-2 rounded-[2px]"
+                          style={{ backgroundColor: item.color }}
+                        />
+                        {item.label} {item.count}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              </div>
             ) : <ActionEmpty icon={LaptopIcon} title="还没有同步活动" description="关联设备并在 NoteGen 中完成首次同步后，最近活动会显示在这里。" action="关联设备" onAction={() => onNavigate("connect")} />}
           </CardContent>
         </Card>
@@ -747,16 +821,19 @@ function WorkspaceManagement({
 }) {
   const sorted = [...workspaces].sort((left, right) => (
     Number(right.isDefault) - Number(left.isDefault)
+    || Number(right.isNoteGenDefault) - Number(left.isNoteGenDefault)
     || right.objectCount - left.objectCount
     || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
   ))
-  const historicalCount = workspaces.filter((workspace) => !workspace.isDefault).length
+  const historicalCount = workspaces.filter((workspace) => (
+    !workspace.isDefault && !workspace.isNoteGenDefault
+  )).length
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>工作区列表</CardTitle>
-        <CardDescription>查看工作区状态与用量；默认工作区受到保护，历史工作区可在确认后软删除。</CardDescription>
+        <CardDescription>查看个人数据空间、默认写作工作区和历史工作区；只有真正的历史工作区可以软删除。</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {recentlyDeletedWorkspace ? <Alert><HistoryIcon /><AlertTitle>历史工作区已删除</AlertTitle><AlertDescription className="flex flex-col items-start gap-3"><span>工作区 {recentlyDeletedWorkspace.id.slice(0, 8)} 已进入软删除状态，可以立即恢复。</span><Button size="sm" variant="outline" disabled={deletingWorkspaceId !== null} onClick={() => void onRestore(recentlyDeletedWorkspace.id)}>{deletingWorkspaceId === recentlyDeletedWorkspace.id ? <Spinner data-icon="inline-start" /> : null}撤销删除</Button></AlertDescription></Alert> : null}
@@ -769,21 +846,30 @@ function WorkspaceManagement({
         ) : null}
         {sorted.length ? (
           <ItemGroup>
-            {sorted.map((workspace) => (
-              <Item key={workspace.id} variant="outline">
-                <ItemMedia variant="icon">{workspace.isDefault ? <ServerIcon /> : <HistoryIcon />}</ItemMedia>
+            {sorted.map((workspace) => {
+              const protectedWorkspace = workspace.isDefault || workspace.isNoteGenDefault
+              const title = workspace.isDefault
+                ? "个人数据空间"
+                : workspace.isNoteGenDefault
+                  ? `默认写作工作区 ${workspace.id.slice(0, 8)}`
+                  : `历史工作区 ${workspace.id.slice(0, 8)}`
+              const kindLabel = workspace.isDefault
+                ? "个人数据"
+                : workspace.isNoteGenDefault ? "默认写作" : "历史"
+              return <Item key={workspace.id} variant="outline">
+                <ItemMedia variant="icon">{protectedWorkspace ? <ServerIcon /> : <HistoryIcon />}</ItemMedia>
                 <ItemContent>
-                  <ItemTitle>{workspace.isDefault ? "当前默认工作区" : `历史工作区 ${workspace.id.slice(0, 8)}`}</ItemTitle>
+                  <ItemTitle>{title}</ItemTitle>
                   <ItemDescription>
                     {workspace.objectCount} 项内容 · {workspace.deletedObjectCount} 项删除记录 · 创建于 {formatDate(workspace.createdAt)}
                   </ItemDescription>
                 </ItemContent>
                 <ItemActions className="flex-wrap justify-end">
-                  <Badge variant={workspace.isDefault ? "secondary" : "outline"}>
-                    {workspace.isDefault ? "默认" : "历史"}
+                  <Badge variant={protectedWorkspace ? "secondary" : "outline"}>
+                    {kindLabel}
                   </Badge>
                   <Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管加密" : "E2EE"}</Badge>
-                  {!workspace.isDefault ? <DangerConfirmButton
+                  {!protectedWorkspace ? <DangerConfirmButton
                     label="删除"
                     title="删除这个历史工作区？"
                     description="工作区及其同步内容将进入软删除状态。确认所有设备都不再使用它后再继续。"
@@ -793,7 +879,7 @@ function WorkspaceManagement({
                   /> : null}
                 </ItemActions>
               </Item>
-            ))}
+            })}
           </ItemGroup>
         ) : <ActionEmpty icon={ServerIcon} title="还没有同步工作区" description="连接 NoteGen 并完成首次同步后，工作区会显示在这里。" />}
       </CardContent>
@@ -812,56 +898,86 @@ function DeviceManagement({
   onRevoke: (id: string) => void
   onConnect: () => void
 }) {
+  const activeDevices = sortDevices(devices.filter((device) => !device.revokedAt))
+  const revokedDevices = sortDevices(devices.filter((device) => Boolean(device.revokedAt)))
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>已关联设备</CardTitle>
-        <CardDescription>每台设备拥有独立会话，可以单独撤销；撤销不会删除已同步内容。</CardDescription>
+        <CardDescription>当前共 {activeDevices.length} 台有效设备。历史授权是已经失效的登录身份，不代表新增了物理设备；撤销不会删除已同步内容。</CardDescription>
       </CardHeader>
-      <CardContent>
-        {devices.length ? (
+      <CardContent className="flex flex-col gap-4">
+        {activeDevices.length ? (
           <ItemGroup>
-            {sortDevices(devices).map((device) => (
-              <Item key={device.id} variant="outline">
-                <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
-                <ItemContent>
-                  <ItemTitle>{device.name}</ItemTitle>
-                  <ItemDescription>
-                    {device.platform} · 最近活动 {formatDate(device.lastSeenAt)} · 关联于 {formatDate(device.createdAt)}
-                  </ItemDescription>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <DeviceSyncBadge device={device} />
-                    {device.acknowledgedAt ? (
-                      <span className="text-xs text-muted-foreground">最后确认 {formatDate(device.acknowledgedAt)}</span>
-                    ) : null}
-                  </div>
-                  {isLikelyDuplicateDevice(device, devices) ? <Badge variant="outline">疑似重复设备</Badge> : null}
-                </ItemContent>
-                <ItemActions>
-                  {device.revokedAt ? (
-                    <Badge variant="outline">已撤销</Badge>
-                  ) : (
-                    <DangerConfirmButton
-                      label="撤销"
-                      title={`撤销“${device.name}”的设备授权？`}
-                      description="这台设备需要重新关联才能继续同步，已经同步到服务端的内容不会删除。"
-                      disabled={busy}
-                      onConfirm={() => onRevoke(device.id)}
-                    />
-                  )}
-                </ItemActions>
-              </Item>
+            {activeDevices.map((device) => (
+              <DeviceManagementItem key={device.id} device={device} devices={activeDevices} busy={busy} onRevoke={onRevoke} />
             ))}
           </ItemGroup>
         ) : <ActionEmpty icon={LaptopIcon} title="还没有关联设备" description="按页面提示复制服务器地址或扫描二维码，即可开始同步。" action="关联第一台设备" onAction={onConnect} />}
+
+        {revokedDevices.length ? (
+          <Collapsible>
+            <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50">
+              <HistoryIcon className="size-4" />
+              历史授权（{revokedDevices.length}）
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-3">
+              <ItemGroup>
+                {revokedDevices.map((device) => (
+                  <DeviceManagementItem key={device.id} device={device} devices={activeDevices} busy={busy} onRevoke={onRevoke} />
+                ))}
+              </ItemGroup>
+            </CollapsibleContent>
+          </Collapsible>
+        ) : null}
       </CardContent>
     </Card>
   )
 }
 
+function DeviceManagementItem({ device, devices, busy, onRevoke }: {
+  device: Device
+  devices: Device[]
+  busy: boolean
+  onRevoke: (id: string) => void
+}) {
+  return (
+    <Item variant="outline">
+      <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
+      <ItemContent>
+        <ItemTitle>{device.name}</ItemTitle>
+        <ItemDescription>
+          {device.platform} · 最近活动 {formatDate(device.lastSeenAt)} · 关联于 {formatDate(device.createdAt)}
+        </ItemDescription>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <DeviceSyncBadge device={device} />
+          {device.acknowledgedAt ? (
+            <span className="text-xs text-muted-foreground">最后确认 {formatDate(device.acknowledgedAt)}</span>
+          ) : null}
+        </div>
+        {isLikelyDuplicateDevice(device, devices) ? <Badge variant="outline">疑似重复设备</Badge> : null}
+      </ItemContent>
+      <ItemActions>
+        {device.revokedAt ? (
+          <Badge variant="outline">已撤销</Badge>
+        ) : (
+          <DangerConfirmButton
+            label="撤销"
+            title={`撤销“${device.name}”的设备授权？`}
+            description="这台设备需要重新关联才能继续同步，已经同步到服务端的内容不会删除。"
+            disabled={busy}
+            onConfirm={() => onRevoke(device.id)}
+          />
+        )}
+      </ItemActions>
+    </Item>
+  )
+}
+
 function DeviceSyncBadge({ device }: { device: Device }) {
   if (device.syncStatus === "caught-up") return <Badge variant="outline">已追平</Badge>
-  if (device.syncStatus === "behind") return <Badge variant="destructive">落后 {device.pendingEventCount} 项</Badge>
+  if (device.syncStatus === "behind") return <Badge variant="destructive">{device.pendingEventCount} 个对象有变更</Badge>
   return <Badge variant="outline">从未确认同步</Badge>
 }
 
@@ -1959,22 +2075,62 @@ function isLikelyDuplicateDevice(device: Device, devices: Device[]): boolean {
   return newest.id !== device.id
 }
 
-function kindLabel(kind: string): string {
-  const labels: Record<string, string> = {
-    note: "Markdown 笔记",
-    folder: "目录",
-    asset: "附件",
-    canvas: "画布",
-    record: "记录",
-    tag: "标签",
-    mark: "记录",
-    conversation: "对话",
-    memory: "记忆",
-    setting: "设置",
-    "yjs-checkpoint": "实时文档快照",
-    "yjs-update": "实时文档增量",
+function summarizeSyncActivity(
+  timeline: SyncOverview["activityTimeline"],
+  kinds: SyncOverview["activityKinds"],
+) {
+  const seriesKeys = [...new Set([
+    ...kinds.map((item) => activityKindKey(item.kind)),
+    ...timeline.flatMap((bucket) => bucket.kinds.map((item) => activityKindKey(item.kind))),
+  ])]
+  const config = Object.fromEntries(seriesKeys.map((key) => [
+    key,
+    syncActivityKindDefinitions[key] ?? { label: key, color: "var(--chart-5)" },
+  ])) satisfies ChartConfig
+  const chartBuckets = timeline.map((bucket) => {
+    const values = Object.fromEntries(seriesKeys.map((key) => [key, 0]))
+    for (const item of bucket.kinds) {
+      const key = activityKindKey(item.kind)
+      values[key] = (values[key] ?? 0) + item.updates + item.deletes
+    }
+    return {
+      key: bucket.startedAt,
+      label: new Intl.DateTimeFormat("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(new Date(bucket.startedAt)),
+      ...values,
+    }
+  })
+  const updates = timeline.reduce((total, bucket) => total + bucket.updates, 0)
+  const deletes = timeline.reduce((total, bucket) => total + bucket.deletes, 0)
+  const kindCounts = new Map<string, number>()
+  for (const item of kinds) {
+    const key = activityKindKey(item.kind)
+    kindCounts.set(key, (kindCounts.get(key) ?? 0) + item.count)
   }
-  return labels[kind] ?? kind
+  return {
+    buckets: chartBuckets,
+    total: updates + deletes,
+    updates,
+    deletes,
+    config,
+    series: seriesKeys.map((key) => ({ key })),
+    kinds: seriesKeys.map((key) => ({
+      key,
+      label: String(config[key]?.label ?? key),
+      color: config[key]?.color ?? "var(--chart-5)",
+      count: kindCounts.get(key) ?? 0,
+    })),
+  }
+}
+
+function activityKindKey(kind: string): string {
+  if (kind === "mark" || kind === "record") return "record"
+  if (kind === "message" || kind === "conversation") return "conversation"
+  if (kind === "yjs-checkpoint" || kind === "yjs-update") return "collaboration"
+  return kind
 }
 
 function summarizeContentKinds(kinds: SyncOverview["kinds"]): Array<{
@@ -1983,9 +2139,9 @@ function summarizeContentKinds(kinds: SyncOverview["kinds"]): Array<{
   deletedCount: number
 }> {
   const groups = [
-    { label: "笔记", kinds: ["note"] },
+    { label: "写作", kinds: ["note"] },
     { label: "记录", kinds: ["mark", "record"] },
-    { label: "绘图", kinds: ["canvas"] },
+    { label: "画布", kinds: ["canvas"] },
     { label: "对话", kinds: ["conversation"] },
     { label: "记忆", kinds: ["memory"] },
     { label: "配置", kinds: ["setting"] },

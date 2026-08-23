@@ -55,6 +55,14 @@ export type SyncCommand =
       } & CiphertextEnvelope>
     }
   | ({
+      type: 'initialize-document'
+      commandId: string
+      updateId: string
+      documentId: string
+      objectId: string
+      kind: SyncObjectKind
+    } & CiphertextEnvelope)
+  | ({
       type: 'append-update'
       commandId: string
       updateId: string

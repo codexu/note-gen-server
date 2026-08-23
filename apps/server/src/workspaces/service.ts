@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
 import { devices, objects, workspaceKeyEnvelopes, workspaceKeys, workspaceMembers, workspaces } from '../database/schema.js'
 import { ApiError } from '../errors.js'
@@ -7,6 +7,8 @@ import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-f
 import type { ChangeNotifier } from '../sync/types.js'
 import type { UsageService } from '../usage/service.js'
 import { workspaceCapabilities, type WorkspaceCapability } from './capabilities.js'
+
+const NOTEGEN_DEFAULT_LIBRARY_IDEMPOTENCY_KEY = 'notegen.default-library.v1'
 
 export interface CreateWorkspaceInput {
   nameCiphertext: string
@@ -56,10 +58,39 @@ export class WorkspaceService {
           eq(workspaces.accountId, accountId), eq(workspaces.creationIdempotencyKey, input.idempotencyKey),
         )).limit(1)
         if (existing !== undefined) {
-          if (existing.creationRequestHash !== requestHash) {
+          // The default NoteGen library is bootstrapped independently by every
+          // device. Its encrypted name and generated managed key are expected
+          // to differ, so the account-scoped key elects the first successful
+          // creation instead of treating later devices as conflicting retries.
+          if (existing.creationRequestHash !== requestHash
+            && input.idempotencyKey !== NOTEGEN_DEFAULT_LIBRARY_IDEMPOTENCY_KEY) {
             throw new ApiError({ code: 'idempotency_conflict', message: 'Workspace creation key was reused with different input', statusCode: 409 })
           }
           return { ...existing, latestSequence: existing.latestSequence.toString(), created: false }
+        }
+        if (input.idempotencyKey === NOTEGEN_DEFAULT_LIBRARY_IDEMPOTENCY_KEY) {
+          const [legacyDefault] = await tx.select({
+            id: workspaces.id,
+            createdAt: workspaces.createdAt,
+            latestSequence: workspaces.latestSequence,
+            nameCiphertext: workspaces.nameCiphertext,
+          }).from(workspaces).where(and(
+            eq(workspaces.accountId, accountId),
+            eq(workspaces.type, 'library'),
+            isNull(workspaces.deletedAt),
+          )).orderBy(asc(workspaces.createdAt)).limit(1).for('update')
+          if (legacyDefault !== undefined) {
+            await tx.update(workspaces).set({
+              creationIdempotencyKey: input.idempotencyKey,
+              creationRequestHash: requestHash,
+              updatedAt: new Date(),
+            }).where(eq(workspaces.id, legacyDefault.id))
+            return {
+              ...legacyDefault,
+              latestSequence: legacyDefault.latestSequence.toString(),
+              created: false,
+            }
+          }
         }
       }
       await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
@@ -258,7 +289,7 @@ export class WorkspaceService {
   }
 
   async getAccountSyncOverview(accountId: string) {
-    const [summaries, kinds, recentActivity, usage] = await Promise.all([
+    const [summaries, kinds, activityTimeline, activityKinds, usage] = await Promise.all([
       this.database.sql<Array<{
         workspace_count: number
         object_count: number
@@ -311,29 +342,68 @@ export class WorkspaceService {
           max(o.updated_at) as updated_at
         from objects o join workspaces w on w.id = o.workspace_id
         where w.account_id = ${accountId} and w.deleted_at is null
+          and (
+            (w.workspace_type = 'library' and o.kind in ('note', 'folder', 'asset', 'yjs-checkpoint', 'yjs-update'))
+            or (w.workspace_type = 'account-data' and o.kind in ('asset', 'canvas', 'tag', 'mark', 'record', 'conversation', 'message', 'memory', 'setting', 'yjs-checkpoint', 'yjs-update'))
+          )
         group by o.kind order by o.kind
       `,
       this.database.sql<Array<{
-        sequence: string
-        kind: string
-        change_type: 'upsert' | 'delete'
-        created_at: Date
-        device_id: string
-        device_name: string
-        device_platform: string
+        bucket_start: Date
+        updates: number
+        deletes: number
+        kinds: Array<{ kind: string, updates: number, deletes: number }>
       }>>`
-        select e.sequence::text as sequence, v.kind::text as kind,
-          case when e.event_type = 'object.deleted' then 'delete' else 'upsert' end as change_type,
-          e.created_at, d.id as device_id,
-          d.name as device_name, d.platform as device_platform
+        with buckets as (
+          select generate_series(
+            date_trunc('minute', now()) - interval '59 minutes',
+            date_trunc('minute', now()),
+            interval '1 minute'
+          ) as bucket_start
+        ), activity_by_kind as (
+          select date_trunc('minute', e.created_at) as bucket_start,
+            v.kind::text as kind,
+            count(distinct e.object_id) filter (where e.event_type = 'object.upserted')::int as updates,
+            count(distinct e.object_id) filter (where e.event_type = 'object.deleted')::int as deletes
+          from sync_events e
+          join workspaces w on w.id = e.workspace_id
+          join object_versions v on v.workspace_id = e.workspace_id
+            and v.object_id = e.object_id and v.sequence = e.sequence
+          where w.account_id = ${accountId} and w.deleted_at is null
+            and e.event_type in ('object.upserted', 'object.deleted')
+            and e.created_at >= date_trunc('minute', now()) - interval '59 minutes'
+            and e.created_at < date_trunc('minute', now()) + interval '1 minute'
+          group by date_trunc('minute', e.created_at), v.kind
+        )
+        select buckets.bucket_start,
+          coalesce(sum(activity_by_kind.updates), 0)::int as updates,
+          coalesce(sum(activity_by_kind.deletes), 0)::int as deletes,
+          coalesce(
+            jsonb_agg(
+              jsonb_build_object(
+                'kind', activity_by_kind.kind,
+                'updates', activity_by_kind.updates,
+                'deletes', activity_by_kind.deletes
+              ) order by activity_by_kind.kind
+            ) filter (where activity_by_kind.kind is not null),
+            '[]'::jsonb
+          ) as kinds
+        from buckets
+        left join activity_by_kind on activity_by_kind.bucket_start = buckets.bucket_start
+        group by buckets.bucket_start
+        order by buckets.bucket_start
+      `,
+      this.database.sql<Array<{ kind: string, count: number }>>`
+        select v.kind::text as kind, count(distinct e.object_id)::int as count
         from sync_events e
         join workspaces w on w.id = e.workspace_id
         join object_versions v on v.workspace_id = e.workspace_id
           and v.object_id = e.object_id and v.sequence = e.sequence
-        join devices d on d.id = e.source_device_id
         where w.account_id = ${accountId} and w.deleted_at is null
           and e.event_type in ('object.upserted', 'object.deleted')
-        order by e.created_at desc, e.sequence desc limit 30
+          and e.created_at >= date_trunc('minute', now()) - interval '59 minutes'
+        group by v.kind
+        order by count desc, v.kind
       `,
       this.usage?.getSnapshot(accountId) ?? null,
     ])
@@ -361,16 +431,15 @@ export class WorkspaceService {
         deletedCount: item.deleted_count,
         updatedAt: item.updated_at,
       })),
-      recentActivity: recentActivity.map((item) => ({
-        sequence: item.sequence,
+      activityTimeline: activityTimeline.map((item) => ({
+        startedAt: item.bucket_start,
+        updates: item.updates,
+        deletes: item.deletes,
+        kinds: item.kinds,
+      })),
+      activityKinds: activityKinds.map((item) => ({
         kind: item.kind,
-        changeType: item.change_type,
-        createdAt: item.created_at,
-        device: {
-          id: item.device_id,
-          name: item.device_name,
-          platform: item.device_platform,
-        },
+        count: item.count,
       })),
     }
   }
@@ -379,7 +448,9 @@ export class WorkspaceService {
     const rows = await this.database.db.select({
       id: workspaces.id,
       nameCiphertext: workspaces.nameCiphertext,
+      type: workspaces.type,
       isDefault: workspaces.isDefault,
+      creationIdempotencyKey: workspaces.creationIdempotencyKey,
       latestSequence: workspaces.latestSequence,
       createdAt: workspaces.createdAt,
       updatedAt: workspaces.updatedAt,
@@ -415,8 +486,9 @@ export class WorkspaceService {
     const objectCountsByWorkspace = new Map(objectCounts.map((item) => (
       [item.workspaceId, item] as const
     )))
-    return rows.map((row) => ({
+    return rows.map(({ creationIdempotencyKey, ...row }) => ({
       ...row,
+      isNoteGenDefault: creationIdempotencyKey === NOTEGEN_DEFAULT_LIBRARY_IDEMPOTENCY_KEY,
       latestSequence: row.latestSequence.toString(),
       latestKeyVersion: latestKeyVersionByWorkspace.get(row.id) ?? 0,
       encryptionMode: managedWorkspaceIds.has(row.id) ? 'managed' as const : 'e2ee' as const,
@@ -721,6 +793,7 @@ export class WorkspaceService {
       const [current] = await tx.select({
         id: workspaces.id, deletedAt: workspaces.deletedAt,
         type: workspaces.type, ownerAccountId: workspaces.accountId,
+        creationIdempotencyKey: workspaces.creationIdempotencyKey,
       }).from(workspaces)
         .where(and(eq(workspaces.id, workspaceId),
           ...(options.allowDefault === false ? [eq(workspaces.isDefault, false)] : [])))
@@ -730,6 +803,14 @@ export class WorkspaceService {
         throw new ApiError({
           code: 'account_data_workspace_delete_forbidden',
           message: 'Personal account-data workspace cannot be deleted',
+          statusCode: 409,
+        })
+      }
+      if (current.creationIdempotencyKey === NOTEGEN_DEFAULT_LIBRARY_IDEMPOTENCY_KEY
+        && options.allowDefault !== true) {
+        throw new ApiError({
+          code: 'workspace_default_delete_forbidden',
+          message: 'The default NoteGen workspace cannot be deleted',
           statusCode: 409,
         })
       }

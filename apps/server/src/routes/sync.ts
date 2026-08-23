@@ -126,6 +126,11 @@ const Command = Type.Union([
     }), { minItems: 1, maxItems: 2_000 }),
   }),
   Type.Object({
+    ...CommandId, type: Type.Literal('initialize-document'), updateId: Type.String({ format: 'uuid' }),
+    documentId: Type.String({ minLength: 1, maxLength: 512 }), objectId: Type.String({ format: 'uuid' }),
+    kind: Kind, ...Envelope,
+  }),
+  Type.Object({
     ...CommandId, type: Type.Literal('append-update'), updateId: Type.String({ format: 'uuid' }),
     documentId: Type.String({ minLength: 1, maxLength: 512 }), objectId: Type.String({ format: 'uuid' }),
     kind: Kind, ...Envelope,
@@ -201,7 +206,10 @@ export function createSyncRoutes(
             latestSequence: Counter,
             bootstrap: Type.Object({
               required: Type.Boolean(),
-              reason: Type.Union([Type.Literal('cursor_ahead'), Type.Literal('cursor_expired'), Type.Null()]),
+              reason: Type.Union([
+                Type.Literal('cursor_ahead'), Type.Literal('cursor_expired'),
+                Type.Literal('device_uninitialized'), Type.Literal('lag_too_large'), Type.Null(),
+              ]),
             }),
             limits: Type.Object({
               maxCommandsPerBatch: Type.Integer(),
@@ -381,6 +389,11 @@ export function createSyncRoutes(
             sourceDeviceId: Type.String({ format: 'uuid' }), keyVersion: Type.Integer({ minimum: 1 }),
             ciphertext: Type.String(), ciphertextHash: Hash, createdAt: Type.String({ format: 'date-time' }),
           })),
+          checkpoint: Type.Union([Type.Object({
+            objectId: Type.String({ format: 'uuid' }), documentSequence: Counter,
+            checkpointId: Type.String({ format: 'uuid' }), keyVersion: Type.Integer({ minimum: 1 }),
+            ciphertext: Type.String(), ciphertextHash: Hash,
+          }), Type.Null()]),
           nextDocumentSequence: Counter, hasMore: Type.Boolean(), ...SyncEpochField,
         }) },
       },

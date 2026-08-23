@@ -1,0 +1,6 @@
+services:
+  server:
+    image: notegen-server:dev
+    build:
+      context: .
+      dockerfile: Dockerfile

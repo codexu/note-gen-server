@@ -6,10 +6,12 @@ The runtime contract is the OpenAPI document served by `GET /openapi.json`. Rout
 
 ## Workspace model
 
-- `account-data`: one idempotently-created, non-shareable personal workspace per account. It contains tags, marks, conversation metadata, independent messages, memories, portable settings, and their attachments.
-- `library`: a note directory containing folders, Markdown notes, assets, canvases, Yjs updates, and checkpoints. A local directory binds to exactly one library; the same library can bind to different local paths on different devices.
+- `account-data`: one idempotently-created, non-shareable personal workspace per account. It contains tags, marks, canvases, conversation metadata, independent messages, memories, portable settings, and their attachments.
+- `library`: a note directory containing folders, Markdown notes, assets, and their Yjs updates and checkpoints. A local directory binds to exactly one library; the same library can bind to different local paths on different devices.
 
 Libraries have an owner plus optional members. Roles (`viewer`, `editor`, `manager`) are templates over the fixed capability set; invitations and member updates may submit a capability subset. Owners always retain every capability. Account-data workspaces cannot be invited to or shared.
+
+The server enforces the workspace/object boundary. `folder` and `note` objects are valid only in a library; `canvas`, `tag`, `mark`, `conversation`, `message`, `memory`, and `setting` objects are valid only in account-data. `asset` and CRDT support kinds may be used by either workspace type. A write that crosses this boundary is rejected with `workspace_object_kind_invalid`.
 
 ## Durable loop
 
@@ -33,7 +35,7 @@ GET sync/session
 
 Object kinds are `folder`, `note`, `asset`, `canvas`, `tag`, `mark`, `conversation`, `message`, `memory`, `setting`, `yjs-update`, and `yjs-checkpoint`. The unpublished `record` kind is not part of v1.
 
-Markdown uses a portable encrypted snapshot plus durable encrypted Yjs updates. Canvas state uses Yjs maps for nodes and edges and periodically materializes ordinary Canvas JSON. `append-update` and `commit-checkpoint` are HTTP commands. The server commits the update and event transaction before publishing `workspace.changed`; it never accepts an update payload over WebSocket.
+Markdown uses a portable encrypted snapshot plus durable encrypted Yjs updates in a library workspace. Canvas state belongs to the account-data workspace, uses Yjs maps for nodes and edges, and periodically materializes ordinary Canvas JSON. `append-update` and `commit-checkpoint` are HTTP commands. The server commits the update and event transaction before publishing `workspace.changed`; it never accepts an update payload over WebSocket.
 
 A checkpoint and its materialized object revision must both be acknowledged before clients discard covered local updates. Source mode, large-document mode, and external file changes use snapshot three-way merge and create a local conflict copy when no safe merge exists.
 
@@ -52,7 +54,7 @@ The first frame is:
 
 After `authenticated`, clients may send `document.subscribe`, `document.unsubscribe`, `presence.update`, and `presence.clear`. Server messages include durable-change wake-ups, document sync requests, presence, membership changes, key changes, workspace state, and access revocation. Presence is ephemeral and is never written to the sync event log.
 
-`presence.update` always carries the active document and selection anchor/head. For Canvas, it may additionally carry `canvas.nodes` with at most 100 `{ id, x, y }` positions. Drag positions are ephemeral; the drag-stop state must still be persisted through an encrypted durable Yjs command.
+`presence.update` always carries the active document, selection anchor/head, and a `coordinateSpace` of `markdown`, `prosemirror`, or `canvas`. Receivers render text cursors only in the matching coordinate space. Older clients that omit the field are treated as `prosemirror` (or `canvas` when canvas presence is present). For Canvas, the message may additionally carry `canvas.nodes` with at most 100 `{ id, x, y }` positions. Drag positions are ephemeral; the drag-stop state must still be persisted through an encrypted durable Yjs command.
 
 ## Managed encryption v1
 
