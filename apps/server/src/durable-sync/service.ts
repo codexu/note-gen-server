@@ -4,14 +4,91 @@ import type { DatabaseContext } from '../database/client.js'
 import {
   blobs, objectVersions, objects, syncBootstrapObjects, syncBootstrapSessions,
   syncCheckpoints, syncCommands, syncConflicts, syncDocuments, syncEvents,
-  syncResourceBindings, syncUpdates, workspaceKeys, workspaces,
+  syncDeviceCursors, syncResourceBindings, syncUpdates, workspaceKeys, workspaces,
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-fence.js'
-import type { ChangeNotifier } from '../sync/types.js'
+import type { ChangeNotifier, SyncObjectKind } from '../sync/types.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import type { CiphertextEnvelope, SyncCommand, SyncCommandResult } from './types.js'
 import type { UsageService } from '../usage/service.js'
+import type { WorkspaceCapability } from '../workspaces/capabilities.js'
+
+const cacheableRejectionCodes = new Set([
+  'request_invalid', 'object_too_large', 'ciphertext_hash_mismatch',
+  'object_kind_mismatch', 'update_id_reused', 'conflict_id_reused',
+  'document_identity_mismatch', 'asset_cannot_bind_resources',
+  'name_blind_index_key_mismatch', 'workspace_object_kind_invalid',
+])
+// Library events materialize to the filesystem and require atomic writes and
+// fsync. A long stream of intermediate snapshots is therefore much more
+// expensive on mobile than structured account-data events. Switch libraries
+// to a fixed bootstrap snapshot earlier so reconnecting devices catch up to
+// the current tree instead of replaying thousands of obsolete file versions.
+const maxLibraryIncrementalLag = 250n
+const maxAccountDataIncrementalLag = 10_000n
+
+const accountDataObjectKinds = new Set<SyncObjectKind>([
+  'asset', 'canvas', 'tag', 'mark', 'conversation', 'message', 'memory', 'setting',
+  'yjs-checkpoint', 'yjs-update',
+])
+const libraryObjectKinds = new Set<SyncObjectKind>([
+  'asset', 'folder', 'note', 'yjs-checkpoint', 'yjs-update',
+])
+
+function assertCommandWorkspaceType(
+  workspaceType: 'account-data' | 'library',
+  command: SyncCommand,
+): void {
+  const kind = command.type === 'upsert-object'
+    || command.type === 'initialize-document'
+    || command.type === 'append-update'
+    || command.type === 'commit-checkpoint'
+    || command.type === 'create-conflict'
+    ? command.kind
+    : command.type === 'resolve-conflict'
+      ? command.objectResolution?.kind ?? command.resolution?.kind
+      : undefined
+  if (kind === undefined) return
+  const allowed = workspaceType === 'account-data' ? accountDataObjectKinds : libraryObjectKinds
+  if (allowed.has(kind)) return
+  throw new ApiError({
+    code: 'workspace_object_kind_invalid',
+    message: `Object kind ${kind} is not valid in a ${workspaceType} workspace`,
+    statusCode: 409,
+    details: { workspaceType, kind },
+  })
+}
+
+function assertCommandCapability(capabilities: readonly WorkspaceCapability[], command: SyncCommand): void {
+  let required: WorkspaceCapability
+  switch (command.type) {
+    case 'upsert-object':
+      required = command.baseRevision === null ? 'content.create' : 'content.update'
+      break
+    case 'delete-object':
+    case 'delete-subtree':
+      required = 'content.delete'
+      break
+    case 'resolve-conflict':
+      required = 'history.restore'
+      break
+    case 'initialize-document':
+    case 'append-update':
+    case 'commit-checkpoint':
+    case 'create-conflict':
+      required = 'content.update'
+      break
+  }
+  if (!capabilities.includes(required)) {
+    throw new ApiError({
+      code: 'workspace_capability_denied',
+      message: `Workspace capability ${required} is required`,
+      statusCode: 403,
+      details: { capability: required },
+    })
+  }
+}
 
 export class DurableSyncService {
   constructor(
@@ -24,23 +101,112 @@ export class DurableSyncService {
     private readonly syncEpoch?: string,
   ) {}
 
+  async session(
+    accountId: string,
+    deviceId: string,
+    workspaceId: string,
+    cursorValue: string,
+    protocolVersion: number,
+    expectedSyncEpoch?: string,
+  ) {
+    if (this.syncEpoch === undefined) throw new Error('Protocol v1 requires a sync epoch')
+    if (expectedSyncEpoch !== undefined) this.#assertSyncEpoch(expectedSyncEpoch)
+    const access = await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
+    const cursor = counter(cursorValue, 'cursor')
+    const [[workspace], [oldestEvent], [deviceCursor], keyVersions] = await Promise.all([
+      this.database.db.select({ latestSequence: workspaces.latestSequence })
+        .from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1),
+      this.database.db.select({ sequence: syncEvents.sequence }).from(syncEvents)
+        .where(eq(syncEvents.workspaceId, workspaceId)).orderBy(asc(syncEvents.sequence)).limit(1),
+      this.database.db.select({ acknowledgedSequence: syncDeviceCursors.acknowledgedSequence })
+        .from(syncDeviceCursors).where(and(
+          eq(syncDeviceCursors.workspaceId, workspaceId),
+          eq(syncDeviceCursors.deviceId, deviceId),
+        )).limit(1),
+      this.database.db.select({ keyVersion: workspaceKeys.keyVersion, createdAt: workspaceKeys.createdAt })
+        .from(workspaceKeys).where(eq(workspaceKeys.workspaceId, workspaceId))
+        .orderBy(workspaceKeys.keyVersion),
+    ])
+    if (workspace === undefined) {
+      throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+    }
+    const cursorState = cursor > workspace.latestSequence
+      ? 'ahead' as const
+      : oldestEvent !== undefined && cursor + 1n < oldestEvent.sequence
+        ? 'expired' as const
+        : 'valid' as const
+    const uninitializedDevice = deviceCursor === undefined && workspace.latestSequence > 0n
+    const maxIncrementalLag = access.type === 'library'
+      ? maxLibraryIncrementalLag
+      : maxAccountDataIncrementalLag
+    const lagTooLarge = workspace.latestSequence > cursor
+      && workspace.latestSequence - cursor > maxIncrementalLag
+    const bootstrapReason = cursorState === 'ahead'
+      ? 'cursor_ahead' as const
+      : cursorState === 'expired'
+        ? 'cursor_expired' as const
+        : uninitializedDevice
+          ? 'device_uninitialized' as const
+          : lagTooLarge ? 'lag_too_large' as const : null
+    return {
+      protocol: {
+        requestedVersion: protocolVersion,
+        selectedVersion: 1,
+        compatible: protocolVersion === 1,
+      },
+      workspace: {
+        id: workspaceId,
+        type: access.type,
+        role: access.role,
+        owner: access.owner,
+        capabilities: access.capabilities,
+      },
+      cursor: {
+        supplied: cursorValue,
+        state: cursorState,
+        acknowledged: deviceCursor?.acknowledgedSequence.toString() ?? '0',
+        oldestAvailableSequence: oldestEvent?.sequence.toString() ?? null,
+      },
+      latestSequence: workspace.latestSequence.toString(),
+      bootstrap: {
+        required: bootstrapReason !== null,
+        reason: bootstrapReason,
+      },
+      limits: {
+        maxCommandsPerBatch: 100,
+        maxEventsPerPage: 1_000,
+        maxBootstrapObjectsPerPage: 1_000,
+        maxDocumentUpdatesPerPage: 1_000,
+        maxObjectBytes: typeof this.maxObjectBytes === 'function' ? this.maxObjectBytes() : this.maxObjectBytes,
+      },
+      keyVersions: keyVersions.map(key => ({ keyVersion: key.keyVersion, createdAt: key.createdAt })),
+      syncEpoch: this.syncEpoch,
+    }
+  }
+
   async commands(accountId: string, deviceId: string, workspaceId: string, commands: SyncCommand[], expectedSyncEpoch?: string) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    const access = await this.workspaces.access(accountId, workspaceId)
     const results: SyncCommandResult[] = []
     for (const command of commands) {
       try {
-        results.push(await this.#command(accountId, deviceId, workspaceId, command))
+        assertCommandCapability(access.capabilities, command)
+        assertCommandWorkspaceType(access.type, command)
+        results.push(await this.#command(access.ownerAccountId, deviceId, workspaceId, command))
       } catch (error) {
         if (!(error instanceof ApiError)) throw error
-        results.push({
+        const rejected: SyncCommandResult = {
           commandId: command.commandId,
           status: 'rejected', duplicate: false, code: error.code, retryable: error.retryable,
           ...(error.details === undefined ? {} : { details: error.details }),
-        })
+        }
+        if (!error.retryable && cacheableRejectionCodes.has(error.code)) {
+          await this.#recordRejectedCommand(access.ownerAccountId, deviceId, workspaceId, command, rejected).catch(() => undefined)
+        }
+        results.push(rejected)
       }
     }
-    return { results }
+    return { results, ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }) }
   }
 
   async recordCommandIngress(accountId: string, workspaceId: string, bytes: bigint, requestId: string): Promise<void> {
@@ -49,20 +215,59 @@ export class DurableSyncService {
 
   async events(accountId: string, workspaceId: string, after: string, limit: number, expectedSyncEpoch?: string) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const cursor = counter(after, 'after')
+    const [workspace] = await this.database.db.select({ latestSequence: workspaces.latestSequence })
+      .from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1)
+    const latestSequence = workspace?.latestSequence ?? 0n
+    if (cursor > latestSequence) throw new ApiError({
+      code: 'cursor_invalid', message: 'Sync cursor is ahead of the workspace', statusCode: 409,
+      details: { latestSequence: latestSequence.toString() },
+    })
     const rows = await this.database.db.select().from(syncEvents).where(and(
       eq(syncEvents.workspaceId, workspaceId), gt(syncEvents.sequence, cursor),
     )).orderBy(asc(syncEvents.sequence)).limit(limit + 1)
+    if (cursor < latestSequence && (rows[0] === undefined || rows[0].sequence !== cursor + 1n)) {
+      throw new ApiError({
+        code: 'cursor_expired', message: 'Sync cursor is older than the retained event window; bootstrap is required',
+        statusCode: 409, retryable: false,
+        details: { oldestAvailableSequence: rows[0]?.sequence.toString() ?? null, latestSequence: latestSequence.toString() },
+      })
+    }
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit).map(serializeEvent)
-    const [workspace] = await this.database.db.select({ latestSequence: workspaces.latestSequence })
-      .from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1)
     return {
       events: page,
       nextCursor: page.at(-1)?.sequence ?? after,
-      latestSequence: (workspace?.latestSequence ?? cursor).toString(),
+      latestSequence: latestSequence.toString(),
       hasMore,
+      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+    }
+  }
+
+  async acknowledge(accountId: string, deviceId: string, workspaceId: string, throughValue: string, expectedSyncEpoch?: string) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
+    const through = counter(throughValue, 'through')
+    const [workspace] = await this.database.db.select({ latestSequence: workspaces.latestSequence })
+      .from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1)
+    if (workspace === undefined) throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+    if (through > workspace.latestSequence) throw new ApiError({
+      code: 'cursor_invalid', message: 'Acknowledgement is ahead of the workspace', statusCode: 409,
+      details: { latestSequence: workspace.latestSequence.toString() },
+    })
+    const [cursor] = await this.database.db.insert(syncDeviceCursors).values({
+      workspaceId, deviceId, acknowledgedSequence: through,
+    }).onConflictDoUpdate({
+      target: [syncDeviceCursors.workspaceId, syncDeviceCursors.deviceId],
+      set: {
+        acknowledgedSequence: sql`greatest(${syncDeviceCursors.acknowledgedSequence}, ${through})`,
+        updatedAt: new Date(),
+      },
+    }).returning({ acknowledgedSequence: syncDeviceCursors.acknowledgedSequence })
+    return {
+      acknowledgedSequence: (cursor?.acknowledgedSequence ?? through).toString(),
+      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
     }
   }
 
@@ -74,7 +279,7 @@ export class DurableSyncService {
     expectedSyncEpoch?: string,
   ) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'history.view')
     const revision = counter(revisionValue, 'revision')
     const [version] = await this.database.db.select().from(objectVersions).where(and(
       eq(objectVersions.workspaceId, workspaceId),
@@ -118,7 +323,10 @@ export class DurableSyncService {
       currentRevision: currentRevisions.get(row.objectId) ?? null,
     })
     const resources = resourceRows.map(row => withCurrentRevision(row.version))
-    return { object: withCurrentRevision(version), resources }
+    return {
+      object: withCurrentRevision(version), resources,
+      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+    }
   }
 
   async objectVersions(
@@ -130,7 +338,7 @@ export class DurableSyncService {
     expectedSyncEpoch?: string,
   ) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'history.view')
     const before = beforeValue === null ? null : counter(beforeValue, 'before')
     const rows = await this.database.db.select().from(objectVersions).where(and(
       eq(objectVersions.workspaceId, workspaceId),
@@ -143,6 +351,7 @@ export class DurableSyncService {
       versions: page.map(serializeObjectVersion),
       nextBefore: hasMore ? page.at(-1)?.revision.toString() ?? null : null,
       hasMore,
+      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
     }
   }
 
@@ -155,15 +364,17 @@ export class DurableSyncService {
     expectedSyncEpoch?: string,
   ) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const session = await this.database.db.transaction(async (tx) => {
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       await tx.delete(syncBootstrapSessions).where(sql`${syncBootstrapSessions.expiresAt} <= now()`)
       if (bootstrapId !== null) {
-        const [existing] = await tx.select().from(syncBootstrapSessions).where(and(
+        const [existing] = await tx.update(syncBootstrapSessions).set({
+          expiresAt: new Date(Date.now() + 30 * 60_000),
+        }).where(and(
           eq(syncBootstrapSessions.id, bootstrapId), eq(syncBootstrapSessions.workspaceId, workspaceId),
           gt(syncBootstrapSessions.expiresAt, new Date()),
-        )).limit(1)
+        )).returning()
         if (existing === undefined) {
           throw new ApiError({ code: 'bootstrap_expired', message: 'Bootstrap snapshot expired; restart bootstrap', statusCode: 409, retryable: true })
         }
@@ -172,6 +383,16 @@ export class DurableSyncService {
       const [lockedWorkspace] = await tx.select({ latestSequence: workspaces.latestSequence }).from(workspaces)
         .where(eq(workspaces.id, workspaceId)).limit(1).for('update')
       if (lockedWorkspace === undefined) throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+      const activeSessions = await tx.select({ id: syncBootstrapSessions.id }).from(syncBootstrapSessions).where(and(
+        eq(syncBootstrapSessions.workspaceId, workspaceId), gt(syncBootstrapSessions.expiresAt, new Date()),
+      )).limit(8)
+      if (activeSessions.length >= 8) throw new ApiError({
+        code: 'bootstrap_capacity_exceeded',
+        message: 'Too many bootstrap snapshots are active for this workspace',
+        statusCode: 429,
+        retryable: true,
+        details: { retryAfterMilliseconds: 30_000 },
+      })
       const [created] = await tx.insert(syncBootstrapSessions).values({
         workspaceId, snapshotSequence: lockedWorkspace.latestSequence,
         expiresAt: new Date(Date.now() + 30 * 60_000),
@@ -240,28 +461,58 @@ export class DurableSyncService {
       conflicts: unresolved.map(serializeConflict),
       nextObjectId: hasMore ? page.at(-1)?.manifest.objectId ?? null : null,
       hasMore,
+      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
     }
   }
 
   async documentUpdates(accountId: string, workspaceId: string, documentId: string, after: string, limit: number, expectedSyncEpoch?: string) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertOwned(accountId, workspaceId)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const cursor = counter(after, 'after')
-    const rows = await this.database.db.select().from(syncUpdates).where(and(
-      eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
-      gt(syncUpdates.documentSequence, cursor),
-    )).orderBy(asc(syncUpdates.documentSequence)).limit(limit + 1)
+    const [rows, documents] = await Promise.all([
+      this.database.db.select().from(syncUpdates).where(and(
+        eq(syncUpdates.workspaceId, workspaceId), eq(syncUpdates.documentId, documentId),
+        gt(syncUpdates.documentSequence, cursor),
+      )).orderBy(asc(syncUpdates.documentSequence)).limit(limit + 1),
+      this.database.db.select({
+        objectId: syncDocuments.objectId,
+        checkpointDocumentSequence: syncDocuments.checkpointDocumentSequence,
+        checkpointId: syncDocuments.checkpointId,
+        checkpointKeyVersion: syncDocuments.checkpointKeyVersion,
+        checkpointCiphertext: syncDocuments.checkpointCiphertext,
+        checkpointCiphertextHash: syncDocuments.checkpointCiphertextHash,
+      }).from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId),
+        eq(syncDocuments.documentId, documentId),
+      )).limit(1),
+    ])
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit)
+    const document = documents[0]
+    const checkpoint = document?.checkpointId
+      && document.checkpointKeyVersion !== null
+      && document.checkpointCiphertext !== null
+      && document.checkpointCiphertextHash !== null
+      ? {
+          objectId: document.objectId,
+          documentSequence: document.checkpointDocumentSequence.toString(),
+          checkpointId: document.checkpointId,
+          keyVersion: document.checkpointKeyVersion,
+          ciphertext: document.checkpointCiphertext,
+          ciphertextHash: document.checkpointCiphertextHash,
+        }
+      : null
     return {
       updates: page.map(row => ({ ...row, documentSequence: row.documentSequence.toString(), eventSequence: row.eventSequence.toString() })),
+      checkpoint,
       nextDocumentSequence: page.at(-1)?.documentSequence.toString() ?? after,
       hasMore,
+      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
     }
   }
 
   #assertSyncEpoch(expectedSyncEpoch: string | undefined): void {
-    if (expectedSyncEpoch !== undefined && this.syncEpoch !== undefined && expectedSyncEpoch !== this.syncEpoch) {
+    if (this.syncEpoch !== undefined && expectedSyncEpoch !== this.syncEpoch) {
       throw new ApiError({ code: 'sync_epoch_changed', message: 'Server restore epoch changed; re-bootstrap before continuing', statusCode: 409 })
     }
   }
@@ -280,21 +531,69 @@ export class DurableSyncService {
         eq(syncCommands.workspaceId, workspaceId), eq(syncCommands.commandId, command.commandId),
       )).limit(1)
       if (previous !== undefined) {
+        if (this.syncEpoch !== undefined && previous.syncEpoch !== this.syncEpoch) {
+          throw new ApiError({
+            code: 'command_id_reused',
+            message: 'Command ID belongs to another server restore epoch',
+            statusCode: 409,
+            details: { reason: 'sync_epoch_changed' },
+          })
+        }
         if (previous.requestHash !== requestHash) throw new ApiError({ code: 'command_id_reused', message: 'Command ID was reused', statusCode: 409 })
         return { ...(previous.result as SyncCommandResult), duplicate: true }
       }
 
+      if (storageLimit !== null) await this.usage?.reconcileCurrentInTransaction(tx, accountId)
       const applied = await this.#apply(tx, accountId, deviceId, workspaceId, command, storageLimit)
       await tx.insert(syncCommands).values({
         workspaceId, commandId: command.commandId, sourceDeviceId: deviceId, requestHash,
+        ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
         result: applied as unknown as Record<string, unknown>,
       })
+      const releasesStorage = command.type === 'delete-object' || command.type === 'delete-subtree'
+        || (command.type === 'resolve-conflict' && command.deleteObject === true)
+      if (storageLimit !== null && this.usage !== undefined && !releasesStorage) {
+        const exact = await this.usage.reconcileCurrentInTransaction(tx, accountId)
+        if (exact !== undefined
+          && exact.activeObjectBytes + exact.activeCrdtBytes + exact.activeBlobBytes
+            + exact.reservedBlobBytes + exact.retainedBytes > storageLimit) {
+          throw new ApiError({
+            code: 'quota_exceeded',
+            message: 'Storage quota is exceeded',
+            statusCode: 409,
+            details: {
+              metric: 'storage_bytes', limit: storageLimit.toString(),
+              used: (exact.activeObjectBytes + exact.activeCrdtBytes + exact.activeBlobBytes
+                + exact.reservedBlobBytes + exact.retainedBytes).toString(),
+              reserved: exact.reservedBlobBytes.toString(),
+            },
+          })
+        }
+      }
       return applied
     })
     if ((result.status === 'applied' || result.status === 'conflict') && result.sequence !== undefined) {
       await this.notifier.publish({ type: 'workspace.changed', workspaceId, latestSequence: result.sequence }).catch(() => undefined)
     }
     return result
+  }
+
+  async #recordRejectedCommand(
+    accountId: string,
+    deviceId: string,
+    workspaceId: string,
+    command: SyncCommand,
+    result: SyncCommandResult,
+  ): Promise<void> {
+    const requestHash = createHash('sha256').update(JSON.stringify(command)).digest('base64url')
+    await this.database.db.transaction(async (tx) => {
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      await tx.insert(syncCommands).values({
+        workspaceId, commandId: command.commandId, sourceDeviceId: deviceId, requestHash,
+        ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+        result: result as unknown as Record<string, unknown>,
+      }).onConflictDoNothing()
+    })
   }
 
   async #apply(tx: SyncTransaction, accountId: string, deviceId: string, workspaceId: string, command: SyncCommand, storageLimit: bigint | null): Promise<SyncCommandResult> {
@@ -308,6 +607,14 @@ export class DurableSyncService {
       if (expected !== actual) return {
         commandId: command.commandId, status: 'conflict', duplicate: false, code: 'revision_conflict',
         ...(actual === null ? {} : { revision: actual.toString() }),
+      }
+      if (command.type === 'delete-object' && current?.deletedAt !== null && current?.deletedAt !== undefined) {
+        return {
+          commandId: command.commandId,
+          status: 'applied',
+          duplicate: true,
+          revision: current.currentRevision.toString(),
+        }
       }
       const parentObjectId = command.parentObjectId === undefined
         ? current?.parentObjectId ?? null : command.parentObjectId
@@ -350,6 +657,7 @@ export class DurableSyncService {
         }
       }
       if (command.type === 'delete-object') {
+        if (command.kind === 'folder') await this.#assertFolderEmpty(tx, workspaceId, command.objectId)
         if (command.kind === 'asset') {
           const bindings = await tx.select({
             ownerObjectId: syncResourceBindings.ownerObjectId,
@@ -536,21 +844,26 @@ export class DurableSyncService {
       this.#validateCiphertext(command.conflictCiphertext, command.conflictCiphertextHash)
       await this.#assertKeyAndBlobs(tx, workspaceId, command.conflictKeyVersion, [])
       const currentObjects = await tx.select().from(objects).where(eq(objects.workspaceId, workspaceId))
-      const root = currentObjects.find(object => object.objectId === command.rootObjectId)
+      const objectById = new Map(currentObjects.map(object => [object.objectId, object]))
+      const childrenByParent = new Map<string, typeof currentObjects>()
+      for (const object of currentObjects) {
+        if (object.parentObjectId === null) continue
+        const children = childrenByParent.get(object.parentObjectId) ?? []
+        children.push(object)
+        childrenByParent.set(object.parentObjectId, children)
+      }
+      const root = objectById.get(command.rootObjectId)
       if (root === undefined || root.kind !== 'folder') {
         throw new ApiError({ code: 'subtree_root_invalid', message: 'Subtree root must be an active folder', statusCode: 409 })
       }
       if (root.deletedAt !== null) {
         const descendants = new Set<string>([root.objectId])
-        let changed = true
-        while (changed) {
-          changed = false
-          for (const object of currentObjects) {
-            if (object.parentObjectId !== null && descendants.has(object.parentObjectId)
-              && !descendants.has(object.objectId)) {
-              descendants.add(object.objectId)
-              changed = true
-            }
+        const pending = [root.objectId]
+        while (pending.length > 0) {
+          for (const child of childrenByParent.get(pending.pop()!) ?? []) {
+            if (descendants.has(child.objectId)) continue
+            descendants.add(child.objectId)
+            pending.push(child.objectId)
           }
         }
         const activeDescendant = currentObjects.some(object => (
@@ -566,15 +879,12 @@ export class DurableSyncService {
         return { commandId: command.commandId, status: 'applied', duplicate: true }
       }
       const descendants = new Set<string>([root.objectId])
-      let changed = true
-      while (changed) {
-        changed = false
-        for (const object of currentObjects) {
-          if (object.deletedAt === null && object.parentObjectId !== null
-            && descendants.has(object.parentObjectId) && !descendants.has(object.objectId)) {
-            descendants.add(object.objectId)
-            changed = true
-          }
+      const pending = [root.objectId]
+      while (pending.length > 0) {
+        for (const child of childrenByParent.get(pending.pop()!) ?? []) {
+          if (child.deletedAt !== null || descendants.has(child.objectId)) continue
+          descendants.add(child.objectId)
+          pending.push(child.objectId)
         }
       }
       const requestedIds = new Set(command.objects.map(object => object.objectId))
@@ -586,7 +896,10 @@ export class DurableSyncService {
         })
       }
       const requested = new Map(command.objects.map(object => [object.objectId, object]))
-      const documentRows = await tx.select().from(syncDocuments).where(eq(syncDocuments.workspaceId, workspaceId))
+      const documentRows = await tx.select().from(syncDocuments).where(and(
+        eq(syncDocuments.workspaceId, workspaceId), inArray(syncDocuments.objectId, [...descendants]),
+      ))
+      const documentByObjectId = new Map(documentRows.map(document => [document.objectId, document]))
       let editConflict = false
       for (const current of currentObjects.filter(object => descendants.has(object.objectId))) {
         const item = requested.get(current.objectId)
@@ -596,7 +909,7 @@ export class DurableSyncService {
         }
         this.#validateEnvelope(item)
         await this.#assertKeyAndBlobs(tx, workspaceId, item.keyVersion, item.blobRefs)
-        const document = documentRows.find(row => row.objectId === current.objectId)
+        const document = documentByObjectId.get(current.objectId)
         if ((document?.latestDocumentSequence ?? 0n) > counter(item.expectedDocumentSequence, 'expectedDocumentSequence')) {
           editConflict = true
         }
@@ -626,7 +939,7 @@ export class DurableSyncService {
         while (parentId !== null && descendants.has(parentId) && !seen.has(parentId)) {
           seen.add(parentId)
           value += 1
-          parentId = currentObjects.find(candidate => candidate.objectId === parentId)?.parentObjectId ?? null
+          parentId = objectById.get(parentId)?.parentObjectId ?? null
         }
         return value
       }
@@ -663,7 +976,7 @@ export class DurableSyncService {
       return { commandId: command.commandId, status: 'applied', duplicate: false, sequence: finalSequence.toString() }
     }
 
-    if (command.type === 'append-update') {
+    if (command.type === 'initialize-document' || command.type === 'append-update') {
       await this.#assertKeyAndBlobs(tx, workspaceId, command.keyVersion, [])
       const [currentObject] = await tx.select({ deletedAt: objects.deletedAt, kind: objects.kind }).from(objects).where(and(
         eq(objects.workspaceId, workspaceId), eq(objects.objectId, command.objectId),
@@ -685,6 +998,16 @@ export class DurableSyncService {
       )).limit(1).for('update')
       if (document !== undefined && (document.objectId !== command.objectId || document.kind !== command.kind)) {
         throw new ApiError({ code: 'document_identity_mismatch', message: 'Document ID is already bound to another object', statusCode: 409 })
+      }
+      if (command.type === 'initialize-document'
+        && document !== undefined
+        && (document.latestDocumentSequence > 0n || document.checkpointDocumentSequence > 0n)) {
+        throw new ApiError({
+          code: 'document_already_initialized',
+          message: 'Document already has an authoritative collaborative baseline',
+          statusCode: 409,
+          details: { latestDocumentSequence: document.latestDocumentSequence.toString() },
+        })
       }
       const documentSequence = (document?.latestDocumentSequence ?? 0n) + 1n
       const sequence = await nextSequence(tx, workspaceId)
@@ -822,10 +1145,11 @@ export class DurableSyncService {
       throw new ApiError({ code: 'request_invalid', message: 'Delete conflict resolution cannot also restore content', statusCode: 400 })
     }
     if (command.requiresCommandId !== undefined) {
-      const [required] = await tx.select({ result: syncCommands.result }).from(syncCommands).where(and(
+      const [required] = await tx.select({ result: syncCommands.result, syncEpoch: syncCommands.syncEpoch }).from(syncCommands).where(and(
         eq(syncCommands.workspaceId, workspaceId), eq(syncCommands.commandId, command.requiresCommandId),
       )).limit(1)
-      if (required === undefined || required.result.status !== 'applied') {
+      if (required === undefined || required.result.status !== 'applied'
+        || (this.syncEpoch !== undefined && required.syncEpoch !== this.syncEpoch)) {
         throw new ApiError({
           code: 'required_command_not_applied', message: 'Required command was not applied',
           statusCode: 409,
@@ -1011,6 +1335,7 @@ export class DurableSyncService {
         && object.currentRevision !== conflict.expectedRevision)) {
         return { commandId: command.commandId, status: 'conflict', duplicate: false, code: 'conflict_changed' }
       }
+      if (object.kind === 'folder') await this.#assertFolderEmpty(tx, workspaceId, object.objectId)
       const revision = object.currentRevision + 1n
       const deleteSequence = await nextSequence(tx, workspaceId)
       await this.usage?.applyCurrentObject(tx, {
@@ -1111,6 +1436,19 @@ export class DurableSyncService {
       }
       cursor = parent.parentObjectId
     }
+  }
+
+  async #assertFolderEmpty(tx: SyncTransaction, workspaceId: string, folderObjectId: string): Promise<void> {
+    const [child] = await tx.select({ objectId: objects.objectId }).from(objects).where(and(
+      eq(objects.workspaceId, workspaceId), eq(objects.parentObjectId, folderObjectId), isNull(objects.deletedAt),
+    )).limit(1)
+    if (child !== undefined) throw new ApiError({
+      code: 'folder_not_empty',
+      message: 'A folder with active children must be deleted with the atomic subtree command',
+      statusCode: 409,
+      retryable: false,
+      details: { childObjectId: child.objectId },
+    })
   }
 
   async #pruneCoveredUpdates(tx: SyncTransaction, workspaceId: string, documentId: string, covers: bigint): Promise<bigint> {

@@ -7,7 +7,7 @@ import { LocaleProvider } from "@/components/locale-provider"
 import { Toaster } from "@/components/ui/toast"
 
 export const metadata: Metadata = {
-  title: "NoteGen 同步管理后台",
+  title: "NoteGen Sync",
   description: "管理 NoteGen 同步内容、工作区与关联设备",
 }
 

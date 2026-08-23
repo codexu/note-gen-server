@@ -1,7 +1,7 @@
 import argon2 from 'argon2'
 import { and, eq, isNull, ne, sql } from 'drizzle-orm'
 import type { DatabaseContext } from '../database/client.js'
-import { accountIdentities, accountLoginClaimConflicts, accountLoginClaims, accounts, deploymentSettings, devicePairings, devices, refreshTokens, workspaces } from '../database/schema.js'
+import { accountIdentities, accountLoginClaimConflicts, accountLoginClaims, accounts, deploymentSettings, devicePairings, devices, refreshTokens, syncDeviceCursors, syncEvents, workspaces } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { normalizeLoginKey } from '../identity/service.js'
 import type { TokenService } from './tokens.js'
@@ -175,15 +175,11 @@ export class AuthService {
       if (existingDevice !== undefined && existingDevice.accountId !== accountId) {
         throw new ApiError({ code: 'device_conflict', message: 'Device belongs to another account', statusCode: 409 })
       }
-      if (existingDevice?.encryptionPublicKey !== null && existingDevice?.encryptionPublicKey !== undefined
-        && input.encryptionPublicKey !== undefined
-        && input.encryptionPublicKey !== existingDevice.encryptionPublicKey) {
-        throw new ApiError({
-          code: 'device_key_conflict',
-          message: 'Device ID is already bound to another encryption key',
-          statusCode: 409,
-        })
-      }
+      // Re-authentication is authoritative proof that this account may reclaim
+      // its installation identity. This also lets an installation recover when
+      // its local private key was lost without creating another device record.
+      // #issueSession revokes every older refresh token for this device before
+      // issuing the replacement session.
       if (existingDevice === undefined || existingDevice.revokedAt !== null) {
         await this.usage?.admitDevice(tx, accountId, this.deviceLimitResolver === undefined
           ? null : await this.deviceLimitResolver(accountId))
@@ -314,7 +310,11 @@ export class AuthService {
         ...(refreshRequestId === undefined ? {} : {
           rotationRequestId: refreshRequestId,
           rotationResponseCiphertext: this.tokens.sealRefreshRecovery(JSON.stringify(session), `${stored.id}:${refreshRequestId}`),
-          rotationResponseExpiresAt: new Date(now.getTime() + 5 * 60_000),
+          // The request id is high entropy and proves this is the same refresh
+          // attempt. Keep its encrypted recovery response until the original
+          // token expires so a crash before local persistence cannot revoke the
+          // installation on its next launch.
+          rotationResponseExpiresAt: stored.expiresAt,
         }),
       }).where(eq(refreshTokens.id, stored.id))
       await tx.insert(refreshTokens).values({
@@ -544,7 +544,7 @@ export class AuthService {
   }
 
   async listDevices(accountId: string, currentDeviceId?: string) {
-    const rows = await this.database.db.select({
+    const [rows, cursors] = await Promise.all([this.database.db.select({
       id: devices.id,
       name: devices.name,
       platform: devices.platform,
@@ -552,8 +552,41 @@ export class AuthService {
       lastSeenAt: devices.lastSeenAt,
       createdAt: devices.createdAt,
       revokedAt: devices.revokedAt,
-    }).from(devices).where(eq(devices.accountId, accountId)).orderBy(devices.createdAt)
-    return rows.map((device) => ({ ...device, current: currentDeviceId !== undefined && device.id === currentDeviceId }))
+    }).from(devices).where(eq(devices.accountId, accountId)).orderBy(devices.createdAt),
+    this.database.db.select({
+      deviceId: syncDeviceCursors.deviceId,
+      acknowledgedSequence: syncDeviceCursors.acknowledgedSequence,
+      latestSequence: workspaces.latestSequence,
+      acknowledgedAt: syncDeviceCursors.updatedAt,
+      pendingObjectCount: sql<string>`(
+        select count(distinct coalesce(${syncEvents.objectId}::text, ${syncEvents.eventId}::text))
+        from ${syncEvents}
+        where ${syncEvents.workspaceId} = ${syncDeviceCursors.workspaceId}
+          and ${syncEvents.sequence} > ${syncDeviceCursors.acknowledgedSequence}
+      )`,
+    }).from(syncDeviceCursors).innerJoin(workspaces, and(
+      eq(workspaces.id, syncDeviceCursors.workspaceId),
+      eq(workspaces.accountId, accountId),
+      isNull(workspaces.deletedAt),
+    )),])
+    return rows.map((device) => {
+      const deviceCursors = cursors.filter(cursor => cursor.deviceId === device.id)
+      const pendingEventCount = deviceCursors.reduce(
+        (total, cursor) => total + BigInt(cursor.pendingObjectCount), 0n,
+      )
+      const isBehind = deviceCursors.some(cursor => cursor.latestSequence > cursor.acknowledgedSequence)
+      const acknowledgedAt = deviceCursors.reduce<Date | null>((latest, cursor) => (
+        latest === null || cursor.acknowledgedAt > latest ? cursor.acknowledgedAt : latest
+      ), null)
+      return {
+        ...device,
+        current: currentDeviceId !== undefined && device.id === currentDeviceId,
+        syncStatus: deviceCursors.length === 0 ? 'never-acknowledged' as const
+          : isBehind ? 'behind' as const : 'caught-up' as const,
+        pendingEventCount: pendingEventCount.toString(),
+        acknowledgedAt,
+      }
+    })
   }
 
   async #issueSession(accountId: string, deviceId: string, expectedCredentialEpoch?: string): Promise<SessionResult> {

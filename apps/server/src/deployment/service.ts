@@ -32,7 +32,7 @@ export interface RuntimeConfiguration {
 }
 
 export interface DeploymentState {
-  deploymentMode: 'hosted' | 'self-hosted'
+  deploymentMode: 'self-hosted'
   registrationPolicy: RegistrationPolicy
   selfHostedLifecycle: 'uninitialized' | 'ready' | null
   adminRepairRequired: boolean
@@ -40,7 +40,7 @@ export interface DeploymentState {
   runtimeConfiguration: RuntimeConfiguration
 }
 
-/** Loads the immutable deployment choice made by the Web installation guide. */
+/** Loads the independent-instance configuration created by the Web installer. */
 export class DeploymentService {
   private state: DeploymentState | undefined
   private configurationListening = false
@@ -162,8 +162,11 @@ export class DeploymentService {
   }
 
   private toState(row: typeof deploymentSettings.$inferSelect): DeploymentState {
+    if (row.deploymentMode !== 'self-hosted') {
+      throw new Error('The legacy operations deployment mode is no longer supported')
+    }
     return {
-      deploymentMode: row.deploymentMode,
+      deploymentMode: 'self-hosted',
       registrationPolicy: row.registrationPolicy,
       selfHostedLifecycle: row.selfHostedLifecycle,
       adminRepairRequired: row.adminRepairRequired,

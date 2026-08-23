@@ -1,7 +1,8 @@
 "use client"
 
-import { useCallback, useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
+  ArrowRightIcon,
   CircleCheckIcon,
   HistoryIcon,
   LaptopIcon,
@@ -13,8 +14,12 @@ import {
   UserRoundCogIcon,
   UsersIcon,
 } from "lucide-react"
+import QRCode from "react-qr-code"
+import { Bar, BarChart, CartesianGrid, XAxis } from "recharts"
 
 import { AdminShell, type AdminSection } from "@/components/admin-shell"
+import { NOTEGEN_SITE_URL } from "@/components/notegen-brand"
+import { PublicSiteShell } from "@/components/site-chrome"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -22,6 +27,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import {
   Card,
   CardContent,
@@ -29,7 +35,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import {
   Item,
@@ -46,8 +61,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Pagination, PaginationContent, PaginationItem, PaginationNext, PaginationPrevious } from "@/components/ui/pagination"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toast } from "@/components/ui/toast"
-import { ThemeToggle } from "@/components/theme-toggle"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { AdminInstanceSummary } from "@/components/admin-instance-summary"
 import { ExperimentalCenter } from "@/components/experimental-center"
 import { OperationsCenter } from "@/components/operations-center"
@@ -80,8 +95,23 @@ import { formatRelativeTime as formatDate } from "@/lib/relative-time"
 import { cn } from "@/lib/utils"
 
 type AuthMode = "login" | "register"
+type AuthStep = "credentials" | "totp" | "forgot" | "reset" | "verify" | "verification-pending"
+type AdminDataView = "overview" | "accounts" | "data" | "audit" | "tools"
 
-export function AccountPortal() {
+const syncActivityKindDefinitions: ChartConfig = {
+  note: { label: "写作", color: "var(--activity-note)" },
+  folder: { label: "目录", color: "var(--activity-folder)" },
+  asset: { label: "附件", color: "var(--activity-asset)" },
+  canvas: { label: "画布", color: "var(--activity-canvas)" },
+  record: { label: "记录", color: "var(--activity-record)" },
+  tag: { label: "标签", color: "var(--activity-tag)" },
+  conversation: { label: "对话", color: "var(--activity-conversation)" },
+  memory: { label: "记忆", color: "var(--activity-memory)" },
+  setting: { label: "设置", color: "var(--activity-setting)" },
+  collaboration: { label: "实时文档", color: "var(--activity-collaboration)" },
+} satisfies ChartConfig
+
+export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthenticationFlow?: boolean }) {
   const [, setRelativeTimeTick] = useState(0)
   const [account, setAccount] = useState<Account | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
@@ -90,6 +120,7 @@ export function AccountPortal() {
   const [overview, setOverview] = useState<SyncOverview | null>(null)
   const [workspaces, setWorkspaces] = useState<WebWorkspace[]>([])
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
+  const [recentlyDeletedWorkspace, setRecentlyDeletedWorkspace] = useState<WebWorkspace | null>(null)
   const [section, setSection] = useState<AdminSection>(readSectionFromUrl)
   const [adminRefreshVersion, setAdminRefreshVersion] = useState(0)
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null)
@@ -109,6 +140,7 @@ export function AccountPortal() {
   const [adminDeviceOffset, setAdminDeviceOffset] = useState(() => readUrlOffset("devicesOffset"))
   const [adminAuditOffset, setAdminAuditOffset] = useState(() => readUrlOffset("auditOffset"))
   const [adminAuditAction, setAdminAuditAction] = useState(() => readUrlParam("auditAction"))
+  const [adminView, setAdminView] = useState<AdminDataView>(readAdminViewFromUrl)
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminError, setAdminError] = useState("")
   const [adminBusyAccountId, setAdminBusyAccountId] = useState<string | null>(null)
@@ -128,14 +160,12 @@ export function AccountPortal() {
     if (overviewResult.status === "fulfilled") setOverview(overviewResult.value)
     if (workspacesResult.status === "fulfilled") setWorkspaces(workspacesResult.value)
 
-    const failed = devicesResult.status === "rejected"
-      ? devicesResult
-      : overviewResult.status === "rejected"
-        ? overviewResult
-        : workspacesResult.status === "rejected"
-          ? workspacesResult
-          : null
-    if (failed) setError(errorMessage(failed.reason))
+    const failures = [
+      devicesResult.status === "rejected" ? { label: "设备", reason: devicesResult.reason } : null,
+      overviewResult.status === "rejected" ? { label: "同步概览", reason: overviewResult.reason } : null,
+      workspacesResult.status === "rejected" ? { label: "工作区", reason: workspacesResult.reason } : null,
+    ].filter((item): item is { label: string; reason: unknown } => item !== null)
+    if (failures.length) setError(`部分数据未更新（${failures.map((item) => item.label).join("、")}）。${errorMessage(failures[0].reason)}`)
   }, [])
 
   const loadAdminData = useCallback(async () => {
@@ -153,32 +183,38 @@ export function AccountPortal() {
       const auditQuery = new URLSearchParams(commonQuery)
       auditQuery.set("offset", String(adminAuditOffset))
       if (adminAuditAction) auditQuery.set("action", adminAuditAction)
-      const [overviewResult, accountsResult, auditResult, workspacesResult, devicesResult, statusResult] = await Promise.allSettled([
-        apiRequest<AdminOverview>("/v1/web/admin/overview"),
-        apiRequest<AdminAccountPage>(`/v1/web/admin/accounts?${accountQuery}`),
-        apiRequest<AdminAuditPage>(`/v1/web/admin/audit?${auditQuery}`),
-        apiRequest<AdminWorkspacePage>(`/v1/web/admin/workspaces?${workspaceQuery}`),
-        apiRequest<AdminDevicePage>(`/v1/web/admin/devices?${deviceQuery}`),
-        apiRequest<AdminSystemStatus>("/v1/web/admin/status"),
-      ])
-      if (overviewResult.status === "fulfilled") setAdminOverview(overviewResult.value)
-      if (accountsResult.status === "fulfilled") { setAdminAccounts(accountsResult.value.accounts); setAdminAccountTotal(accountsResult.value.total) }
-      if (auditResult.status === "fulfilled") { setAdminAudit(auditResult.value.entries); setAdminAuditTotal(auditResult.value.total) }
-      if (workspacesResult.status === "fulfilled") { setAdminWorkspaces(workspacesResult.value.workspaces); setAdminWorkspaceTotal(workspacesResult.value.total) }
-      if (devicesResult.status === "fulfilled") { setAdminDevices(devicesResult.value.devices); setAdminDeviceTotal(devicesResult.value.total) }
-      if (statusResult.status === "fulfilled") setAdminStatus(statusResult.value)
-      const failed = [overviewResult, accountsResult, auditResult, workspacesResult, devicesResult, statusResult]
-        .find((result) => result.status === "rejected")
-      if (failed?.status === "rejected") setAdminError(errorMessage(failed.reason))
+      if (adminView === "overview") {
+        const [nextOverview, nextStatus] = await Promise.all([
+          apiRequest<AdminOverview>("/v1/web/admin/overview"),
+          apiRequest<AdminSystemStatus>("/v1/web/admin/status"),
+        ])
+        setAdminOverview(nextOverview); setAdminStatus(nextStatus)
+      } else if (adminView === "accounts") {
+        const page = await apiRequest<AdminAccountPage>(`/v1/web/admin/accounts?${accountQuery}`)
+        setAdminAccounts(page.accounts); setAdminAccountTotal(page.total)
+      } else if (adminView === "audit") {
+        const page = await apiRequest<AdminAuditPage>(`/v1/web/admin/audit?${auditQuery}`)
+        setAdminAudit(page.entries); setAdminAuditTotal(page.total)
+      } else if (adminView === "data") {
+        const [workspacePage, devicePage] = await Promise.all([
+          apiRequest<AdminWorkspacePage>(`/v1/web/admin/workspaces?${workspaceQuery}`),
+          apiRequest<AdminDevicePage>(`/v1/web/admin/devices?${deviceQuery}`),
+        ])
+        setAdminWorkspaces(workspacePage.workspaces); setAdminWorkspaceTotal(workspacePage.total)
+        setAdminDevices(devicePage.devices); setAdminDeviceTotal(devicePage.total)
+      }
+    } catch (cause) {
+      setAdminError(errorMessage(cause))
     } finally {
       setAdminLoading(false)
     }
-  }, [adminAccountOffset, adminAccountStatus, adminAuditAction, adminAuditOffset, adminDeviceOffset, adminQuery, adminWorkspaceOffset])
+  }, [adminAccountOffset, adminAccountStatus, adminAuditAction, adminAuditOffset, adminDeviceOffset, adminQuery, adminView, adminWorkspaceOffset])
 
   const loadAccount = useCallback(async () => {
     try {
       const session = await apiRequest<{ account: Account }>("/v1/web/session")
       setAccount(session.account)
+      setError("")
       setLoading(false)
       void loadDashboardData()
       redirectAfterAuth()
@@ -232,6 +268,14 @@ export function AccountPortal() {
   }, [account, loadDashboardData])
 
   useEffect(() => {
+    if (!account || !["overview", "devices", "workspaces"].includes(section)) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadDashboardData()
+    }, 15_000)
+    return () => window.clearInterval(timer)
+  }, [account, loadDashboardData, section])
+
+  useEffect(() => {
     if (!account) return
     const timer = window.setInterval(() => {
       setRelativeTimeTick((current) => current + 1)
@@ -254,7 +298,7 @@ export function AccountPortal() {
   }, [account, section])
 
   useEffect(() => {
-    const onPopState = () => setSection(readSectionFromUrl())
+    const onPopState = () => { setSection(readSectionFromUrl()); setAdminView(readAdminViewFromUrl()) }
     window.addEventListener("popstate", onPopState)
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
@@ -269,8 +313,9 @@ export function AccountPortal() {
     setOptionalParam(url, "devicesOffset", adminDeviceOffset ? String(adminDeviceOffset) : "")
     setOptionalParam(url, "auditOffset", adminAuditOffset ? String(adminAuditOffset) : "")
     setOptionalParam(url, "auditAction", adminAuditAction)
+    setOptionalParam(url, "adminView", adminView === "overview" ? "" : adminView)
     window.history.replaceState(null, "", url)
-  }, [section, adminQuery, adminAccountStatus, adminAccountOffset, adminWorkspaceOffset, adminDeviceOffset, adminAuditOffset, adminAuditAction])
+  }, [section, adminQuery, adminAccountStatus, adminAccountOffset, adminWorkspaceOffset, adminDeviceOffset, adminAuditOffset, adminAuditAction, adminView])
 
   const navigateSection = useCallback((nextSection: AdminSection) => {
     setSection(nextSection)
@@ -336,7 +381,23 @@ export function AccountPortal() {
         method: "DELETE",
         csrf: true,
       })
+      setRecentlyDeletedWorkspace(workspaces.find((workspace) => workspace.id === targetWorkspaceId) ?? null)
       await loadDashboardData()
+    } catch (cause) {
+      setError(errorMessage(cause))
+    } finally {
+      setDeletingWorkspaceId(null)
+    }
+  }
+
+  async function handleRestoreWorkspace(targetWorkspaceId: string) {
+    setDeletingWorkspaceId(targetWorkspaceId)
+    setError("")
+    try {
+      await apiRequest(`/v1/web/workspaces/${targetWorkspaceId}/restore`, { method: "POST", csrf: true })
+      setRecentlyDeletedWorkspace(null)
+      await loadDashboardData()
+      toast.add({ title: "工作区已恢复", type: "success" })
     } catch (cause) {
       setError(errorMessage(cause))
     } finally {
@@ -380,7 +441,7 @@ export function AccountPortal() {
 
   if (loading) {
     return (
-      <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:p-10">
+      <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:p-10" aria-busy="true" aria-label="正在加载账户信息">
         <div className="flex items-center justify-between">
           <Skeleton className="h-10 w-56" />
           <Skeleton className="h-6 w-20 rounded-full" />
@@ -397,36 +458,56 @@ export function AccountPortal() {
     return <InstallationGuide initialStatus={installationStatus} onStatusChange={setInstallationStatus} />
   }
 
-  if (!account) {
+  if (!account || forceAuthenticationFlow) {
     return (
-      <main className="mx-auto flex min-h-svh w-full max-w-6xl flex-col gap-6 p-6 md:justify-center md:p-10">
-        <LoginHeader capabilities={capabilities} />
-        {error ? <ErrorAlert message={error} /> : null}
-        <div className="grid items-stretch gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-          <Card className="hidden justify-between bg-primary text-primary-foreground lg:flex">
-            <CardHeader>
-              <Badge className="w-fit" variant="secondary">NoteGen Sync</Badge>
-              <CardTitle className="mt-6 text-3xl font-semibold tracking-tight">让同步保持清晰、可控。</CardTitle>
-              <CardDescription className="max-w-md text-primary-foreground/75">
-                在这里管理账号、设备和同步空间。敏感操作始终由服务器再次验证，而不只依赖页面状态。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3">
-              <LoginBenefit icon={ShieldCheckIcon} title="独立设备会话" description="每台设备都可以单独查看和撤销。" />
-              <LoginBenefit icon={LockKeyholeIcon} title="加密状态可见" description="托管与端到端加密工作区都会明确标识。" />
-              <LoginBenefit icon={ScrollTextIcon} title="同步记录可追溯" description="查看最近同步活动，不暴露内容秘密。" />
-            </CardContent>
-          </Card>
-          <AuthCard
-            busy={busy}
-            registrationMethods={capabilities?.registration.methods ?? []}
-            deploymentMode={capabilities?.deploymentMode ?? "self-hosted"}
-            setBusy={setBusy}
-            onAuthenticated={handleAuthenticated}
-            onError={setError}
-          />
+      <PublicSiteShell instanceName={capabilities?.serverName}>
+      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-5 sm:px-6 md:px-8">
+        <div className="flex flex-1 items-center py-12 sm:py-16 lg:py-24">
+          <div className="grid w-full items-center gap-12 lg:grid-cols-[minmax(0,1fr)_28rem] lg:gap-20">
+            <div className="mx-auto flex w-full max-w-2xl flex-col items-center text-center lg:mx-0 lg:items-start lg:text-left">
+              <Badge variant="outline" className="mb-6 rounded-full px-3 py-1">
+                NoteGen Sync · 跨设备同步
+              </Badge>
+              <h1 className="max-w-2xl text-4xl leading-[1.08] font-semibold tracking-[-0.04em] sm:text-5xl lg:text-6xl">
+                连接设备，<br />保持同步。
+              </h1>
+              <p className="mt-6 max-w-xl text-base leading-7 text-muted-foreground sm:text-lg">
+                管理 NoteGen 账号、设备和同步空间。官方公共测试服务与自行部署使用相同的开放源代码和运行方式。
+              </p>
+              <div className="mt-7 flex flex-wrap justify-center gap-x-6 gap-y-3 text-sm lg:justify-start">
+                <LoginBenefit icon={ShieldCheckIcon} title="独立设备会话" />
+                <LoginBenefit icon={LockKeyholeIcon} title="加密状态可见" />
+                <LoginBenefit icon={ScrollTextIcon} title="同步记录可追溯" />
+              </div>
+              <p className="mt-8 text-sm text-muted-foreground">
+                还没有 NoteGen？
+                <a className="ml-1 font-medium text-foreground underline-offset-4 hover:underline" href={`${NOTEGEN_SITE_URL}/cn/download`} target="_blank" rel="noreferrer">
+                  下载客户端
+                  <ArrowRightIcon className="ml-1 inline size-3.5" />
+                </a>
+              </p>
+            </div>
+            <div className="mx-auto flex w-full max-w-md flex-col gap-4 lg:mx-0">
+              {error ? <ErrorAlert message={error} /> : null}
+              <AuthCard
+                busy={busy}
+                registrationMethods={capabilities?.registration.methods ?? []}
+                setBusy={setBusy}
+                onAuthenticated={handleAuthenticated}
+                onError={setError}
+              />
+              <Alert>
+                <ServerIcon />
+                <AlertTitle>免费独立实例</AlertTitle>
+                <AlertDescription>
+                  本服务不包含付费订阅或商业 SLA。请保留本地数据；实例维护、开放范围和数据保留策略由实例管理员负责。<a className="ml-1 font-medium text-foreground underline-offset-4 hover:underline" href="/service/">查看服务说明</a>
+                </AlertDescription>
+              </Alert>
+            </div>
+          </div>
         </div>
       </main>
+      </PublicSiteShell>
     )
   }
 
@@ -456,15 +537,17 @@ export function AccountPortal() {
       }}
     >
       {error ? <ErrorAlert message={error} /> : null}
-      {section === "overview" ? <><OverviewSection overview={overview} />{account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}</> : null}
+      {section === "overview" ? <><OverviewSection overview={overview} devices={devices} onNavigate={navigateSection} />{account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}</> : null}
       {section === "instance" && account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}
       {section === "experiments" && account.isAdmin ? <ExperimentalCenter refreshVersion={adminRefreshVersion} /> : null}
       {section === "operations" && account.isAdmin ? <OperationsCenter refreshVersion={adminRefreshVersion} /> : null}
       {section === "workspaces" ? (
         <WorkspaceManagement
           workspaces={workspaces}
+          recentlyDeletedWorkspace={recentlyDeletedWorkspace}
           deletingWorkspaceId={deletingWorkspaceId}
           onDelete={handleDeleteWorkspace}
+          onRestore={handleRestoreWorkspace}
         />
       ) : null}
       {section === "devices" ? (
@@ -472,6 +555,7 @@ export function AccountPortal() {
           devices={devices}
           busy={busy}
           onRevoke={(id) => void handleRevokeDevice(id)}
+          onConnect={() => navigateSection("connect")}
         />
       ) : null}
       {section === "connect" ? <DeviceConnection embedded /> : null}
@@ -489,6 +573,7 @@ export function AccountPortal() {
           devices={adminDevices}
           deviceTotal={adminDeviceTotal}
           status={adminStatus}
+          adminView={adminView}
           query={adminQuery}
           accountStatus={adminAccountStatus}
           accountOffset={adminAccountOffset}
@@ -500,6 +585,7 @@ export function AccountPortal() {
           error={adminError}
           busyAccountId={adminBusyAccountId}
           onRefresh={() => void loadAdminData()}
+          onAdminViewChange={setAdminView}
           onSetSuspended={handleSetAccountSuspended}
           onSetAdmin={handleSetAccountAdmin}
           onQueryChange={(value) => {
@@ -518,40 +604,12 @@ export function AccountPortal() {
   )
 }
 
-function LoginHeader({ capabilities }: { capabilities: ServerCapabilities | null }) {
-  return (
-    <header className="flex items-center justify-between gap-4">
-      <div className="flex items-center gap-3">
-        <span className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-          <ServerIcon />
-        </span>
-        <div>
-          <h1 className="text-lg font-semibold">{capabilities?.serverName ?? "NoteGen 同步服务器"}</h1>
-          <p className="text-sm text-muted-foreground">登录同步管理后台</p>
-        </div>
-      </div>
-      <div className="flex items-center gap-1">
-        {capabilities ? (
-          <>
-            <Badge variant="secondary">
-              {capabilities.deploymentMode === "hosted" ? "官方托管" : "自托管"}
-            </Badge>
-            <Badge variant="outline">
-              {capabilities.registrationMode === "open" ? "开放注册" : "关闭注册"}
-            </Badge>
-          </>
-        ) : null}
-        <ThemeToggle />
-      </div>
-    </header>
-  )
-}
-
 function ErrorAlert({ message }: { message: string }) {
+  const connectionFailed = message.includes("无法连接同步服务器")
   return (
     <Alert variant="destructive">
       <ShieldCheckIcon />
-      <AlertTitle>操作失败</AlertTitle>
+      <AlertTitle>{connectionFailed ? "暂时无法连接" : "操作失败"}</AlertTitle>
       <AlertDescription>{message}</AlertDescription>
     </Alert>
   )
@@ -560,31 +618,60 @@ function ErrorAlert({ message }: { message: string }) {
 function LoginBenefit({
   icon: Icon,
   title,
-  description,
 }: {
   icon: typeof ShieldCheckIcon
   title: string
-  description: string
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-xl bg-primary-foreground/10 p-4">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary-foreground/15">
-        <Icon />
-      </span>
-      <div className="flex flex-col gap-0.5">
-        <p className="font-medium">{title}</p>
-        <p className="text-sm text-primary-foreground/75">{description}</p>
-      </div>
+    <div className="flex items-center gap-2 text-muted-foreground">
+      <Icon className="size-4" />
+      <span>{title}</span>
     </div>
   )
 }
 
-function OverviewSection({ overview }: { overview: SyncOverview | null }) {
+function OverviewSection({ overview, devices, onNavigate }: {
+  overview: SyncOverview | null
+  devices: Device[]
+  onNavigate: (section: AdminSection) => void
+}) {
   const contentStats = summarizeContentKinds(overview?.kinds ?? [])
+  const activityChart = summarizeSyncActivity(
+    overview?.activityTimeline ?? [],
+    overview?.activityKinds ?? [],
+  )
+  const storage = overview?.storageUsage
+  const activeBytes = storage ? sumByteStrings(
+    storage.activeObjectBytes, storage.activeCrdtBytes, storage.activeBlobBytes,
+  ) : "0"
+  const enforcedBytes = storage ? sumByteStrings(
+    activeBytes, storage.reservedBlobBytes, storage.retainedBytes,
+  ) : "0"
+  const activeDevices = devices.filter((device) => !device.revokedAt)
+  const behindDevices = activeDevices.filter((device) => device.syncStatus === "behind")
+  const health = activeDevices.length === 0
+    ? { label: "等待连接设备", description: "关联第一台 NoteGen 设备后，服务器会自动建立同步空间。", variant: "outline" as const }
+    : behindDevices.length > 0
+      ? { label: `${behindDevices.length} 台设备尚未追平`, description: "打开对应设备上的 NoteGen，让它保持联网以完成同步。", variant: "destructive" as const }
+      : { label: "同步正常", description: `${activeDevices.length} 台设备已连接${overview?.lastActivityAt ? `，最近同步于 ${formatDate(overview.lastActivityAt)}` : "，正在等待首次同步"}。`, variant: "secondary" as const }
 
   return (
     <>
-      <Card className="bg-card/90 shadow-sm">
+      <Card>
+        <CardHeader className="flex flex-col items-start justify-between gap-4 sm:flex-row">
+          <div className="flex flex-col gap-2">
+            <Badge className="w-fit" variant={health.variant}>{health.label}</Badge>
+            <div>
+              <CardTitle>你的同步状态</CardTitle>
+              <CardDescription>{health.description}</CardDescription>
+            </div>
+          </div>
+          <Button variant={activeDevices.length === 0 ? "default" : "outline"} onClick={() => onNavigate(activeDevices.length === 0 ? "connect" : "devices")}>
+            {activeDevices.length === 0 ? "关联第一台设备" : "查看设备"}
+          </Button>
+        </CardHeader>
+      </Card>
+      <Card>
         <CardHeader>
           <CardTitle>同步概览</CardTitle>
           <CardDescription>汇总当前账号的同步对象、物理存储、序列和加密状态；已移除附件会按保留策略延迟回收。</CardDescription>
@@ -613,6 +700,23 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
         </CardContent>
       </Card>
 
+      {storage ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>存储核算</CardTitle>
+            <CardDescription>
+              服务端按活跃数据、上传预留和历史保留的总和核算安全上限。删除内容后，历史保留空间会按保留策略延迟释放。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Metric label="核算合计" value={formatBytes(enforcedBytes)} detail="这是实例空间上限实际核对的总量" />
+            <Metric label="活跃数据" value={formatBytes(activeBytes)} detail="对象、协作文档和当前附件" />
+            <Metric label="上传预留" value={formatBytes(storage.reservedBlobBytes)} detail="进行中的附件上传预占空间" />
+            <Metric label="历史保留" value={formatBytes(storage.retainedBytes)} detail="版本与变更记录到期后自动回收" />
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Card>
         <CardHeader>
           <CardTitle>内容数量</CardTitle>
@@ -634,25 +738,62 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
         <Card>
           <CardHeader>
             <CardTitle>最近同步活动</CardTitle>
-            <CardDescription>显示设备、内容类型和操作，不展示文件名或正文。</CardDescription>
+            <CardDescription>按分钟汇总最近 1 小时内发生变化的对象，不展示文件名或正文。</CardDescription>
           </CardHeader>
           <CardContent>
-            {overview?.recentActivity.length ? (
-              <ItemGroup>
-                {overview.recentActivity.slice(0, 10).map((activity) => (
-                  <Item key={`${activity.sequence}-${activity.device.id}`} variant="outline">
-                    <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
-                    <ItemContent>
-                      <ItemTitle>{activity.changeType === "delete" ? "删除" : "更新"} {kindLabel(activity.kind)}</ItemTitle>
-                      <ItemDescription>{activity.device.name} · {formatDate(activity.createdAt)}</ItemDescription>
-                    </ItemContent>
-                    <ItemActions><Badge variant="outline">#{activity.sequence}</Badge></ItemActions>
-                  </Item>
-                ))}
-              </ItemGroup>
-            ) : (
-              <p className="text-sm text-muted-foreground">还没有同步活动。</p>
-            )}
+            {activityChart.total ? (
+              <div className="grid gap-5">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <Metric label="对象变更" value={`${activityChart.total} 次`} detail="同一分钟内的重复操作已合并" />
+                  <Metric label="更新" value={`${activityChart.updates} 次`} detail="新增或修改对象" />
+                  <Metric label="删除" value={`${activityChart.deletes} 次`} detail="删除对象" />
+                  <Metric label="时间范围" value="1 小时" detail="包含没有同步活动的分钟" />
+                </div>
+
+                <div className="rounded-xl border bg-muted/15 p-4">
+                  <div className="mb-2">
+                    <div>
+                      <div className="text-sm font-medium">活动趋势</div>
+                      <div className="text-xs text-muted-foreground">每根细柱表示一分钟内发生变化的唯一对象，不同颜色代表不同内容类型</div>
+                    </div>
+                  </div>
+                  <ChartContainer
+                    config={activityChart.config}
+                    className="h-56 w-full"
+                    aria-label={`最近同步活动：${activityChart.updates} 次更新，${activityChart.deletes} 次删除；按内容类型着色`}
+                  >
+                    <BarChart accessibilityLayer data={activityChart.buckets} margin={{ left: 8, right: 8 }}>
+                      <CartesianGrid vertical={false} />
+                      <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={28} />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <ChartLegend content={<ChartLegendContent className="flex-wrap" />} />
+                      {activityChart.series.map((item) => (
+                        <Bar
+                          key={item.key}
+                          dataKey={item.key}
+                          stackId="activity"
+                          fill={`var(--color-${item.key})`}
+                          radius={2}
+                          maxBarSize={10}
+                        />
+                      ))}
+                    </BarChart>
+                  </ChartContainer>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {activityChart.kinds.map((item) => (
+                      <Badge key={item.key} variant="outline">
+                        <span
+                          aria-hidden="true"
+                          className="size-2 rounded-[2px]"
+                          style={{ backgroundColor: item.color }}
+                        />
+                        {item.label} {item.count}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : <ActionEmpty icon={LaptopIcon} title="还没有同步活动" description="关联设备并在 NoteGen 中完成首次同步后，最近活动会显示在这里。" action="关联设备" onAction={() => onNavigate("connect")} />}
           </CardContent>
         </Card>
       </div>
@@ -661,29 +802,41 @@ function OverviewSection({ overview }: { overview: SyncOverview | null }) {
   )
 }
 
+function sumByteStrings(...values: string[]): string {
+  return values.reduce((total, value) => total + BigInt(value || "0"), 0n).toString()
+}
+
 function WorkspaceManagement({
   workspaces,
+  recentlyDeletedWorkspace,
   deletingWorkspaceId,
   onDelete,
+  onRestore,
 }: {
   workspaces: WebWorkspace[]
+  recentlyDeletedWorkspace: WebWorkspace | null
   deletingWorkspaceId: string | null
   onDelete: (id: string) => Promise<void>
+  onRestore: (id: string) => Promise<void>
 }) {
   const sorted = [...workspaces].sort((left, right) => (
     Number(right.isDefault) - Number(left.isDefault)
+    || Number(right.isNoteGenDefault) - Number(left.isNoteGenDefault)
     || right.objectCount - left.objectCount
     || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
   ))
-  const historicalCount = workspaces.filter((workspace) => !workspace.isDefault).length
+  const historicalCount = workspaces.filter((workspace) => (
+    !workspace.isDefault && !workspace.isNoteGenDefault
+  )).length
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>工作区列表</CardTitle>
-        <CardDescription>查看工作区状态与用量；默认工作区受到保护，历史工作区可在确认后软删除。</CardDescription>
+        <CardDescription>查看个人数据空间、默认写作工作区和历史工作区；只有真正的历史工作区可以软删除。</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
+        {recentlyDeletedWorkspace ? <Alert><HistoryIcon /><AlertTitle>历史工作区已删除</AlertTitle><AlertDescription className="flex flex-col items-start gap-3"><span>工作区 {recentlyDeletedWorkspace.id.slice(0, 8)} 已进入软删除状态，可以立即恢复。</span><Button size="sm" variant="outline" disabled={deletingWorkspaceId !== null} onClick={() => void onRestore(recentlyDeletedWorkspace.id)}>{deletingWorkspaceId === recentlyDeletedWorkspace.id ? <Spinner data-icon="inline-start" /> : null}撤销删除</Button></AlertDescription></Alert> : null}
         {historicalCount ? (
           <Alert>
             <HistoryIcon />
@@ -693,21 +846,30 @@ function WorkspaceManagement({
         ) : null}
         {sorted.length ? (
           <ItemGroup>
-            {sorted.map((workspace) => (
-              <Item key={workspace.id} variant="outline">
-                <ItemMedia variant="icon">{workspace.isDefault ? <ServerIcon /> : <HistoryIcon />}</ItemMedia>
+            {sorted.map((workspace) => {
+              const protectedWorkspace = workspace.isDefault || workspace.isNoteGenDefault
+              const title = workspace.isDefault
+                ? "个人数据空间"
+                : workspace.isNoteGenDefault
+                  ? `默认写作工作区 ${workspace.id.slice(0, 8)}`
+                  : `历史工作区 ${workspace.id.slice(0, 8)}`
+              const kindLabel = workspace.isDefault
+                ? "个人数据"
+                : workspace.isNoteGenDefault ? "默认写作" : "历史"
+              return <Item key={workspace.id} variant="outline">
+                <ItemMedia variant="icon">{protectedWorkspace ? <ServerIcon /> : <HistoryIcon />}</ItemMedia>
                 <ItemContent>
-                  <ItemTitle>{workspace.isDefault ? "当前默认工作区" : `历史工作区 ${workspace.id.slice(0, 8)}`}</ItemTitle>
+                  <ItemTitle>{title}</ItemTitle>
                   <ItemDescription>
                     {workspace.objectCount} 项内容 · {workspace.deletedObjectCount} 项删除记录 · 创建于 {formatDate(workspace.createdAt)}
                   </ItemDescription>
                 </ItemContent>
                 <ItemActions className="flex-wrap justify-end">
-                  <Badge variant={workspace.isDefault ? "secondary" : "outline"}>
-                    {workspace.isDefault ? "默认" : "历史"}
+                  <Badge variant={protectedWorkspace ? "secondary" : "outline"}>
+                    {kindLabel}
                   </Badge>
                   <Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管加密" : "E2EE"}</Badge>
-                  {!workspace.isDefault ? <DangerConfirmButton
+                  {!protectedWorkspace ? <DangerConfirmButton
                     label="删除"
                     title="删除这个历史工作区？"
                     description="工作区及其同步内容将进入软删除状态。确认所有设备都不再使用它后再继续。"
@@ -717,15 +879,9 @@ function WorkspaceManagement({
                   /> : null}
                 </ItemActions>
               </Item>
-            ))}
+            })}
           </ItemGroup>
-        ) : (
-          <Alert>
-            <ServerIcon />
-            <AlertTitle>还没有同步工作区</AlertTitle>
-            <AlertDescription>连接 NoteGen 并完成首次同步后，工作区会显示在这里。</AlertDescription>
-          </Alert>
-        )}
+        ) : <ActionEmpty icon={ServerIcon} title="还没有同步工作区" description="连接 NoteGen 并完成首次同步后，工作区会显示在这里。" />}
       </CardContent>
     </Card>
   )
@@ -735,52 +891,104 @@ function DeviceManagement({
   devices,
   busy,
   onRevoke,
+  onConnect,
 }: {
+  devices: Device[]
+  busy: boolean
+  onRevoke: (id: string) => void
+  onConnect: () => void
+}) {
+  const activeDevices = sortDevices(devices.filter((device) => !device.revokedAt))
+  const revokedDevices = sortDevices(devices.filter((device) => Boolean(device.revokedAt)))
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>已关联设备</CardTitle>
+        <CardDescription>当前共 {activeDevices.length} 台有效设备。历史授权是已经失效的登录身份，不代表新增了物理设备；撤销不会删除已同步内容。</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {activeDevices.length ? (
+          <ItemGroup>
+            {activeDevices.map((device) => (
+              <DeviceManagementItem key={device.id} device={device} devices={activeDevices} busy={busy} onRevoke={onRevoke} />
+            ))}
+          </ItemGroup>
+        ) : <ActionEmpty icon={LaptopIcon} title="还没有关联设备" description="按页面提示复制服务器地址或扫描二维码，即可开始同步。" action="关联第一台设备" onAction={onConnect} />}
+
+        {revokedDevices.length ? (
+          <Collapsible>
+            <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50">
+              <HistoryIcon className="size-4" />
+              历史授权（{revokedDevices.length}）
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-3">
+              <ItemGroup>
+                {revokedDevices.map((device) => (
+                  <DeviceManagementItem key={device.id} device={device} devices={activeDevices} busy={busy} onRevoke={onRevoke} />
+                ))}
+              </ItemGroup>
+            </CollapsibleContent>
+          </Collapsible>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DeviceManagementItem({ device, devices, busy, onRevoke }: {
+  device: Device
   devices: Device[]
   busy: boolean
   onRevoke: (id: string) => void
 }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>已关联设备</CardTitle>
-        <CardDescription>每台设备拥有独立会话，可以单独撤销；撤销不会删除已同步内容。</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {devices.length ? (
-          <ItemGroup>
-            {sortDevices(devices).map((device) => (
-              <Item key={device.id} variant="outline">
-                <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
-                <ItemContent>
-                  <ItemTitle>{device.name}</ItemTitle>
-                  <ItemDescription>
-                    {device.platform} · 最近活动 {formatDate(device.lastSeenAt)} · 设备 ID：{device.id}
-                  </ItemDescription>
-                  {isLikelyDuplicateDevice(device, devices) ? <Badge variant="outline">疑似重复设备</Badge> : null}
-                </ItemContent>
-                <ItemActions>
-                  {device.revokedAt ? (
-                    <Badge variant="outline">已撤销</Badge>
-                  ) : (
-                    <DangerConfirmButton
-                      label="撤销"
-                      title={`撤销“${device.name}”的设备授权？`}
-                      description="这台设备需要重新关联才能继续同步，已经同步到服务端的内容不会删除。"
-                      disabled={busy}
-                      onConfirm={() => onRevoke(device.id)}
-                    />
-                  )}
-                </ItemActions>
-              </Item>
-            ))}
-          </ItemGroup>
+    <Item variant="outline">
+      <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
+      <ItemContent>
+        <ItemTitle>{device.name}</ItemTitle>
+        <ItemDescription>
+          {device.platform} · 最近活动 {formatDate(device.lastSeenAt)} · 关联于 {formatDate(device.createdAt)}
+        </ItemDescription>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <DeviceSyncBadge device={device} />
+          {device.acknowledgedAt ? (
+            <span className="text-xs text-muted-foreground">最后确认 {formatDate(device.acknowledgedAt)}</span>
+          ) : null}
+        </div>
+        {isLikelyDuplicateDevice(device, devices) ? <Badge variant="outline">疑似重复设备</Badge> : null}
+      </ItemContent>
+      <ItemActions>
+        {device.revokedAt ? (
+          <Badge variant="outline">已撤销</Badge>
         ) : (
-          <p className="text-sm text-muted-foreground">还没有关联 NoteGen 设备。</p>
+          <DangerConfirmButton
+            label="撤销"
+            title={`撤销“${device.name}”的设备授权？`}
+            description="这台设备需要重新关联才能继续同步，已经同步到服务端的内容不会删除。"
+            disabled={busy}
+            onConfirm={() => onRevoke(device.id)}
+          />
         )}
-      </CardContent>
-    </Card>
+      </ItemActions>
+    </Item>
   )
+}
+
+function DeviceSyncBadge({ device }: { device: Device }) {
+  if (device.syncStatus === "caught-up") return <Badge variant="outline">已追平</Badge>
+  if (device.syncStatus === "behind") return <Badge variant="destructive">{device.pendingEventCount} 个对象有变更</Badge>
+  return <Badge variant="outline">从未确认同步</Badge>
+}
+
+function ActionEmpty({ icon: Icon, title, description, action, onAction }: {
+  icon: typeof LaptopIcon
+  title: string
+  description: string
+  action?: string
+  onAction?: () => void
+}) {
+  return <Empty className="min-h-40 border"><EmptyHeader><EmptyMedia variant="icon"><Icon /></EmptyMedia><EmptyTitle>{title}</EmptyTitle><EmptyDescription>{description}</EmptyDescription></EmptyHeader>{action && onAction ? <EmptyContent><Button variant="outline" onClick={onAction}>{action}</Button></EmptyContent> : null}</Empty>
 }
 
 function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean }) {
@@ -792,15 +1000,20 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
   const [sessions, setSessions] = useState<Array<{
     id: string; lastSeenAt: string; lastIp: string | null; userAgent: string | null; current: boolean
   }>>([])
+  const [sessionsLoading, setSessionsLoading] = useState(true)
   const [totpEnabled, setTotpEnabled] = useState(initiallyEnabled)
   const [totpPassword, setTotpPassword] = useState("")
   const [totpCode, setTotpCode] = useState("")
   const [totpSecret, setTotpSecret] = useState("")
+  const [totpUri, setTotpUri] = useState("")
+  const [deletionPassword, setDeletionPassword] = useState("")
   const mismatch = confirmPassword.length > 0 && newPassword !== confirmPassword
 
   const loadSessions = useCallback(async () => {
+    setSessionsLoading(true)
     try { setSessions(await apiRequest<typeof sessions>("/v1/web/sessions")) }
     catch (cause) { setError(errorMessage(cause)) }
+    finally { setSessionsLoading(false) }
   }, [])
 
   useEffect(() => { void loadSessions() }, [loadSessions])
@@ -822,6 +1035,7 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
         method: "POST", csrf: true, body: JSON.stringify({ currentPassword: totpPassword }),
       })
       setTotpSecret(setup.secret)
+      setTotpUri(setup.uri)
     } catch (cause) { setError(errorMessage(cause)) }
     finally { setBusy(false) }
   }
@@ -830,7 +1044,8 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
     setBusy(true); setError("")
     try {
       await apiRequest("/v1/web/auth/totp/enable", { method: "POST", csrf: true, body: JSON.stringify({ code: totpCode }) })
-      setTotpEnabled(true); setTotpSecret(""); setTotpPassword(""); setTotpCode("")
+      setTotpEnabled(true); setTotpSecret(""); setTotpUri(""); setTotpPassword(""); setTotpCode("")
+      toast.add({ title: "双因素认证已启用", description: "下次登录时需要输入验证器验证码。", type: "success" })
     } catch (cause) { setError(errorMessage(cause)) }
     finally { setBusy(false) }
   }
@@ -842,6 +1057,7 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
         method: "DELETE", csrf: true, body: JSON.stringify({ currentPassword: totpPassword, code: totpCode }),
       })
       setTotpEnabled(false); setTotpPassword(""); setTotpCode("")
+      toast.add({ title: "双因素认证已关闭", type: "success" })
     } catch (cause) { setError(errorMessage(cause)) }
     finally { setBusy(false) }
   }
@@ -871,15 +1087,32 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
     }
   }
 
+  async function requestAccountDeletion() {
+    setBusy(true)
+    setError("")
+    try {
+      await apiRequest("/v1/web/account", {
+        method: "DELETE",
+        csrf: true,
+        body: JSON.stringify({ password: deletionPassword, confirmation: "DELETE" }),
+      })
+      window.location.assign("/")
+    } catch (cause) {
+      setError(errorMessage(cause))
+      setBusy(false)
+    }
+  }
+
   return (
-    <div className="grid max-w-4xl gap-6 xl:grid-cols-2">
+    <div className="flex max-w-4xl flex-col gap-6">
+    {error ? <ErrorAlert message={error} /> : null}
+    <div className="grid gap-6 xl:grid-cols-2">
     <Card>
       <CardHeader>
         <CardTitle>修改密码</CardTitle>
         <CardDescription>修改后会撤销旧设备登录凭据并注销其他浏览器会话，当前浏览器会自动保持登录。</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {error ? <ErrorAlert message={error} /> : null}
         <form onSubmit={handleSubmit}>
           <FieldGroup>
             <Field>
@@ -909,7 +1142,7 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
     <Card>
       <CardHeader><CardTitle>浏览器会话</CardTitle><CardDescription>检查登录位置，并注销当前浏览器之外的全部会话。</CardDescription></CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <ItemGroup>{sessions.map((session) => (
+        {sessionsLoading ? <div className="flex min-h-24 items-center justify-center" aria-label="正在加载浏览器会话" aria-busy="true"><Spinner /></div> : sessions.length ? <ItemGroup>{sessions.map((session) => (
           <Item key={session.id} variant="outline">
             <ItemMedia variant="icon"><LaptopIcon /></ItemMedia>
             <ItemContent><ItemTitle>{session.current ? "当前浏览器" : "其他浏览器"}</ItemTitle>
@@ -917,8 +1150,8 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
             </ItemContent>
             {session.current ? <ItemActions><Badge variant="secondary">当前</Badge></ItemActions> : null}
           </Item>
-        ))}</ItemGroup>
-        <Button variant="outline" disabled={busy || sessions.every((session) => session.current)} onClick={() => void logoutOtherSessions()}>
+        ))}</ItemGroup> : <ActionEmpty icon={LaptopIcon} title="没有可显示的浏览器会话" description="刷新页面后仍为空时，请重新登录。" />}
+        <Button variant="outline" disabled={busy || sessionsLoading || sessions.length === 0 || sessions.every((session) => session.current)} onClick={() => void logoutOtherSessions()}>
           注销其他浏览器
         </Button>
       </CardContent>
@@ -928,17 +1161,44 @@ function PasswordManagement({ initiallyEnabled }: { initiallyEnabled: boolean })
       <CardContent className="flex flex-col gap-4">
         <Badge variant={totpEnabled ? "secondary" : "outline"}>{totpEnabled ? "已启用" : "未启用"}</Badge>
         <Field><FieldLabel htmlFor="totp-password">当前密码</FieldLabel><Input id="totp-password" type="password" autoComplete="current-password" value={totpPassword} onChange={(event) => setTotpPassword(event.target.value)} /></Field>
-        {totpSecret ? <Alert><ShieldCheckIcon /><AlertTitle>添加到验证器</AlertTitle><AlertDescription className="break-all">密钥：{totpSecret}</AlertDescription></Alert> : null}
+        {totpSecret ? <div className="flex flex-col items-center gap-4 rounded-lg border p-4"><div className="rounded-lg bg-white p-3"><QRCode value={totpUri} size={176} title="NoteGen 双因素认证二维码" /></div><Alert><ShieldCheckIcon /><AlertTitle>扫描二维码</AlertTitle><AlertDescription className="flex flex-col gap-2"><span>使用验证器应用扫描二维码，然后输入生成的 6 位验证码。</span><code className="break-all rounded bg-muted p-2 text-xs">{totpSecret}</code><Button type="button" size="sm" variant="outline" className="self-start" onClick={() => void navigator.clipboard.writeText(totpSecret).then(() => toast.add({ title: "密钥已复制", type: "success" })).catch(() => toast.add({ title: "复制失败", description: "请手动选择并复制密钥。", type: "error" }))}>复制密钥</Button></AlertDescription></Alert></div> : null}
         <Field><FieldLabel htmlFor="totp-security-code">6 位验证码</FieldLabel><Input id="totp-security-code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} /></Field>
         {totpEnabled ? (
           <Button variant="destructive" disabled={busy || totpPassword.length < 8 || totpCode.length !== 6} onClick={() => void disableTotp()}>关闭双因素认证</Button>
         ) : totpSecret ? (
-          <Button disabled={busy || totpCode.length !== 6} onClick={() => void enableTotp()}>确认并启用</Button>
+          <div className="flex flex-wrap gap-2"><Button disabled={busy || totpCode.length !== 6} onClick={() => void enableTotp()}>确认并启用</Button><Button variant="ghost" disabled={busy} onClick={() => { setTotpSecret(""); setTotpUri(""); setTotpPassword(""); setTotpCode("") }}>取消设置</Button></div>
         ) : (
           <Button disabled={busy || totpPassword.length < 8} onClick={() => void beginTotpSetup()}>生成验证器密钥</Button>
         )}
       </CardContent>
     </Card>
+    <Card>
+      <CardHeader><CardTitle>停用并删除账号</CardTitle><CardDescription>账号会立即停止登录并撤销设备凭据；数据进入实例配置的保留期，之后由维护任务清理。</CardDescription></CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <Alert variant="destructive"><Trash2Icon /><AlertTitle>此操作会中断所有设备同步</AlertTitle><AlertDescription>请先确认 NoteGen 本地数据完整。最后一个可用管理员不能删除自己的账号。</AlertDescription></Alert>
+        <Field>
+          <FieldLabel htmlFor="account-deletion-password">当前密码</FieldLabel>
+          <Input id="account-deletion-password" type="password" autoComplete="current-password" minLength={8} maxLength={1024} value={deletionPassword} onChange={(event) => setDeletionPassword(event.target.value)} />
+          <FieldDescription>输入密码后仍需在确认窗口中执行操作。</FieldDescription>
+        </Field>
+        <AlertDialog>
+          <AlertDialogTrigger render={<Button variant="destructive" disabled={busy || deletionPassword.length < 8} />}>
+            <Trash2Icon data-icon="inline-start" />停用并删除账号
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>确认停用并删除账号？</AlertDialogTitle>
+              <AlertDialogDescription>所有浏览器和设备会立即退出，服务器数据将在保留期结束后清理。请确认本地数据已经保存。</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>取消</AlertDialogCancel>
+              <AlertDialogAction variant="destructive" onClick={() => void requestAccountDeletion()}>确认删除</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
+    </div>
     </div>
   )
 }
@@ -955,6 +1215,7 @@ function SystemManagement({
   devices,
   deviceTotal,
   status,
+  adminView,
   query,
   accountStatus,
   accountOffset,
@@ -966,6 +1227,7 @@ function SystemManagement({
   error,
   busyAccountId,
   onRefresh,
+  onAdminViewChange,
   onSetSuspended,
   onSetAdmin,
   onQueryChange,
@@ -987,6 +1249,7 @@ function SystemManagement({
   devices: AdminDevice[]
   deviceTotal: number
   status: AdminSystemStatus | null
+  adminView: AdminDataView
   query: string
   accountStatus: string
   accountOffset: number
@@ -998,6 +1261,7 @@ function SystemManagement({
   error: string
   busyAccountId: string | null
   onRefresh: () => void
+  onAdminViewChange: (view: AdminDataView) => void
   onSetSuspended: (accountId: string, suspended: boolean) => Promise<void>
   onSetAdmin: (accountId: string, isAdmin: boolean) => Promise<void>
   onQueryChange: (value: string) => void
@@ -1015,6 +1279,8 @@ function SystemManagement({
   const [webSessions, setWebSessions] = useState<AdminWebSession[]>([])
   const [backups, setBackups] = useState<AdminBackup[]>([])
   const [storageReport, setStorageReport] = useState<AdminStorageReport | null>(null)
+  const [queryDraft, setQueryDraft] = useState(query)
+  useEffect(() => setQueryDraft(query), [query])
 
   async function batchSuspend(suspended: boolean) {
     setManagementError("")
@@ -1078,25 +1344,47 @@ function SystemManagement({
     } catch (cause) { setManagementError(errorMessage(cause)) }
   }
 
+  async function exportData(scope: "accounts" | "workspaces" | "devices" | "audit") {
+    setManagementError("")
+    try {
+      await downloadAdminExport(scope)
+    } catch (cause) {
+      setManagementError(errorMessage(cause))
+    }
+  }
+
   return (
     <>
       {error ? <ErrorAlert message={error} /> : null}
       {managementError ? <ErrorAlert message={managementError} /> : null}
-      <Card>
+      <ToggleGroup className="grid w-full grid-cols-2 sm:grid-cols-5" type="single" variant="outline" spacing={0} value={adminView} onValueChange={(value) => { if (value) onAdminViewChange(value as AdminDataView) }}>
+        <ToggleGroupItem value="overview">总览</ToggleGroupItem>
+        <ToggleGroupItem value="accounts">账号</ToggleGroupItem>
+        <ToggleGroupItem value="data">同步数据</ToggleGroupItem>
+        <ToggleGroupItem value="audit">审计</ToggleGroupItem>
+        <ToggleGroupItem value="tools">运维</ToggleGroupItem>
+      </ToggleGroup>
+      {adminView !== "overview" && adminView !== "tools" ? <Card>
         <CardHeader>
           <CardTitle>查询与导出</CardTitle>
           <CardDescription>搜索账号、工作区 ID、设备或审计目标；导出文件不包含密码、令牌和解密密钥。</CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap items-center gap-3">
-          <Input className="min-w-64 flex-1" value={query} placeholder="输入账号、设备或 ID" onChange={(event) => onQueryChange(event.target.value)} />
+        <CardContent className="flex flex-col gap-3">
+          <form className="flex flex-wrap items-center gap-2" onSubmit={(event) => { event.preventDefault(); onQueryChange(queryDraft.trim()) }}>
+            <Input className="min-w-64 flex-1" value={queryDraft} placeholder="输入账号、设备或 ID" onChange={(event) => setQueryDraft(event.target.value)} />
+            <Button type="submit" disabled={queryDraft.trim() === query}>搜索</Button>
+            {query ? <Button type="button" variant="ghost" onClick={() => { setQueryDraft(""); onQueryChange("") }}>清除</Button> : null}
+          </form>
+          <div className="flex flex-wrap gap-2">
           {(["accounts", "workspaces", "devices", "audit"] as const).map((scope) => (
-            <Button key={scope} size="sm" variant="outline" onClick={() => void downloadAdminExport(scope)}>
+            <Button key={scope} size="sm" variant="outline" onClick={() => void exportData(scope)}>
               导出{scope === "accounts" ? "账号" : scope === "workspaces" ? "工作区" : scope === "devices" ? "设备" : "审计"}
             </Button>
           ))}
+          </div>
         </CardContent>
-      </Card>
-      <Card>
+      </Card> : null}
+      {adminView === "overview" ? <Card>
         <CardHeader className="flex-row items-start justify-between gap-4">
           <div>
             <CardTitle>服务器总览</CardTitle>
@@ -1129,10 +1417,10 @@ function SystemManagement({
             detail={`${overview?.auditCount ?? 0} 条后台审计记录`}
           />
         </CardContent>
-      </Card>
+      </Card> : null}
 
       <div className="grid items-start gap-6 2xl:grid-cols-2">
-        <Card>
+        {adminView === "accounts" ? <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><UsersIcon className="size-5" />账号管理</CardTitle>
             <CardDescription>
@@ -1248,9 +1536,9 @@ function SystemManagement({
             )}
             <AdminPagination total={accountTotal} offset={accountOffset} onPage={onAccountPage} />
           </CardContent>
-        </Card>
+        </Card> : null}
 
-        <Card>
+        {adminView === "audit" ? <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><ScrollTextIcon className="size-5" />操作审计</CardTitle>
             <CardDescription>保留最近 100 条后台数据变更，便于确认谁在何时执行了什么操作。</CardDescription>
@@ -1291,15 +1579,15 @@ function SystemManagement({
             )}
             <AdminPagination total={auditTotal} offset={auditOffset} onPage={onAuditPage} />
           </CardContent>
-        </Card>
+        </Card> : null}
       </div>
 
-      <div className="grid items-start gap-6 2xl:grid-cols-2">
+      {adminView === "data" ? <div className="grid items-start gap-6 2xl:grid-cols-2">
         <GlobalWorkspaceList workspaces={workspaces} total={workspaceTotal} offset={workspaceOffset} onPage={onWorkspacePage} onDelete={deleteGlobalWorkspace} onRestore={restoreGlobalWorkspace} />
         <GlobalDeviceList devices={devices} total={deviceTotal} offset={deviceOffset} onPage={onDevicePage} onRevoke={revokeGlobalDevice} />
-      </div>
+      </div> : null}
 
-      <Card>
+      {adminView === "tools" ? <Card>
         <CardHeader className="flex-row items-start justify-between gap-4">
           <div><CardTitle>运维工具</CardTitle><CardDescription>管理浏览器会话、旧备份记录和对象存储一致性。</CardDescription></div>
           <div className="flex gap-2">
@@ -1327,9 +1615,9 @@ function SystemManagement({
             </div> : <p className="text-sm text-muted-foreground">点击“检查”扫描数据库和对象存储。</p>}
           </div>
         </CardContent>
-      </Card>
+      </Card> : null}
 
-      <Card>
+      {adminView === "overview" ? <Card>
         <CardHeader><CardTitle>运行与存储状态</CardTitle><CardDescription>实时查看数据库响应、进程资源和同步数据规模。</CardDescription></CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Metric label="服务运行" value={formatDuration(status?.uptimeSeconds ?? 0)} detail={`数据库响应 ${status?.databaseLatencyMs ?? 0} ms`} />
@@ -1337,7 +1625,7 @@ function SystemManagement({
           <Metric label="对象与附件" value={formatBytes(status?.objectBytes ?? "0")} detail={`${status?.blobCount ?? 0} 个附件 · ${formatBytes(status?.blobBytes ?? "0")}`} />
           <Metric label="进程内存" value={formatBytes(status?.memoryRssBytes ?? "0")} detail={`堆内存 ${formatBytes(status?.heapUsedBytes ?? "0")}`} />
         </CardContent>
-      </Card>
+      </Card> : null}
     </>
   )
 }
@@ -1434,28 +1722,47 @@ async function downloadAdminExport(scope: "accounts" | "workspaces" | "devices" 
 function AuthCard({
   busy,
   registrationMethods,
-  deploymentMode,
   setBusy,
   onAuthenticated,
   onError,
 }: {
   busy: boolean
   registrationMethods: string[]
-  deploymentMode: "hosted" | "self-hosted"
   setBusy: (value: boolean) => void
   onAuthenticated: (account: Account) => Promise<void>
   onError: (message: string) => void
 }) {
   const [mode, setMode] = useState<AuthMode>("login")
+  const [step, setStep] = useState<AuthStep>("credentials")
   const [login, setLogin] = useState("")
   const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
   const [setupToken, setSetupToken] = useState("")
+  const [showRecoveryOptions, setShowRecoveryOptions] = useState(false)
   const [totpCode, setTotpCode] = useState("")
   const [notice, setNotice] = useState("")
+  const [cooldownSeconds, setCooldownSeconds] = useState(0)
+  const verificationAttempted = useRef(false)
+  const token = readAuthToken()
   const canRegister = registrationMethods.some((method) => (
     method === "setup" || method === "password" || method === "email-password"
   ))
   const isAdministratorSetup = registrationMethods.includes("setup")
+
+  useEffect(() => setStep(readInitialAuthStep()), [])
+  useEffect(() => {
+    if (!token || readInitialAuthStep() !== "verify" || verificationAttempted.current) return
+    verificationAttempted.current = true
+    setStep("verify")
+    void verifyEmailToken()
+    // The action token is immutable for this route; the ref prevents Strict Mode retries.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
+  useEffect(() => {
+    if (cooldownSeconds <= 0) return
+    const timer = window.setTimeout(() => setCooldownSeconds((current) => Math.max(0, current - 1)), 1_000)
+    return () => window.clearTimeout(timer)
+  }, [cooldownSeconds])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1463,16 +1770,48 @@ function AuthCard({
     onError("")
     setNotice("")
     try {
-      if (mode === "register" && deploymentMode === "hosted") {
-        await apiRequest("/v1/web/auth/register/email", {
+      if (step === "forgot") {
+        await apiRequest("/v1/web/auth/password-reset/request", {
           method: "POST",
-          body: JSON.stringify({ email: login, password }),
+          body: JSON.stringify({ email: login }),
         })
-        setPassword("")
-        setNotice("验证邮件已进入内部测试投递流程。验证完成后即可登录。")
+        setNotice("如果该邮箱已注册，重置链接会发送到邮箱。请检查收件箱和垃圾邮件。")
+        setCooldownSeconds(60)
         return
       }
-      if (mode === "register" && deploymentMode === "self-hosted" && isAdministratorSetup) {
+      if (step === "verify") {
+        await verifyEmailToken()
+        return
+      }
+      if (step === "reset") {
+        if (password !== confirmPassword) {
+          onError("两次输入的新密码不一致。")
+          return
+        }
+        await apiRequest("/v1/web/auth/password-reset/complete", {
+          method: "POST",
+          body: JSON.stringify({ token, newPassword: password }),
+        })
+        const result = await apiRequest<{ account: Account }>("/v1/web/session")
+        replaceAuthUrl()
+        await onAuthenticated(result.account)
+        window.location.assign("/")
+        return
+      }
+      if (step === "verification-pending") {
+        await apiRequest("/v1/web/auth/email/resend", {
+          method: "POST",
+          body: JSON.stringify({ email: login }),
+        })
+        setNotice("验证邮件已重新发送，请检查收件箱和垃圾邮件。")
+        setCooldownSeconds(60)
+        return
+      }
+      if (mode === "register" && password !== confirmPassword) {
+        onError("两次输入的密码不一致。")
+        return
+      }
+      if (mode === "register" && isAdministratorSetup) {
         const result = await apiRequest<{ account: Account }>("/v1/setup/complete", {
           method: "POST",
           body: JSON.stringify({ login, password, token: setupToken.trim() }),
@@ -1484,7 +1823,7 @@ function AuthCard({
       }
       const body = mode === "register"
         ? { login, password, ...(setupToken.trim() ? { setupToken: setupToken.trim() } : {}) }
-        : { login, password, ...(totpCode.trim() ? { totpCode: totpCode.trim() } : {}) }
+        : { login, password, ...(step === "totp" ? { totpCode: totpCode.trim() } : {}) }
       const result = await apiRequest<{ account: Account }>(`/v1/web/auth/${mode}`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -1494,6 +1833,38 @@ function AuthCard({
       setTotpCode("")
       await onAuthenticated(result.account)
     } catch (cause) {
+      if (isApiRequestError(cause) && cause.code === "totp_required" && step !== "totp") {
+        setStep("totp")
+        setTotpCode("")
+        onError("")
+        return
+      }
+      if (isApiRequestError(cause) && cause.code === "email_verification_required") {
+        setStep("verification-pending")
+        onError("")
+        setNotice("登录前需要先验证邮箱。")
+        return
+      }
+      onError(errorMessage(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function verifyEmailToken() {
+    setBusy(true)
+    onError("")
+    setNotice("")
+    try {
+      await apiRequest("/v1/web/auth/email/verify", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      })
+      setStep("credentials")
+      setMode("login")
+      setNotice("邮箱验证成功，现在可以登录。")
+      replaceAuthUrl()
+    } catch (cause) {
       onError(errorMessage(cause))
     } finally {
       setBusy(false)
@@ -1501,31 +1872,35 @@ function AuthCard({
   }
 
   return (
-    <Card className="mx-auto w-full max-w-md bg-card/90 shadow-sm lg:mx-0 lg:max-w-none">
+    <Card className="w-full shadow-none">
       <CardHeader>
-        <CardTitle>连接你的同步账号</CardTitle>
+        <CardTitle className="text-xl font-semibold tracking-tight">{authStepTitle(step)}</CardTitle>
         <CardDescription>
-          {deploymentMode === "hosted" && !canRegister
-            ? "当前官方托管测试实例暂未开放注册。"
+          {step === "totp" ? `输入 ${login} 的验证器验证码。`
+            : step === "forgot" ? "输入注册邮箱，我们会发送一个限时重置链接。"
+            : step === "reset" ? "设置新密码后会自动登录，并使旧登录凭据失效。"
+            : step === "verify" ? busy ? "正在自动验证邮箱，请稍候。" : "自动验证未完成，你可以重新验证或返回登录。"
+            : step === "verification-pending" ? `验证邮件已发送至 ${login || "你的邮箱"}。`
             : "同一账号可连接多个 NoteGen 设备。账号密码不会用于解密端到端加密工作区。"}
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <Tabs value={mode} onValueChange={(value) => setMode(value as AuthMode)}>
-          <TabsList className={cn("grid w-full", canRegister ? "grid-cols-2" : "grid-cols-1")}>
+        {step === "credentials" ? <Tabs value={mode} onValueChange={(value) => { setMode(value as AuthMode); setConfirmPassword(""); setNotice(""); onError("") }}>
+          {canRegister ? <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="login">登录</TabsTrigger>
-            {canRegister ? <TabsTrigger value="register">注册</TabsTrigger> : null}
-          </TabsList>
+            <TabsTrigger value="register">注册</TabsTrigger>
+          </TabsList> : null}
           <TabsContent value={mode}>
-            <form onSubmit={handleSubmit}>
+            <form onSubmit={handleSubmit} className={cn(canRegister && "pt-2")}>
               <FieldGroup>
                 <Field>
-                  <FieldLabel htmlFor="login">{deploymentMode === "hosted" ? "邮箱" : "账号"}</FieldLabel>
+                  <FieldLabel htmlFor="login">账号</FieldLabel>
                   <Input
                     id="login"
                     value={login}
                     onChange={(event) => setLogin(event.target.value)}
                     autoComplete="username"
+                    maxLength={200}
                     required
                   />
                 </Field>
@@ -1538,13 +1913,23 @@ function AuthCard({
                     onChange={(event) => setPassword(event.target.value)}
                     autoComplete={mode === "login" ? "current-password" : "new-password"}
                     minLength={8}
+                    maxLength={1024}
                     required
                   />
                   <FieldDescription>至少 8 个字符，仅用于账号登录；默认同步无需另设加密口令。</FieldDescription>
                 </Field>
-                {mode === "register" && deploymentMode === "self-hosted" && isAdministratorSetup ? (
+                {mode === "register" ? <Field data-invalid={confirmPassword.length > 0 && password !== confirmPassword || undefined}>
+                  <FieldLabel htmlFor="registration-password-confirm">确认密码</FieldLabel>
+                  <Input id="registration-password-confirm" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={8} maxLength={1024} aria-invalid={confirmPassword.length > 0 && password !== confirmPassword || undefined} required />
+                  {confirmPassword.length > 0 && password !== confirmPassword ? <FieldDescription>两次输入的密码不一致。</FieldDescription> : null}
+                </Field> : null}
+                {mode === "register" && isAdministratorSetup && !showRecoveryOptions ? <Field>
+                  <Button type="button" variant="ghost" className="self-start" onClick={() => setShowRecoveryOptions(true)}>高级恢复选项</Button>
+                  <FieldDescription>仅灾备恢复时需要，正常创建管理员无需填写。</FieldDescription>
+                </Field> : null}
+                {mode === "register" && isAdministratorSetup && showRecoveryOptions ? (
                   <Field>
-                    <FieldLabel htmlFor="setup-token">一次性恢复凭据</FieldLabel>
+                    <FieldLabel htmlFor="setup-token">一次性恢复凭据（可选）</FieldLabel>
                     <Input
                       id="setup-token"
                       type="password"
@@ -1552,14 +1937,7 @@ function AuthCard({
                       onChange={(event) => setSetupToken(event.target.value)}
                       autoComplete="off"
                     />
-                    <FieldDescription>灾备恢复场景请填写本机 CLI 签发的一次性初始化凭据。</FieldDescription>
-                  </Field>
-                ) : null}
-                {mode === "login" ? (
-                  <Field>
-                    <FieldLabel htmlFor="totp-code">双因素验证码（可选）</FieldLabel>
-                    <Input id="totp-code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} />
-                    <FieldDescription>账号启用双因素认证后填写验证器中的 6 位数字。</FieldDescription>
+                    <FieldDescription>仅灾备恢复场景填写本机 CLI 签发的一次性初始化凭据。</FieldDescription>
                   </Field>
                 ) : null}
                 {notice ? (
@@ -1570,7 +1948,7 @@ function AuthCard({
                   </Alert>
                 ) : null}
                 <Field>
-                  <Button type="submit" size="lg" disabled={busy}>
+                  <Button className="w-full" type="submit" size="lg" disabled={busy || (mode === "register" && password !== confirmPassword)}>
                     {busy ? <Spinner data-icon="inline-start" /> : null}
                     {mode === "login" ? "登录" : "创建账号"}
                   </Button>
@@ -1578,15 +1956,53 @@ function AuthCard({
               </FieldGroup>
             </form>
           </TabsContent>
-        </Tabs>
+        </Tabs> : (
+          <form onSubmit={handleSubmit}>
+            <FieldGroup>
+              {step === "totp" ? <Field><FieldLabel htmlFor="totp-code">6 位验证码</FieldLabel><Input id="totp-code" autoFocus inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} required /><FieldDescription>请输入验证器当前显示的数字，验证码每 30 秒更新一次。</FieldDescription></Field> : null}
+              {step === "forgot" ? <Field><FieldLabel htmlFor="recovery-email">邮箱</FieldLabel><Input id="recovery-email" type="email" autoFocus autoComplete="email" value={login} onChange={(event) => setLogin(event.target.value)} required /></Field> : null}
+              {step === "reset" ? <><Field><FieldLabel htmlFor="reset-password">新密码</FieldLabel><Input id="reset-password" type="password" autoFocus autoComplete="new-password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} required /><FieldDescription>至少 8 个字符。</FieldDescription></Field><Field data-invalid={confirmPassword.length > 0 && password !== confirmPassword || undefined}><FieldLabel htmlFor="reset-password-confirm">确认新密码</FieldLabel><Input id="reset-password-confirm" type="password" autoComplete="new-password" minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} aria-invalid={confirmPassword.length > 0 && password !== confirmPassword || undefined} required />{confirmPassword.length > 0 && password !== confirmPassword ? <FieldDescription>两次输入的新密码不一致。</FieldDescription> : null}</Field></> : null}
+              {step === "verify" && !token ? <Alert variant="destructive"><ShieldCheckIcon /><AlertTitle>验证链接不完整</AlertTitle><AlertDescription>请重新打开邮件中的完整链接。</AlertDescription></Alert> : null}
+              {notice ? <Alert><CircleCheckIcon /><AlertTitle>操作已提交</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert> : null}
+              <Field><div className="flex flex-wrap items-center gap-2"><Button type="submit" size="lg" disabled={busy || cooldownSeconds > 0 || (step === "totp" && totpCode.length !== 6) || ((step === "verify" || step === "reset") && !token) || (step === "reset" && password !== confirmPassword)}>{busy ? <Spinner data-icon="inline-start" /> : null}{cooldownSeconds > 0 && (step === "forgot" || step === "verification-pending") ? `${cooldownSeconds} 秒后可重试` : step === "totp" ? "验证并登录" : step === "forgot" ? "发送重置链接" : step === "reset" ? "重置密码" : step === "verify" ? "重新验证" : "重新发送邮件"}</Button><Button type="button" variant="ghost" onClick={() => { setStep("credentials"); setMode("login"); setPassword(""); setConfirmPassword(""); setTotpCode(""); setNotice(""); setCooldownSeconds(0); onError(""); replaceAuthUrl() }}>返回登录</Button></div></Field>
+            </FieldGroup>
+          </form>
+        )}
       </CardContent>
     </Card>
   )
 }
 
+function authStepTitle(step: AuthStep): string {
+  return ({ credentials: "连接你的同步账号", totp: "双因素验证", forgot: "找回密码", reset: "设置新密码", verify: "验证邮箱", "verification-pending": "检查你的邮箱" })[step]
+}
+
+function readInitialAuthStep(): AuthStep {
+  if (typeof window === "undefined") return "credentials"
+  if (window.location.pathname.startsWith("/account/verify-email")) return "verify"
+  if (window.location.pathname.startsWith("/account/reset-password")) return "reset"
+  return "credentials"
+}
+
+function readAuthToken(): string {
+  return typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("token") ?? ""
+}
+
+function replaceAuthUrl() {
+  window.history.replaceState(null, "", "/")
+}
+
 function redirectAfterAuth() {
   const next = new URLSearchParams(window.location.search).get("next")
-  if (next?.startsWith("/") && !next.startsWith("//")) window.location.assign(next)
+  if (!next) return
+  try {
+    const target = new URL(next, window.location.origin)
+    if (target.origin === window.location.origin && target.pathname.startsWith("/")) {
+      window.location.assign(`${target.pathname}${target.search}${target.hash}`)
+    }
+  } catch {
+    // Invalid redirect targets are ignored and the account portal remains open.
+  }
 }
 
 const adminSections = new Set<AdminSection>([
@@ -1616,6 +2032,11 @@ function readUrlOffset(name: string): number {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0
 }
 
+function readAdminViewFromUrl(): AdminDataView {
+  const value = readUrlParam("adminView")
+  return value === "accounts" || value === "data" || value === "audit" || value === "tools" ? value : "overview"
+}
+
 function setOptionalParam(url: URL, name: string, value: string): void {
   if (value) url.searchParams.set(name, value)
   else url.searchParams.delete(name)
@@ -1623,7 +2044,7 @@ function setOptionalParam(url: URL, name: string, value: string): void {
 
 function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
-    <div className="rounded-xl border bg-muted/30 p-4">
+    <div className="rounded-lg bg-muted/40 p-4">
       <p className="text-sm text-muted-foreground">{label}</p>
       <p className="mt-1 text-2xl font-semibold tracking-tight">{value}</p>
       <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
@@ -1654,22 +2075,62 @@ function isLikelyDuplicateDevice(device: Device, devices: Device[]): boolean {
   return newest.id !== device.id
 }
 
-function kindLabel(kind: string): string {
-  const labels: Record<string, string> = {
-    note: "Markdown 笔记",
-    folder: "目录",
-    asset: "附件",
-    canvas: "画布",
-    record: "记录",
-    tag: "标签",
-    mark: "记录",
-    conversation: "对话",
-    memory: "记忆",
-    setting: "设置",
-    "yjs-checkpoint": "实时文档快照",
-    "yjs-update": "实时文档增量",
+function summarizeSyncActivity(
+  timeline: SyncOverview["activityTimeline"],
+  kinds: SyncOverview["activityKinds"],
+) {
+  const seriesKeys = [...new Set([
+    ...kinds.map((item) => activityKindKey(item.kind)),
+    ...timeline.flatMap((bucket) => bucket.kinds.map((item) => activityKindKey(item.kind))),
+  ])]
+  const config = Object.fromEntries(seriesKeys.map((key) => [
+    key,
+    syncActivityKindDefinitions[key] ?? { label: key, color: "var(--chart-5)" },
+  ])) satisfies ChartConfig
+  const chartBuckets = timeline.map((bucket) => {
+    const values = Object.fromEntries(seriesKeys.map((key) => [key, 0]))
+    for (const item of bucket.kinds) {
+      const key = activityKindKey(item.kind)
+      values[key] = (values[key] ?? 0) + item.updates + item.deletes
+    }
+    return {
+      key: bucket.startedAt,
+      label: new Intl.DateTimeFormat("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(new Date(bucket.startedAt)),
+      ...values,
+    }
+  })
+  const updates = timeline.reduce((total, bucket) => total + bucket.updates, 0)
+  const deletes = timeline.reduce((total, bucket) => total + bucket.deletes, 0)
+  const kindCounts = new Map<string, number>()
+  for (const item of kinds) {
+    const key = activityKindKey(item.kind)
+    kindCounts.set(key, (kindCounts.get(key) ?? 0) + item.count)
   }
-  return labels[kind] ?? kind
+  return {
+    buckets: chartBuckets,
+    total: updates + deletes,
+    updates,
+    deletes,
+    config,
+    series: seriesKeys.map((key) => ({ key })),
+    kinds: seriesKeys.map((key) => ({
+      key,
+      label: String(config[key]?.label ?? key),
+      color: config[key]?.color ?? "var(--chart-5)",
+      count: kindCounts.get(key) ?? 0,
+    })),
+  }
+}
+
+function activityKindKey(kind: string): string {
+  if (kind === "mark" || kind === "record") return "record"
+  if (kind === "message" || kind === "conversation") return "conversation"
+  if (kind === "yjs-checkpoint" || kind === "yjs-update") return "collaboration"
+  return kind
 }
 
 function summarizeContentKinds(kinds: SyncOverview["kinds"]): Array<{
@@ -1678,9 +2139,9 @@ function summarizeContentKinds(kinds: SyncOverview["kinds"]): Array<{
   deletedCount: number
 }> {
   const groups = [
-    { label: "笔记", kinds: ["note"] },
+    { label: "写作", kinds: ["note"] },
     { label: "记录", kinds: ["mark", "record"] },
-    { label: "绘图", kinds: ["canvas"] },
+    { label: "画布", kinds: ["canvas"] },
     { label: "对话", kinds: ["conversation"] },
     { label: "记忆", kinds: ["memory"] },
     { label: "配置", kinds: ["setting"] },
@@ -1706,6 +2167,7 @@ function auditActionLabel(action: string): string {
     "test-object.create": "创建测试内容",
     "object.delete": "删除同步内容",
     "workspace.delete": "删除历史工作区",
+    "workspace.restore": "恢复历史工作区",
     "workspace.admin-delete": "管理员删除工作区",
     "device.revoke": "撤销设备授权",
     "device.admin-revoke": "管理员撤销设备",

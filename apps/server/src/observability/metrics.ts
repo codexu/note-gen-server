@@ -1,10 +1,11 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
-import { collectDefaultMetrics, Counter, Histogram, Registry } from 'prom-client'
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from 'prom-client'
 import type { AppConfig } from '../config.js'
+import type { DatabaseContext } from '../database/client.js'
 import { ApiError } from '../errors.js'
 
-export function registerMetrics(app: FastifyInstance, config: AppConfig): void {
+export function registerMetrics(app: FastifyInstance, config: AppConfig, database?: DatabaseContext): void {
   const registry = new Registry()
   collectDefaultMetrics({ register: registry, prefix: 'notegen_sync_' })
   const requestDuration = new Histogram({
@@ -31,6 +32,22 @@ export function registerMetrics(app: FastifyInstance, config: AppConfig): void {
     help: 'Declared body size for Blob upload requests',
     registers: [registry],
     buckets: [1_024, 64 * 1_024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024],
+  })
+  const durableRows = new Gauge({
+    name: 'notegen_sync_durable_table_rows',
+    help: 'Estimated live rows in durable synchronization tables',
+    labelNames: ['table'] as const,
+    registers: [registry],
+  })
+  const activeBootstrapSnapshots = new Gauge({
+    name: 'notegen_sync_active_bootstrap_snapshots',
+    help: 'Number of non-expired durable bootstrap snapshots',
+    registers: [registry],
+  })
+  const oldestEventAge = new Gauge({
+    name: 'notegen_sync_oldest_event_age_seconds',
+    help: 'Age of the oldest retained durable sync event',
+    registers: [registry],
   })
 
   app.addHook('onRequest', async (request) => {
@@ -69,6 +86,24 @@ export function registerMetrics(app: FastifyInstance, config: AppConfig): void {
       const right = Buffer.from(config.metricsToken)
       if (left.length !== right.length || !timingSafeEqual(left, right)) {
         return reply.status(401).send()
+      }
+    }
+    if (database !== undefined) {
+      try {
+        const [snapshot] = await database.sql<Array<{
+          active_bootstraps: number
+          oldest_event_age_seconds: number
+        }>>`select
+          (select count(*)::int from sync_bootstrap_sessions where expires_at > now()) as active_bootstraps,
+          coalesce((select extract(epoch from now() - min(created_at))::float8 from sync_events), 0) as oldest_event_age_seconds`
+        activeBootstrapSnapshots.set(snapshot?.active_bootstraps ?? 0)
+        oldestEventAge.set(snapshot?.oldest_event_age_seconds ?? 0)
+        const estimates = await database.sql<Array<{ relname: string, rows: number }>>`
+          select relname, n_live_tup::float8 as rows from pg_stat_user_tables
+          where relname = any(array['sync_events','sync_commands','sync_checkpoints','sync_conflicts','sync_updates'])`
+        for (const estimate of estimates) durableRows.set({ table: estimate.relname }, estimate.rows)
+      } catch (error) {
+        request.log.warn({ err: error }, 'Failed to refresh durable sync metrics')
       }
     }
     return reply.type(registry.contentType).send(await registry.metrics())

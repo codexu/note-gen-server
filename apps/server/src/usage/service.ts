@@ -123,6 +123,7 @@ export class UsageService {
         active_object_bytes: string
         active_crdt_bytes: string
         active_blob_bytes: string
+        retained_bytes: string
         active_objects: string
         active_devices: string
         active_workspaces: string
@@ -139,6 +140,34 @@ export class UsageService {
             where w.account_id = ${accountId} and w.deleted_at is null), 0))::text as active_crdt_bytes,
           coalesce((select sum(b.size)::bigint from blobs b join workspaces w on w.id = b.workspace_id
             where w.account_id = ${accountId} and w.deleted_at is null and b.state = 'ready'), 0)::text as active_blob_bytes,
+          (coalesce((select sum(length(v.ciphertext))::bigint
+            from object_versions v join workspaces w on w.id = v.workspace_id
+            where w.account_id = ${accountId}), 0)
+          + coalesce((select sum(length(e.ciphertext))::bigint
+            from sync_events e join workspaces w on w.id = e.workspace_id
+            where w.account_id = ${accountId} and e.ciphertext is not null), 0)
+          + coalesce((select sum(length(c.ciphertext))::bigint
+            from sync_checkpoints c join workspaces w on w.id = c.workspace_id
+            where w.account_id = ${accountId}), 0)
+          + coalesce((select sum(length(c.ciphertext))::bigint
+            from sync_conflicts c join workspaces w on w.id = c.workspace_id
+            where w.account_id = ${accountId}), 0)
+          + coalesce((select sum(pg_column_size(c.result) + length(c.request_hash))::bigint
+            from sync_commands c join workspaces w on w.id = c.workspace_id
+            where w.account_id = ${accountId}), 0)
+          + coalesce((select sum(length(o.ciphertext))::bigint
+            from objects o join workspaces w on w.id = o.workspace_id
+            where w.account_id = ${accountId} and (w.deleted_at is not null or o.deleted_at is not null)), 0)
+          + coalesce((select sum(length(d.checkpoint_ciphertext))::bigint
+            from sync_documents d join workspaces w on w.id = d.workspace_id
+            where w.account_id = ${accountId} and w.deleted_at is not null
+              and d.checkpoint_ciphertext is not null), 0)
+          + coalesce((select sum(length(u.ciphertext))::bigint
+            from sync_updates u join workspaces w on w.id = u.workspace_id
+            where w.account_id = ${accountId} and w.deleted_at is not null), 0)
+          + coalesce((select sum(b.size)::bigint
+            from blobs b join workspaces w on w.id = b.workspace_id
+            where w.account_id = ${accountId} and w.deleted_at is not null and b.state = 'ready'), 0))::text as retained_bytes,
           coalesce((select count(*) from objects o join workspaces w on w.id = o.workspace_id
             where w.account_id = ${accountId} and w.deleted_at is null and o.deleted_at is null), 0)::text as active_objects,
           coalesce((select count(*) from devices d where d.account_id = ${accountId} and d.revoked_at is null), 0)::text as active_devices,
@@ -148,13 +177,14 @@ export class UsageService {
       const changed = existing.activeObjectBytes !== BigInt(actual.active_object_bytes)
         || existing.activeCrdtBytes !== BigInt(actual.active_crdt_bytes)
         || existing.activeBlobBytes !== BigInt(actual.active_blob_bytes)
+        || existing.retainedBytes !== BigInt(actual.retained_bytes)
         || existing.activeObjects !== BigInt(actual.active_objects)
         || existing.activeDevices !== BigInt(actual.active_devices)
         || existing.activeWorkspaces !== BigInt(actual.active_workspaces)
       const [row] = await tx.update(accountUsage).set({
         ...(changed ? {
           activeObjectBytes: BigInt(actual.active_object_bytes), activeBlobBytes: BigInt(actual.active_blob_bytes),
-          activeCrdtBytes: BigInt(actual.active_crdt_bytes),
+          activeCrdtBytes: BigInt(actual.active_crdt_bytes), retainedBytes: BigInt(actual.retained_bytes),
           activeObjects: BigInt(actual.active_objects), activeDevices: BigInt(actual.active_devices),
           activeWorkspaces: BigInt(actual.active_workspaces), revision: sql`${accountUsage.revision} + 1`,
         } : {}),
@@ -174,7 +204,14 @@ export class UsageService {
   }): Promise<{ reservationId: string, created: boolean }> {
     if (input.bytes <= 0n) throw new ApiError({ code: 'quota_invalid_request', message: 'Reserved bytes must be positive', statusCode: 400 })
     return await this.database.db.transaction(async (tx) => {
-      await tx.insert(accountUsage).values({ accountId: input.accountId }).onConflictDoNothing()
+      if (input.storageLimit === null) {
+        await tx.insert(accountUsage).values({ accountId: input.accountId }).onConflictDoNothing()
+      } else {
+        // Hard-limit admission starts from the physical durable tables so
+        // retained history written since the last background reconciliation
+        // cannot open a temporary quota bypass window.
+        await this.reconcileCurrentInTransaction(tx, input.accountId)
+      }
       const [existing] = await tx.select({
         id: usageReservations.id, requestHash: usageReservations.requestHash, quantity: usageReservations.quantity,
         status: usageReservations.status,
@@ -272,13 +309,10 @@ export class UsageService {
       revision: sql`${accountUsage.revision} + 1`, updatedAt: new Date(),
     }).where(and(
       eq(accountUsage.accountId, input.accountId),
-      ...(input.storageLimit === null || byteDelta <= 0n ? [] : [sql`${accountUsage.activeObjectBytes} + ${accountUsage.activeCrdtBytes} + ${accountUsage.activeBlobBytes} + ${accountUsage.reservedBlobBytes} + ${byteDelta} <= ${input.storageLimit}`]),
+      ...(input.storageLimit === null || byteDelta <= 0n ? [] : [sql`${accountUsage.activeObjectBytes} + ${accountUsage.activeCrdtBytes} + ${accountUsage.activeBlobBytes} + ${accountUsage.reservedBlobBytes} + ${accountUsage.retainedBytes} + ${byteDelta} <= ${input.storageLimit}`]),
     )).returning({ accountId: accountUsage.accountId })
     if (updated.length !== 1) {
-      throw new ApiError({
-        code: 'quota_exceeded', message: 'Storage quota is exceeded', statusCode: 409,
-        details: { metric: 'storage_bytes', limit: input.storageLimit?.toString() },
-      })
+      throw await storageQuotaError(tx, input.accountId, input.storageLimit)
     }
   }
 
@@ -295,11 +329,10 @@ export class UsageService {
       revision: sql`${accountUsage.revision} + 1`, updatedAt: new Date(),
     }).where(and(
       eq(accountUsage.accountId, accountId),
-      ...(storageLimit === null || byteDelta <= 0n ? [] : [sql`${accountUsage.activeObjectBytes} + ${accountUsage.activeCrdtBytes} + ${accountUsage.activeBlobBytes} + ${accountUsage.reservedBlobBytes} + ${byteDelta} <= ${storageLimit}`]),
+      ...(storageLimit === null || byteDelta <= 0n ? [] : [sql`${accountUsage.activeObjectBytes} + ${accountUsage.activeCrdtBytes} + ${accountUsage.activeBlobBytes} + ${accountUsage.reservedBlobBytes} + ${accountUsage.retainedBytes} + ${byteDelta} <= ${storageLimit}`]),
     )).returning({ accountId: accountUsage.accountId })
     if (updated.length !== 1) {
-      throw new ApiError({ code: 'quota_exceeded', message: 'Storage quota is exceeded', statusCode: 409,
-        details: { metric: 'storage_bytes', limit: storageLimit?.toString() } })
+      throw await storageQuotaError(tx, accountId, storageLimit)
     }
   }
 
@@ -353,14 +386,36 @@ async function reserveBytes(
     const admitted = await tx.update(accountUsage).set({
       reservedBlobBytes: sql`${accountUsage.reservedBlobBytes} + ${bytes}`,
       revision: sql`${accountUsage.revision} + 1`, updatedAt: new Date(),
-    }).where(and(eq(accountUsage.accountId, accountId), sql`${accountUsage.activeObjectBytes} + ${accountUsage.activeCrdtBytes} + ${accountUsage.activeBlobBytes} + ${accountUsage.reservedBlobBytes} + ${bytes} <= ${storageLimit}`)).returning({ accountId: accountUsage.accountId })
-    if (admitted.length !== 1) throw new ApiError({ code: 'quota_exceeded', message: 'Storage quota is exceeded', statusCode: 409, details: { metric: 'storage_bytes', limit: storageLimit.toString() } })
+    }).where(and(eq(accountUsage.accountId, accountId), sql`${accountUsage.activeObjectBytes} + ${accountUsage.activeCrdtBytes} + ${accountUsage.activeBlobBytes} + ${accountUsage.reservedBlobBytes} + ${accountUsage.retainedBytes} + ${bytes} <= ${storageLimit}`)).returning({ accountId: accountUsage.accountId })
+    if (admitted.length !== 1) throw await storageQuotaError(tx, accountId, storageLimit)
     return
   }
   await tx.update(accountUsage).set({
     reservedBlobBytes: sql`${accountUsage.reservedBlobBytes} + ${bytes}`,
     revision: sql`${accountUsage.revision} + 1`, updatedAt: new Date(),
   }).where(eq(accountUsage.accountId, accountId))
+}
+
+async function storageQuotaError(tx: any, accountId: string, limit: bigint | null): Promise<ApiError> {
+  const [usage] = await tx.select({
+    activeObjectBytes: accountUsage.activeObjectBytes,
+    activeCrdtBytes: accountUsage.activeCrdtBytes,
+    activeBlobBytes: accountUsage.activeBlobBytes,
+    reservedBlobBytes: accountUsage.reservedBlobBytes,
+    retainedBytes: accountUsage.retainedBytes,
+  }).from(accountUsage).where(eq(accountUsage.accountId, accountId)).limit(1)
+  const used = usage === undefined ? 0n
+    : usage.activeObjectBytes + usage.activeCrdtBytes + usage.activeBlobBytes
+      + usage.reservedBlobBytes + usage.retainedBytes
+  return new ApiError({
+    code: 'quota_exceeded', message: 'Storage quota is exceeded', statusCode: 409,
+    details: {
+      metric: 'storage_bytes',
+      limit: limit?.toString(),
+      used: used.toString(),
+      reserved: usage?.reservedBlobBytes.toString() ?? '0',
+    },
+  })
 }
 
 function usageEventRequestHash(value: Record<string, string | number>): string {

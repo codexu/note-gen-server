@@ -61,7 +61,7 @@ const CapabilitiesResponse = Type.Object({
     emailVerificationRequired: Type.Boolean(),
   }),
   instanceCapabilities: Type.Record(Type.String(), Type.Boolean()),
-  deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
+  deploymentMode: Type.Literal('self-hosted'),
   web: Type.Object({
     accountUrl: Type.String({ format: 'uri' }),
     deviceAuthorizationUrl: Type.String({ format: 'uri' }),
@@ -85,9 +85,7 @@ export function createCapabilitiesRoutes(
         : registrationPolicy === 'invitation'
           ? ['invitation', 'browser']
           : registrationPolicy === 'public'
-            ? config.deploymentMode === 'hosted'
-              ? instanceCapabilities['identity.emailVerification'] === true ? ['email-password'] : []
-              : ['password']
+            ? ['password']
             : []
       return {
       service: 'note-gen-server' as const,
@@ -136,11 +134,11 @@ export function createCapabilitiesRoutes(
         tombstoneRetentionDays: config.tombstoneRetentionDays,
       },
       registrationMode: dependencies.deployment?.legacyRegistrationMode() ?? config.registrationMode,
-      deploymentMode: dependencies.deployment?.getState().deploymentMode ?? config.deploymentMode,
+      deploymentMode: 'self-hosted' as const,
       capabilitySchema: 2 as const,
       instanceCapabilityRevision: dependencies.deployment?.getState().configurationRevision ?? '0',
       registrationPolicyRevision: dependencies.deployment?.getState().configurationRevision ?? '0',
-      requiredSyncFeatures: [],
+      requiredSyncFeatures: ['syncEpochFencing', 'durableCursorAcknowledgement'],
       registration: {
         policy: registrationPolicy,
         methods: registrationMethods,

@@ -420,41 +420,16 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
 /** Applies the persisted installation profile before mode-specific services are assembled. */
 export function applyPersistedDeploymentProfile(
   config: AppConfig,
-  deploymentMode: 'self-hosted' | 'hosted',
-  hostedRegistrationPolicy: 'disabled' | 'public' = 'disabled',
+  deploymentMode: 'self-hosted',
 ): void {
-  const profile = deploymentMode === 'hosted'
-    ? {
-        deploymentMode,
-        hostedReleaseStage: 'internal-test' as const,
-        hostedRegistrationPolicy,
-        billingProvider: 'mock' as const,
-        billingProviderEnvironment: 'test' as const,
-        billingMerchantEntity: 'internal-test-only',
-        hostedMailProvider: 'log' as const,
-        usageEnforcement: 'observe' as const,
-        mailDriver: 'disabled' as const,
-        capabilitiesEnable: hostedRegistrationPolicy === 'public'
-          ? ['mail.delivery', 'identity.email', 'identity.emailVerification', 'identity.passwordReset', 'registration.public']
-          : [],
-        capabilitiesDisable: [],
-      }
-    : {
-        deploymentMode,
-        hostedRegistrationPolicy: 'disabled' as const,
-        billingProvider: 'none' as const,
-        hostedMailProvider: 'none' as const,
-        usageEnforcement: 'disabled' as const,
-      }
-  Object.assign(config as unknown as Record<string, unknown>, profile)
-
-  if (deploymentMode === 'hosted') {
-    const ledgerPath = resolve(config.deletionLedgerPath)
-    if (ledgerPath === resolve(config.backupPath)
-      || (config.blobStorageDriver === 'filesystem' && ledgerPath === resolve(config.blobStoragePath))) {
-      throw new Error('Invalid server configuration: hosted deletion ledger must be separate from backup and blob storage paths')
-    }
+  const profile = {
+    deploymentMode,
+    hostedRegistrationPolicy: 'disabled' as const,
+    billingProvider: 'none' as const,
+    hostedMailProvider: 'none' as const,
+    usageEnforcement: 'disabled' as const,
   }
+  Object.assign(config as unknown as Record<string, unknown>, profile)
 }
 
 function parseList(value: string | undefined): string[] {

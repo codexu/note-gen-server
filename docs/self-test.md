@@ -9,7 +9,7 @@
 1. 启动 `note-gen-server`，确认 `/health/ready` 返回 200。
 2. 打开 NoteGen → 设置 → 同步 → NoteGen 同步服务器。
 3. 本机部署填写 `http://127.0.0.1:3789`；远程部署填写实际 HTTPS 域名。
-4. 选择“注册”或“登录”。封闭注册时，注册还要填写服务端 `.env` 中的 `SETUP_TOKEN`。
+4. 选择“注册”或“登录”。实例关闭注册时，由管理员切换为“仅邀请”并创建一次性邀请链接。
 5. 登录密码至少 8 个字符。它只负责账号认证，并继续支持更长密码。
 6. 登录完成后不需要选择 Workspace 或输入同步口令；NoteGen 自动绑定当前笔记目录并将 NoteGen Server 设为主要同步方式。
 7. 确认页面显示“实时同步已启用”，并且当前笔记目录正确；页面不应出现上传、下载或立即同步按钮。
@@ -47,7 +47,7 @@
 - Node.js 22 或更高版本。
 - 已在项目目录执行 `pnpm install`。
 - 服务端已启动，且 `/health/ready` 返回 200。
-- 封闭注册模式下，知道当前部署的 `SETUP_TOKEN`。
+- 管理员已在 Web 后台临时启用公开注册；脚本结束后应恢复为“仅邀请”或“关闭”。
 
 本地 PostgreSQL 部署可以先执行：
 
@@ -55,7 +55,7 @@
 createuser notegen
 createdb -O notegen notegen
 cp .env.example .env
-# 编辑 .env，至少设置 POSTGRES_PASSWORD、DATABASE_URL、AUTH_SECRET、SETUP_TOKEN 和 PUBLIC_BASE_URL
+# 编辑 .env，至少设置数据库密码、DATABASE_URL、AUTH_SECRET 和 PUBLIC_BASE_URL
 pnpm install
 pnpm dev
 curl --fail http://127.0.0.1:3789/health/ready
@@ -63,13 +63,7 @@ curl --fail http://127.0.0.1:3789/health/ready
 
 ## 本机使用
 
-服务端使用默认地址、并且为封闭注册时：
-
-```bash
-SELF_TEST_SETUP_TOKEN='你的 SETUP_TOKEN' pnpm test:self
-```
-
-开放注册模式无需 Setup Token：
+在 Web 后台临时启用公开注册后运行：
 
 ```bash
 pnpm test:self
@@ -89,18 +83,16 @@ pnpm test:self
 
 ```bash
 SELF_TEST_BASE_URL='https://sync.example.com' \
-SELF_TEST_SETUP_TOKEN='你的 SETUP_TOKEN' \
 pnpm test:self
 ```
 
-这也会验证反向代理的 HTTPS API 和 WSS WebSocket 转发。不要在命令历史、CI 日志或截图中公开 Setup Token。
+这也会验证反向代理的 HTTPS API 和 WSS WebSocket 转发。验收结束后立即恢复原注册策略。
 
 ## 保留测试数据
 
 需要登录测试账号、手工检查 Workspace 时：
 
 ```bash
-SELF_TEST_SETUP_TOKEN='你的 SETUP_TOKEN' \
 SELF_TEST_KEEP_DATA=true \
 pnpm test:self
 ```
@@ -112,7 +104,7 @@ pnpm test:self
 | 现象 | 检查项 |
 |---|---|
 | `fetch failed` | 地址、端口、防火墙、HTTPS 证书和服务进程状态 |
-| `registration_closed` | 是否传入与服务端一致的 `SELF_TEST_SETUP_TOKEN` |
+| 自动验收提示需启用公开注册 | 在 Web 后台临时将注册策略改为“公开”，完成后恢复原策略 |
 | `/health/ready` 返回 503 | PostgreSQL、Blob 目录/S3 和 migration 日志 |
 | WebSocket 超时 | 反向代理是否支持 Upgrade，是否对事件接口启用了缓冲 |
 | `instanceId` 与客户端记录不一致 | 数据库是否被重置、恢复错备份或指向了另一套部署 |
@@ -130,3 +122,4 @@ pnpm dev:server
 - [本地运行与运维](operations.md)
 - [NoteGen 客户端接入协议](client-protocol.md)
 - [NoteGen 接入与配置同步体验](notegen-integration.md)
+- [公共测试实例上线清单](production-checklist.md)

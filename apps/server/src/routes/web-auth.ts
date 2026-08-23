@@ -10,7 +10,7 @@ import type { WebAccountSession, WebSessionService } from '../auth/web-session-s
 import type { AdminService } from '../admin/service.js'
 import type { DeploymentService } from '../deployment/service.js'
 import type { RiskService } from '../risk/service.js'
-import { NullableTimestamp, Timestamp } from './api-schemas.js'
+import { CounterString, NullableTimestamp, Timestamp } from './api-schemas.js'
 
 export const WEB_SESSION_COOKIE = 'notegen_session'
 export const WEB_CSRF_COOKIE = 'notegen_csrf'
@@ -134,6 +134,8 @@ export function createWebAuthRoutes(
       id: Type.String({ format: 'uuid' }), name: Type.String(), platform: Type.String(),
       encryptionPublicKey: Type.Union([Type.String(), Type.Null()]), lastSeenAt: Timestamp,
       createdAt: Timestamp, revokedAt: NullableTimestamp, current: Type.Boolean(),
+      syncStatus: Type.Union([Type.Literal('caught-up'), Type.Literal('behind'), Type.Literal('never-acknowledged')]),
+      pendingEventCount: CounterString, acknowledgedAt: NullableTimestamp,
     })) } } }, async (request) => {
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       return auth.listDevices(session.accountId)
@@ -194,6 +196,28 @@ export function createWebAuthRoutes(
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
       return { revoked: await webSessions.destroyOthers(session.accountId, session.sessionId) }
+    })
+
+    app.delete('/v1/web/account', {
+      config: { rateLimit: { max: 3, timeWindow: '1 hour' } },
+      schema: {
+        body: Type.Object({
+          password: Type.String({ minLength: 8, maxLength: 1_024 }),
+          confirmation: Type.Literal('DELETE'),
+        }),
+        response: { 202: Type.Object({ purgeAfter: Timestamp }) },
+      },
+    }, async (request, reply) => {
+      const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
+      requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
+      const purgeAfter = await auth.requestAccountDeletion(
+        session.accountId, request.body.password, config.tombstoneRetentionDays,
+      )
+      await webSessions.destroyForAccount(session.accountId)
+      clearSessionCookies(config, reply)
+      await admin?.recordAudit(session.accountId, 'account.deletion-request', 'account', session.accountId)
+        .catch((error: unknown) => request.log.warn({ err: error }, 'Failed to record account deletion request'))
+      return reply.status(202).send({ purgeAfter })
     })
 
     app.delete('/v1/web/devices/:deviceId', {

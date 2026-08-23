@@ -1,6 +1,6 @@
 # NoteGen 客户端接入协议
 
-本文说明 NoteGen 客户端接入 Sync Server 时必须遵守的可靠性与安全约束。HTTP 请求和字段的最终定义以服务端 `/openapi.json` 为准。
+本文说明 NoteGen 客户端接入 Sync Server 时必须遵守的可靠性与安全约束。冻结的 v1 总览见 [protocol-v1.md](protocol-v1.md)，HTTP 请求和字段的最终定义以服务端 `/openapi.json` 为准。本文中与 v1 总览冲突的早期草案描述均以 v1 为准。
 
 ## 本地状态
 
@@ -19,13 +19,13 @@ workspace_key_versions
 
 ## 登录与设备
 
-1. 每次安装生成并持久化一个 UUID device ID 和 X25519 设备密钥对，登录时上传 Base64URL 公钥。
+1. 每次安装生成并持久化一个 UUID device ID 和 X25519 设备密钥对；device ID 应与密钥材料分开保存，以便密钥丢失后仍能恢复同一设备身份。登录时上传 Base64URL 公钥。
 2. Access Token 只保存在内存或安全系统存储中。
 3. Refresh Token 必须使用系统安全存储；每次刷新都会轮换。
 4. 收到 `401` 时最多刷新并重试一次，不能无限循环。
 5. 设备被撤销后清除该服务器的 token，但不删除本地笔记。
 6. 保存 `/v1/capabilities` 返回的 `instanceId`；同一 URL 的实例身份变化时必须停止自动同步。
-7. device ID 与设备公钥绑定；`device_key_conflict` 时生成新的设备身份，不能覆盖旧公钥及其 envelopes。
+7. device ID 属于安装身份。同一账号重新完成浏览器授权或密码认证后，可以用新的设备公钥恢复已撤销设备或替换丢失的密钥；服务端覆盖公钥并撤销该设备的旧 Refresh Token，不创建重复设备记录。不同账号不能认领同一 device ID。
 
 推荐使用浏览器设备授权，账号密码直接登录作为备用方式：
 
@@ -38,6 +38,10 @@ workspace_key_versions
 7. 换取设备会话后调用 `GET /v1/account` 获取规范化账号名，不从浏览器页面或 URL 传递账号身份。
 
 Web Session 与 NoteGen Device Session 是两套独立凭据。浏览器使用 HttpOnly Cookie 和 CSRF Token；NoteGen 使用 Bearer Access Token 和按设备轮换的 Refresh Token。
+
+## 默认工作区
+
+每个账号的 NoteGen 默认本地工作区必须使用固定的 `notegen.default-library.v1` 幂等键创建或查询云端工作区。不同设备不得根据本地绑定情况各自创建默认云端工作区。升级前若已有多个工作区且尚无该幂等键，服务端选择最早创建的有效工作区作为账号级默认；各设备保留本地文件并重新绑定、扫描和合并，不自动删除其余远端工作区。
 
 ## 端到端加密
 
@@ -85,11 +89,14 @@ WebSocket 连接后第一条消息必须是：
 {
   "type": "authenticate",
   "accessToken": "...",
-  "workspaceIds": ["..."]
+  "workspaceIds": ["..."],
+  "expectedSyncEpoch": "..."
 }
 ```
 
 WebSocket 消息只表示状态可能变化。`workspace.changed` 触发 Pull，`workspace.keys-changed` 触发重新获取 envelope，`workspace.state-changed` 与 `account.workspaces-changed` 触发刷新 Workspace 列表。任何消息都不能直接推进 cursor，也不能假设每条 change 都会收到通知。
+
+文本光标的 `presence.update` 需携带 `coordinateSpace: "markdown" | "prosemirror"`，接收端只在相同坐标空间渲染；Canvas 使用 `coordinateSpace: "canvas"`。Canvas 拖拽期间可以在 `presence.update.canvas.nodes` 中发送最多 100 个 `{ id, x, y }` 临时位置；拖拽结束后的最终位置仍须使用 durable Yjs command 持久化。
 
 ## Push 与幂等
 
@@ -117,13 +124,18 @@ WebSocket 消息只表示状态可能变化。`workspace.changed` 触发 Pull，
 - change 可被重复接收，应用过程必须幂等。
 - ACK 只用于服务端运维；本地持久化 cursor 才是恢复依据。
 - `cursor_expired` 必须进入 bootstrap，不能改成从零盲目 Pull。
+- 客户端只有在事件已经写入本地 inbox 且全部成功应用后，才调用
+  `POST /v1/workspaces/:workspaceId/sync/ack` 提交 `through`。服务端不会把
+  HTTP 响应已发送视为持久确认。
+- 当前服务端声明 `syncEpochFencing` 和 `durableCursorAcknowledgement` 为必需
+  同步特性；所有同步请求必须携带最近一次显式接受的 `expectedSyncEpoch`。
 
 ## Bootstrap
 
-第一页不传 `bootstrapSessionId`。服务端返回固定 `snapshotSequence`；如果还有下一页，同时返回短期 `bootstrapSessionId`。后续每页必须传回该 session：
+第一页不传 `bootstrapId`。服务端返回固定 `snapshotSequence` 和短期 `bootstrapId`。后续每页必须传回该 session：
 
 ```text
-GET .../sync/bootstrap?afterObjectId=<id>&bootstrapSessionId=<uuid>
+GET .../sync/bootstrap?afterObjectId=<id>&bootstrapId=<uuid>&expectedSyncEpoch=<uuid>
 ```
 
 完成所有页后：
@@ -140,7 +152,7 @@ Session 过期时丢弃 staging 中未完成的 manifest 并从第一页重新�
 
 1. 客户端先加密完整附件。
 2. `ciphertextHash = SHA-256(encryptedBytes)`。
-3. `blobId = HMAC-SHA256(workspaceBlobIdentifierKey, ciphertextHash)`；重试必须复用同一份 encrypted bytes。
+3. v1 使用密文字节的 SHA-256 Base64URL 作为 `blobId`；重试必须复用同一份 encrypted bytes。
 4. 创建上传会话并按服务端返回的 `partBytes` 分片。
 5. 创建结果为 resumed 时，读取 `uploadedParts`；也可随时 GET 上传会话恢复进度。
 6. 每个 part 可使用相同 part number 重传；非最后一片必须正好等于 `partBytes`。
@@ -155,9 +167,9 @@ Session 过期时丢弃 staging 中未完成的 manifest 并从第一页重新�
 
 ## Yjs
 
-- 每个 Yjs update 使用独立 object ID 和 `yjs-update` kind。
-- checkpoint 使用 `yjs-checkpoint` kind。
-- update 在客户端加密后通过普通可靠同步层传输。
+- 每个 update 具有独立 `updateId`，通过 durable `append-update` command 写入文档流。
+- checkpoint 通过 durable `commit-checkpoint` command 写入。
+- update 在客户端加密后通过可靠 HTTP command 传输；WebSocket 不承载 update payload。
 - 客户端解密后，Yjs update 可以重复、乱序应用。
 - 服务端不解析 Awareness，不保存多人光标，也不执行 CRDT 合并。
 - 客户端生成 checkpoint 后仍应保留本地旧 update，直到 checkpoint 和对应 Markdown 快照都获得服务端 ACK。

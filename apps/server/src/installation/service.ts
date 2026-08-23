@@ -1,5 +1,5 @@
 import argon2 from 'argon2'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { AppConfig } from '../config.js'
 import type { DatabaseContext } from '../database/client.js'
 import {
@@ -8,27 +8,22 @@ import {
   accounts,
   adminAuditLogs,
   deploymentSettings,
+  maintenanceState,
   staffPrincipals,
-  staffRoleAssignments,
 } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { normalizeLoginKey } from '../identity/service.js'
-import { normalizeLocalStaffLogin } from '../staff/service.js'
 
 export type InstallationDeploymentMode = 'self-hosted' | 'hosted'
-export type HostedRegistrationPolicy = 'disabled' | 'public'
 
 export interface InstallationStatus {
   installationRequired: boolean
   activationPending: boolean
-  deploymentMode: InstallationDeploymentMode | null
   serverName: string
 }
 
 export interface CompleteInstallationInput {
-  deploymentMode: InstallationDeploymentMode
   serverName: string
-  hostedRegistrationPolicy?: HostedRegistrationPolicy
   administrator: { login: string, password: string }
 }
 
@@ -42,7 +37,6 @@ export class InstallationService {
 
   async status(): Promise<InstallationStatus> {
     const [settings] = await this.database.db.select({
-      deploymentMode: deploymentSettings.deploymentMode,
       runtimeConfiguration: deploymentSettings.runtimeConfiguration,
     }).from(deploymentSettings).where(eq(deploymentSettings.id, true)).limit(1)
     const serverName = typeof settings?.runtimeConfiguration.serverName === 'string'
@@ -51,14 +45,13 @@ export class InstallationService {
     return {
       installationRequired: settings === undefined,
       activationPending: settings !== undefined && this.installationOnly,
-      deploymentMode: settings?.deploymentMode ?? null,
       serverName,
     }
   }
 
   async persistedSettings(): Promise<{
     deploymentMode: InstallationDeploymentMode
-    registrationPolicy: HostedRegistrationPolicy | 'bootstrap' | 'invitation'
+    registrationPolicy: 'bootstrap' | 'disabled' | 'invitation' | 'public'
   } | undefined> {
     const [settings] = await this.database.db.select({
       deploymentMode: deploymentSettings.deploymentMode,
@@ -68,8 +61,35 @@ export class InstallationService {
     return settings
   }
 
+  /** Converts the removed hosted/internal-test marker into the single
+   * independent-instance model. This preserves accounts, registration policy,
+   * runtime configuration, workspaces and all synchronized data. */
+  async migrateLegacyOperationsInstallation(): Promise<boolean> {
+    return await this.database.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext('notegen-installation-mode-migration'))`)
+      const [settings] = await tx.select().from(deploymentSettings)
+        .where(eq(deploymentSettings.id, true)).limit(1).for('update')
+      if (settings === undefined || settings.deploymentMode === 'self-hosted') return false
+      const [activeAdmin] = await tx.select({ id: accounts.id }).from(accounts).where(and(
+        eq(accounts.isAdmin, true), isNull(accounts.suspendedAt), isNull(accounts.disabledAt),
+      )).limit(1)
+      await tx.update(deploymentSettings).set({
+        deploymentMode: 'self-hosted',
+        selfHostedLifecycle: 'ready',
+        adminRepairRequired: activeAdmin === undefined,
+        initializedAt: settings.initializedAt ?? new Date(),
+        initializedByAccountId: settings.initializedByAccountId ?? activeAdmin?.id ?? null,
+        configurationRevision: sql`${deploymentSettings.configurationRevision} + 1`,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(deploymentSettings.id, true),
+        eq(deploymentSettings.deploymentMode, settings.deploymentMode),
+      ))
+      return true
+    })
+  }
+
   async complete(input: CompleteInstallationInput): Promise<{
-    deploymentMode: InstallationDeploymentMode
     serverName: string
     activationPending: true
   }> {
@@ -90,8 +110,8 @@ export class InstallationService {
         throw new ApiError({ code: 'installation_already_completed', message: 'Installation has already been completed', statusCode: 409 })
       }
       const [existingAccount] = await tx.select({ id: accounts.id }).from(accounts).limit(1)
-      const [existingStaffPrincipal] = await tx.select({ id: staffPrincipals.id }).from(staffPrincipals).limit(1)
-      if (existingAccount !== undefined || existingStaffPrincipal !== undefined) {
+      const [existingLegacyStaff] = await tx.select({ id: staffPrincipals.id }).from(staffPrincipals).limit(1)
+      if (existingAccount !== undefined || existingLegacyStaff !== undefined) {
         throw new ApiError({
           code: 'installation_existing_data',
           message: 'Installation cannot run while account data already exists',
@@ -100,32 +120,6 @@ export class InstallationService {
       }
 
       const runtimeConfiguration = initialRuntimeConfiguration(this.config, serverName)
-      if (input.deploymentMode === 'hosted') {
-        const administrator = input.administrator
-        const login = normalizeLocalStaffLogin(administrator.login)
-        if (login.length < 1 || login.length > 200) {
-          throw new ApiError({ code: 'installation_administrator_invalid', message: 'Administrator login is invalid', statusCode: 400 })
-        }
-        const [principal] = await tx.insert(staffPrincipals).values({
-          externalIssuer: 'https://local.notegen.invalid',
-          externalSubject: `local:${login}`,
-          displayName: administrator.login.trim(),
-          localLogin: login,
-          localPasswordHash: passwordHash,
-        }).returning({ id: staffPrincipals.id })
-        if (principal === undefined) throw new Error('Installation Staff principal insert returned no row')
-        await tx.insert(staffRoleAssignments).values({ staffId: principal.id, roleKey: 'platform-admin' })
-        await tx.insert(deploymentSettings).values({
-          id: true,
-          deploymentMode: 'hosted',
-          registrationPolicy: input.hostedRegistrationPolicy ?? 'disabled',
-          selfHostedLifecycle: null,
-          initializedAt: new Date(),
-          runtimeConfiguration,
-        })
-        return
-      }
-
       const administrator = input.administrator
       const login = administrator.login.trim()
       const [created] = await tx.insert(accounts).values({
@@ -159,6 +153,7 @@ export class InstallationService {
         initializedByAccountId: created.id,
         runtimeConfiguration,
       })
+      await tx.insert(maintenanceState).values({ id: true })
       await tx.insert(adminAuditLogs).values({
         actorAccountId: created.id,
         action: 'instance.web-installation-complete',
@@ -168,7 +163,7 @@ export class InstallationService {
       })
     })
 
-    return { deploymentMode: input.deploymentMode, serverName, activationPending: true }
+    return { serverName, activationPending: true }
   }
 
 }

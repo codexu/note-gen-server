@@ -16,11 +16,11 @@ import { createAccountContextRoutes } from './routes/account-context.js'
 import { createSetupRoutes } from './routes/setup.js'
 import { createInvitationRoutes } from './routes/invitations.js'
 import { createComplianceRoutes } from './routes/compliance.js'
-import { createBillingRoutes } from './routes/billing.js'
 import { createCapabilitiesRoutes } from './routes/capabilities.js'
 import { createHealthRoutes } from './routes/health.js'
 import { createAuthRoutes } from './routes/auth.js'
 import { createWorkspaceRoutes } from './routes/workspaces.js'
+import { createWorkspaceCollaborationRoutes } from './routes/workspace-collaboration.js'
 import { createWebDashboardRoutes } from './routes/web-dashboard.js'
 import { createSyncRoutes } from './routes/sync.js'
 import { createEventRoutes } from './routes/events.js'
@@ -32,18 +32,11 @@ import { createWebEmailRoutes } from './routes/web-email.js'
 import { createDeviceAuthorizationRoutes } from './routes/device-authorizations.js'
 import { createDevicePairingRoutes } from './routes/device-pairings.js'
 import { createWebAdminRoutes } from './routes/web-admin.js'
-import { createSupportRoutes } from './routes/support.js'
 import { createMailAdminRoutes } from './routes/mail-admin.js'
-import { createStaffSupportRoutes } from './routes/staff-support.js'
-import { createStaffLegalHoldRoutes } from './routes/staff-legal-holds.js'
-import { createStaffBillingRoutes } from './routes/staff-billing.js'
-import { createStaffRiskRoutes } from './routes/staff-risk.js'
 import { isAllowedDevelopmentWebOrigin } from './development-origin.js'
 import { createPostgresRateLimitStore } from './observability/postgres-rate-limit-store.js'
 import type { DatabaseContext } from './database/client.js'
 import { createInstallationRoutes } from './routes/installation.js'
-import { createStaffAuthRoutes } from './routes/staff-auth.js'
-import { createStaffOperationsRoutes } from './routes/staff-operations.js'
 
 export async function buildApp(
   config: AppConfig,
@@ -57,7 +50,6 @@ export async function buildApp(
           'req.headers.authorization',
           'req.headers["x-setup-token"]',
           'req.headers["x-step-up-token"]',
-          'req.headers["x-staff-session-id"]',
           'req.body.password',
           'req.body.smtpPassword',
           'req.body.currentPassword',
@@ -102,7 +94,7 @@ export async function buildApp(
     credentials: config.corsOrigins.length > 0 || config.nodeEnv === 'development',
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
-      'authorization', 'content-type', 'x-request-id', 'x-setup-token', 'x-step-up-token', 'x-staff-session-id', 'x-csrf-token', 'range',
+      'authorization', 'content-type', 'x-request-id', 'x-setup-token', 'x-step-up-token', 'x-csrf-token', 'range',
     ],
     exposedHeaders: [
       'accept-ranges', 'content-length', 'content-range', 'retry-after',
@@ -126,7 +118,8 @@ export async function buildApp(
     }),
   })
   await app.register(websocket, { options: { maxPayload: 4 * 1024 * 1024 } })
-  registerMetrics(app, config)
+  registerMetrics(app, config, 'sql' in dependencies.database
+    ? dependencies.database as DatabaseContext : undefined)
   registerErrorHandler(app)
   app.addHook('onRequest', async (request) => {
     const safetyFailure = dependencies.deployment?.getSafetyFailure()
@@ -186,6 +179,7 @@ export async function buildApp(
       403: ErrorResponse,
       404: ErrorResponse,
       409: ErrorResponse,
+      410: ErrorResponse,
       413: ErrorResponse,
       415: ErrorResponse,
       416: ErrorResponse,
@@ -213,43 +207,17 @@ export async function buildApp(
   if (dependencies.compliance !== undefined && dependencies.webSessions !== undefined) {
     await app.register(createComplianceRoutes(config, dependencies.compliance, dependencies.webSessions, dependencies.deletion, dependencies.stepUps))
   }
-  if (dependencies.support !== undefined && dependencies.webSessions !== undefined
-    && dependencies.capabilities?.resolvePublic()['support.cases'] === true) {
-    await app.register(createSupportRoutes(dependencies.support, dependencies.webSessions))
-  }
-  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
-    && dependencies.support !== undefined && dependencies.staffSessions !== undefined) {
-    await app.register(createStaffSupportRoutes(dependencies.support, dependencies.staffSessions))
-  }
-  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
-    && dependencies.staff !== undefined && dependencies.staffSessions !== undefined) {
-    await app.register(createStaffAuthRoutes(config, dependencies.staff, dependencies.staffSessions))
-    await app.register(createStaffOperationsRoutes(
-      dependencies.staff,
-      dependencies.staffSessions,
-      dependencies.support,
-    ))
-  }
-  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
-    && dependencies.legalHolds !== undefined && dependencies.staffSessions !== undefined) {
-    await app.register(createStaffLegalHoldRoutes(dependencies.legalHolds, dependencies.staffSessions))
-  }
-  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test'
-    && dependencies.entitlements !== undefined && dependencies.staffSessions !== undefined) {
-    await app.register(createStaffBillingRoutes(dependencies.entitlements, dependencies.staffSessions))
-  }
-  if (config.deploymentMode === 'hosted' && config.hostedReleaseStage === 'internal-test' && dependencies.risk !== undefined && dependencies.staffSessions !== undefined) {
-    await app.register(createStaffRiskRoutes(dependencies.risk, dependencies.staffSessions))
-  }
-  if (dependencies.entitlements !== undefined && dependencies.webSessions !== undefined) {
-    await app.register(createBillingRoutes(dependencies.entitlements, dependencies.webSessions))
-  }
   if (dependencies.auth !== undefined && dependencies.tokens !== undefined) {
     if (dependencies.deployment === undefined) throw new Error('Auth routes require DeploymentService')
     await app.register(createAuthRoutes(config, dependencies.auth, dependencies.tokens, dependencies.deployment, dependencies.deletion, dependencies.risk))
   }
   if (dependencies.workspaces !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
     await app.register(createWorkspaceRoutes(dependencies.workspaces, dependencies.tokens, dependencies.auth))
+  }
+  if (dependencies.workspaceCollaboration !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {
+    await app.register(createWorkspaceCollaborationRoutes(
+      dependencies.workspaceCollaboration, dependencies.tokens, dependencies.auth,
+    ))
   }
   if (dependencies.auth !== undefined && dependencies.tokens !== undefined && dependencies.deployment !== undefined) {
     await app.register(createAccountContextRoutes(dependencies.auth, dependencies.tokens, dependencies.deployment, dependencies.entitlements, dependencies.usage, dependencies.compliance, dependencies.risk, dependencies.usageHardEnforcementActive, dependencies.maintenanceCoordinator))
@@ -260,8 +228,7 @@ export async function buildApp(
   if (dependencies.tokens !== undefined && dependencies.workspaces !== undefined
     && dependencies.notifier !== undefined && dependencies.auth !== undefined) {
     await app.register(createEventRoutes(
-      dependencies.tokens, dependencies.auth, dependencies.workspaces, dependencies.notifier, dependencies.maintenanceCoordinator,
-      dependencies.syncEpoch,
+      dependencies.tokens, dependencies.auth, dependencies.workspaces, dependencies.notifier, dependencies.syncEpoch,
     ))
   }
   if (dependencies.blobs !== undefined && dependencies.tokens !== undefined && dependencies.auth !== undefined) {

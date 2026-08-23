@@ -28,29 +28,19 @@ import { BootstrapService } from './bootstrap/service.js'
 import { InvitationService } from './invitations/service.js'
 import { WebStepUpService } from './step-up/service.js'
 import { IdentityService } from './identity/service.js'
-import { EmailIdentityService } from './identity/email-service.js'
 import { UsageService } from './usage/service.js'
-import { EntitlementService } from './billing/service.js'
-import { createBillingProvider } from './billing/provider.js'
 import { createMailProvider } from './mail/provider.js'
 import { MailOutboxService } from './mail/outbox-service.js'
 import { MailSecretPayloadService } from './mail/secret-payload-service.js'
 import { MailAdminService } from './mail/admin-service.js'
 import { MailOutboxWorker } from './mail/outbox-worker.js'
-import { ComplianceService } from './compliance/service.js'
-import { DeletionService } from './compliance/deletion-service.js'
-import { LegalHoldService } from './compliance/legal-hold-service.js'
 import { RestoreFenceService } from './restore-fence/service.js'
 import { RiskService } from './risk/service.js'
 import { MaintenanceCoordinator } from './maintenance/coordinator.js'
-import { SupportService } from './support/service.js'
 import { BackupInventoryService } from './backup/inventory-service.js'
-import { StaffService } from './staff/service.js'
-import { StaffSessionService } from './staff/session-service.js'
 import { AccountServiceAudit } from './audit/service.js'
-import { FilesystemDeletionLedgerStore } from './compliance/deletion-ledger-store.js'
-import { DeletionLedgerReplayService } from './compliance/deletion-ledger-replay-service.js'
 import { InstallationService } from './installation/service.js'
+import { WorkspaceCollaborationService } from './workspaces/collaboration-service.js'
 
 async function main(): Promise<void> {
   const config = loadConfig()
@@ -77,7 +67,7 @@ async function main(): Promise<void> {
     database = createDatabase(config)
     await assertMigrationCompatibility(database)
     const installationProbe = new InstallationService(database, config, true)
-    const persistedInstallation = await installationProbe.persistedSettings()
+    let persistedInstallation = await installationProbe.persistedSettings()
     if (persistedInstallation === undefined) {
       let finishInstallation!: () => void
       const installationCompleted = new Promise<void>((resolve) => { finishInstallation = resolve })
@@ -104,19 +94,19 @@ async function main(): Promise<void> {
       await main()
       return
     }
-    applyPersistedDeploymentProfile(
-      config,
-      persistedInstallation.deploymentMode,
-      persistedInstallation.registrationPolicy === 'public' ? 'public' : 'disabled',
-    )
+    if (persistedInstallation.deploymentMode !== 'self-hosted') {
+      await installationProbe.migrateLegacyOperationsInstallation()
+      persistedInstallation = await installationProbe.persistedSettings()
+      if (persistedInstallation?.deploymentMode !== 'self-hosted') {
+        throw new Error('Legacy operations mode migration did not complete')
+      }
+    }
+    applyPersistedDeploymentProfile(config, 'self-hosted')
     const installation = new InstallationService(database, config, false)
     const deployment = new DeploymentService(database, config)
     await deployment.initialize()
-    // A readiness-only failure still leaves a listening process available to
-    // a misconfigured proxy or direct client. Deployment mode determines the
-    // business isolation boundary, so a persisted/configured mode mismatch
-    // (or the legacy hosted public-registration hazard) must prevent service
-    // assembly and socket binding altogether.
+    // Keep deployment safety failures ahead of service assembly and socket binding so a
+    // misconfigured instance cannot become reachable through a proxy.
     const deploymentSafetyFailure = deployment.getSafetyFailure()
     if (deploymentSafetyFailure !== undefined) {
       throw new Error(`Deployment safety gate is closed: ${deploymentSafetyFailure}`)
@@ -128,53 +118,23 @@ async function main(): Promise<void> {
     await restoreFence.reconcile()
     const maintenanceCoordinator = new MaintenanceCoordinator(database)
     await maintenanceCoordinator.getSnapshot()
-    // Restore credential-review restrictions are a self-hosted recovery
-    // boundary too; the durable restriction evaluator has no hosted-provider
-    // dependency and must therefore exist in both deployment modes.
     const accountAudit = new AccountServiceAudit(database)
-    const staff = config.deploymentMode === 'hosted' ? new StaffService(database) : undefined
-    const risk = new RiskService(database, config.authSecret, config, staff, accountAudit)
-    const bootstrap = config.deploymentMode === 'self-hosted'
-      ? new BootstrapService(database, config, deployment)
-      : undefined
-    await bootstrap?.initialize()
+    const risk = new RiskService(database, config.authSecret, config, undefined, accountAudit)
+    const bootstrap = new BootstrapService(database, config, deployment)
+    await bootstrap.initialize()
     const identities = new IdentityService(database)
     await identities.backfillLegacyIdentities()
     const mailOutbox = new MailOutboxService(database)
     const mailSecrets = new MailSecretPayloadService(database, config.authSecret)
     const mailProvider = createMailProvider(config)
-    const mailAdmin = config.deploymentMode === 'self-hosted' && mailProvider !== undefined
+    const mailAdmin = mailProvider !== undefined
       ? new MailAdminService(database, config, mailOutbox, mailSecrets, mailProvider) : undefined
     const invitations = new InvitationService(database, config, deployment, {
       outbox: mailOutbox,
       secrets: mailSecrets,
       deliveryAvailable: () => capabilities.resolvePublic()['mail.delivery'],
     })
-    const emailIdentities = config.deploymentMode === 'hosted'
-      ? new EmailIdentityService(database, config, mailOutbox, mailSecrets, {
-          emailVerification: capabilities.resolvePublic()['identity.emailVerification'],
-          passwordReset: capabilities.resolvePublic()['identity.passwordReset'],
-        }, risk) : undefined
     const usage = new UsageService(database)
-    const entitlements = config.deploymentMode === 'hosted'
-      ? new EntitlementService(database, config, staff, accountAudit) : undefined
-    const usageHardEnforcementActive = config.usageEnforcement === 'hard'
-      && capabilities.resolvePublic()['usage.enforcement'] && entitlements !== undefined
-    const hardUsageLimitResolver = usageHardEnforcementActive && entitlements !== undefined
-      ? async (accountId: string) => entitlementLimit(await entitlements.getEffective(accountId), 'storage_bytes')
-      : undefined
-    const hardDeviceLimitResolver = usageHardEnforcementActive && entitlements !== undefined
-      ? async (accountId: string) => entitlementLimit(await entitlements.getEffective(accountId), 'devices')
-      : undefined
-    const hardWorkspaceLimitResolver = usageHardEnforcementActive && entitlements !== undefined
-      ? async (accountId: string) => entitlementLimit(await entitlements.getEffective(accountId), 'workspaces')
-      : undefined
-    const billingProvider = createBillingProvider(config)
-    const compliance = config.deploymentMode === 'hosted' ? new ComplianceService(database, config) : undefined
-    const legalHolds = config.deploymentMode === 'hosted' && staff !== undefined ? new LegalHoldService(database, config, staff, accountAudit) : undefined
-    const deletion = config.deploymentMode === 'hosted' ? new DeletionService(database, config, legalHolds, usage, risk) : undefined
-    const support = config.deploymentMode === 'hosted' ? new SupportService(database, config, staff, accountAudit) : undefined
-    const staffSessions = staff === undefined ? undefined : new StaffSessionService(database, staff, accountAudit)
     const instanceId = await getOrCreateInstanceId(database)
     const syncEpoch = await getOrCreateSyncEpoch(database)
     const blobStorage: BlobStorage = config.blobStorageDriver === 's3'
@@ -188,38 +148,27 @@ async function main(): Promise<void> {
 
     const tokens = new TokenService(config.authSecret, config.publicBaseUrl)
     const totp = new TotpService(config.authSecret)
-    const auth = new AuthService(database, tokens, totp, risk,
-      config.deploymentMode === 'hosted' ? usage : undefined, hardDeviceLimitResolver)
+    const auth = new AuthService(database, tokens, totp, risk)
     const webSessions = new WebSessionService(database, risk)
     const stepUps = new WebStepUpService(database, config.authSecret)
     const deviceAuthorizations = new DeviceAuthorizationService(database, auth)
     const devicePairings = new DevicePairingService(database, auth)
-    // Instance administration is a self-hosted authority. Hosted operations
-    // use the separate staff realm; assembling this service there would leave
-    // the customer-admin route surface present even when no customer can
-    // legitimately receive isAdmin.
-    const admin = config.deploymentMode === 'self-hosted'
-      ? new AdminService(database, blobStorage, usage, hardWorkspaceLimitResolver, config, deployment)
-      : undefined
-    await admin?.recoverInterruptedJobs()
+    const admin = new AdminService(database, blobStorage, usage, undefined, config, deployment)
+    await admin.recoverInterruptedJobs()
     notifier = new PostgresChangeNotifier(database.sql)
     await notifier.initialize()
-    const workspaces = new WorkspaceService(database, notifier,
-      config.deploymentMode === 'hosted' ? usage : undefined, hardWorkspaceLimitResolver)
+    const workspaces = new WorkspaceService(database, notifier)
+    const workspaceCollaboration = new WorkspaceCollaborationService(database, workspaces, notifier)
     const syncProtocol = new DurableSyncService(database, workspaces, notifier, () => config.maxObjectBytes,
-      config.deploymentMode === 'hosted' ? usage : undefined, hardUsageLimitResolver, syncEpoch)
+      undefined, undefined, syncEpoch)
     const blobService = new BlobService(
       database, workspaces, blobStorage, () => config.maxBlobBytes, config.blobPartBytes,
-      config.deploymentMode === 'hosted' ? usage : undefined,
-      hardUsageLimitResolver, syncEpoch,
+      undefined, undefined, syncEpoch,
     )
-    const deletionLedger = config.deploymentMode === 'hosted' ? new FilesystemDeletionLedgerStore(config.deletionLedgerPath) : undefined
-    await deletionLedger?.initialize()
-    await (deletionLedger === undefined ? undefined : new DeletionLedgerReplayService(database, config, deletionLedger).reconcile())
     const maintenance = new MaintenanceService(
       database, blobStorage, config, maintenanceCoordinator,
-      config.deploymentMode === 'hosted' ? usage : undefined,
-      deletionLedger,
+      undefined,
+      undefined,
     )
 
     app = await buildApp(config, {
@@ -231,6 +180,7 @@ async function main(): Promise<void> {
       tokens,
       auth,
       workspaces,
+      workspaceCollaboration,
       syncProtocol,
       notifier,
       blobs: blobService,
@@ -246,30 +196,16 @@ async function main(): Promise<void> {
       bootstrap,
       invitations,
       identities,
-      emailIdentities,
       usage,
-      usageHardEnforcementActive,
-      entitlements,
-      billingProvider,
       mailProvider,
       mailOutbox,
       mailSecrets,
       mailAdmin,
-      compliance,
-      deletion,
-      legalHolds,
       risk,
-      support,
-      staff,
-      staffSessions,
       maintenanceCoordinator,
       accountAudit,
       installation,
     })
-    // Hosted internal-test drains to the redacted LogMailProvider; a
-    // self-hosted instance drains only when its explicitly configured SMTP
-    // provider assembled successfully. In both cases the durable worker, not
-    // an HTTP request, owns network delivery and retry semantics.
     if (mailProvider !== undefined) {
       stopMailOutbox = new MailOutboxWorker(database, mailOutbox, mailProvider, mailSecrets, {
         error: (bindings, message) => app?.log.error(bindings, message),
@@ -291,8 +227,3 @@ async function main(): Promise<void> {
 }
 
 await main()
-
-function entitlementLimit(entitlements: { limits: Record<string, string | null> }, metric: string): bigint | null {
-  const value = entitlements.limits[metric]
-  return value === undefined || value === null ? null : BigInt(value)
-}

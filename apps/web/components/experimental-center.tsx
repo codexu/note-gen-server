@@ -28,7 +28,7 @@ export function ExperimentalCenter({ refreshVersion = 0 }: { refreshVersion?: nu
 
   return <div className="flex max-w-5xl flex-col gap-6">
     <Alert><BeakerIcon /><AlertTitle>实验入口不会绕过服务端安全门槛</AlertTitle><AlertDescription>这里保留尚未稳定开放的功能及其启用条件。不可用项目只展示状态，不会调用对应写接口。</AlertDescription></Alert>
-    <Card><CardHeader><CardTitle>实验能力</CardTitle><CardDescription>{data?.deploymentMode === "self-hosted" ? "当前为自托管实例；托管专属能力会明确标记为不可用。" : "当前为官方托管实例。"}</CardDescription></CardHeader><CardContent>
+    <Card><CardHeader><CardTitle>实验能力</CardTitle><CardDescription>当前为独立实例；实验能力只有满足服务端安全条件后才可启用。</CardDescription></CardHeader><CardContent>
       <ItemGroup>{rows.map((item) => <CapabilityRow key={item.id} item={item} />)}</ItemGroup>
     </CardContent></Card>
   </div>
@@ -43,11 +43,6 @@ function capabilityTitle(id: string): string {
     "identity.email": "邮箱身份",
     "identity.emailVerification": "邮箱验证",
     "identity.passwordReset": "密码找回",
-    "risk.advanced": "高级风控",
-    "usage.enforcement": "用量强制限制",
-    "billing.subscription": "订阅与权益",
-    "compliance.requests": "合规数据请求",
-    "support.cases": "客服工单",
     "operations.unifiedBackup": "统一备份",
     "operations.upgradeAssistant": "升级助手",
     "operations.preserveRestore": "原实例恢复",

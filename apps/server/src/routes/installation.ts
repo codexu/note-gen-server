@@ -13,7 +13,6 @@ export function createInstallationRoutes(
     const Status = Type.Object({
       installationRequired: Type.Boolean(),
       activationPending: Type.Boolean(),
-      deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted'), Type.Null()]),
       serverName: Type.String(),
     })
 
@@ -23,9 +22,7 @@ export function createInstallationRoutes(
       config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
       schema: {
         body: Type.Object({
-          deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
           serverName: Type.String({ minLength: 1, maxLength: 100, pattern: '.*\\S.*' }),
-          hostedRegistrationPolicy: Type.Optional(Type.Union([Type.Literal('disabled'), Type.Literal('public')])),
           administrator: Type.Object({
             login: Type.String({ minLength: 1, maxLength: 200, pattern: '.*\\S.*' }),
             password: Type.String({ minLength: 8, maxLength: 1024 }),
@@ -33,7 +30,6 @@ export function createInstallationRoutes(
         }),
         response: {
           201: Type.Object({
-            deploymentMode: Type.Union([Type.Literal('self-hosted'), Type.Literal('hosted')]),
             serverName: Type.String(),
             activationPending: Type.Literal(true),
           }),

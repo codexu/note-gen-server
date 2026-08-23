@@ -54,9 +54,10 @@ export function createWorkspaceRoutes(
     app.post('/v1/workspaces', {
       schema: {
         headers: IdempotencyKeyHeaders,
-        body: Type.Intersect([KeyBody, Type.Object({
+        body: Type.Object({
           nameCiphertext: Type.String({ minLength: 1, maxLength: 8_192 }),
-        })]),
+          managedKey: Type.String({ minLength: 40, maxLength: 128 }),
+        }),
         response: {
           200: Type.Object({
             id: Type.String({ format: 'uuid' }),
@@ -78,7 +79,7 @@ export function createWorkspaceRoutes(
       const claims = await requireAuth(request, tokens, auth)
       const idempotencyKey = typeof request.headers['idempotency-key'] === 'string'
         ? request.headers['idempotency-key'] : undefined
-      const result = await workspaces.create(claims.accountId, {
+      const result = await workspaces.createManagedLibrary(claims.accountId, {
         ...request.body,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       })
@@ -107,6 +108,13 @@ export function createWorkspaceRoutes(
         response: {
           200: Type.Array(Type.Object({
             id: Type.String({ format: 'uuid' }),
+            ownerAccountId: Type.String({ format: 'uuid' }),
+            type: Type.Union([Type.Literal('account-data'), Type.Literal('library')]),
+            owner: Type.Boolean(),
+            role: Type.Union([
+              Type.Literal('owner'), Type.Literal('viewer'), Type.Literal('editor'), Type.Literal('manager'),
+            ]),
+            capabilities: Type.Array(Type.String()),
             nameCiphertext: Type.String(),
             latestSequence: CounterString,
             latestKeyVersion: Type.Integer(),
@@ -241,6 +249,21 @@ export function createWorkspaceRoutes(
       const claims = await requireAuth(request, tokens, auth)
       await workspaces.remove(claims.accountId, request.params.workspaceId)
       return reply.status(204).send(null)
+    })
+
+    app.patch('/v1/workspaces/:workspaceId', {
+      schema: {
+        params: WorkspaceParams,
+        body: Type.Object({ nameCiphertext: Type.String({ minLength: 1, maxLength: 8_192 }) }),
+        response: { 200: Type.Object({
+          id: Type.String({ format: 'uuid' }),
+          nameCiphertext: Type.String(),
+          updatedAt: Timestamp,
+        }) },
+      },
+    }, async request => {
+      const claims = await requireAuth(request, tokens, auth)
+      return workspaces.rename(claims.accountId, request.params.workspaceId, request.body.nameCiphertext)
     })
 
     app.post('/v1/workspaces/:workspaceId/restore', {

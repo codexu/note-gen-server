@@ -66,7 +66,7 @@ export async function apiRequest<T>(
     headers.set("content-type", "application/json")
   }
   if (init.csrf) {
-    const token = readCookie(path.startsWith("/v1/staff/") ? "notegen_staff_csrf" : "notegen_csrf")
+    const token = readCookie("notegen_csrf")
     if (token) headers.set("x-csrf-token", token)
   }
   const timeoutController = new AbortController()
@@ -121,6 +121,19 @@ const apiErrorMessages: Record<string, string> = {
   setup_token_invalid: "一次性初始化凭据无效或已经过期。",
   registration_closed: "服务器已关闭公开注册，请联系实例管理员获取邀请。",
   credentials_invalid: "账号或密码不正确，请检查后重试。",
+  totp_required: "请输入验证器中的 6 位验证码。",
+  totp_invalid: "双因素验证码不正确或已经过期，请输入最新验证码。",
+  email_verification_required: "请先完成邮箱验证，再登录账号。",
+  email_registration_required: "请使用邮箱注册流程创建账号。",
+  email_invalid: "请输入有效的邮箱地址。",
+  email_identity_not_found: "没有找到可用的邮箱账号。",
+  email_verification_unavailable: "当前服务器尚未启用邮箱验证。",
+  password_reset_unavailable: "当前服务器尚未启用密码找回。",
+  action_token_invalid: "链接无效，请重新申请。",
+  action_token_consumed: "这个链接已经使用过，请重新申请。",
+  action_token_expired: "链接已经过期，请重新申请。",
+  invitation_invalid: "邀请链接无效、已经过期或已被使用。",
+  invitation_not_found: "没有找到这条邀请。",
   password_unchanged: "新密码不能与当前密码相同。",
   account_exists: "这个账号已经注册，请切换到“登录”。",
   account_not_found: "账号不存在或已停用。",

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { CheckCircle2Icon, CopyIcon, ExternalLinkIcon, LaptopIcon, QrCodeIcon, RefreshCwIcon, ShieldCheckIcon, Trash2Icon, XCircleIcon } from "lucide-react"
 import QRCode from "react-qr-code"
@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { apiRequest, isApiRequestError, userFacingErrorMessage, type DeviceAuthorization } from "@/lib/api"
 
@@ -43,10 +44,13 @@ export function DeviceConnection({
   const [serverAddress, setServerAddress] = useState("")
   const [serverAddressError, setServerAddressError] = useState("")
   const [serverAddressCopied, setServerAddressCopied] = useState(false)
+  const [method, setMethod] = useState<"code" | "qr">("code")
+  const authorizationRequestId = useRef(0)
+  const activePairing = useRef<{ id: string, status: DevicePairingStatus | null } | null>(null)
 
   useEffect(() => {
     const initialCode = new URLSearchParams(window.location.search).get("code") ?? ""
-    setCode(initialCode)
+    setCode(formatDeviceCode(initialCode))
     if (initialCode) {
       const url = new URL(window.location.href)
       url.pathname = "/connect/"
@@ -63,11 +67,22 @@ export function DeviceConnection({
       })
       .catch((cause) => {
         if (isApiRequestError(cause) && cause.status === 401) {
-          redirectToLogin()
+          setSignedIn(false)
           return
         }
         setError(errorMessage(cause))
       })
+  }, [])
+
+  useEffect(() => {
+    activePairing.current = pairing ? { id: pairing.id, status: pairingStatus } : null
+  }, [pairing, pairingStatus])
+
+  useEffect(() => () => {
+    const current = activePairing.current
+    if (current?.status === "pending") {
+      void apiRequest(`/v1/web/device-pairings/${current.id}`, { method: "DELETE", csrf: true }).catch(() => undefined)
+    }
   }, [])
 
   useEffect(() => {
@@ -83,7 +98,12 @@ export function DeviceConnection({
       void apiRequest<{ status: DevicePairingStatus, expiresAt: string }>(
         `/v1/web/device-pairings/${pairing.id}`
       ).then((result) => setPairingStatus(result.status)).catch((cause) => {
-        if (!(isApiRequestError(cause) && cause.status === 404)) setPairingError(errorMessage(cause))
+        if (isApiRequestError(cause) && cause.status === 404) {
+          setPairingStatus("expired")
+          setPairingError("")
+          return
+        }
+        setPairingError(errorMessage(cause))
       })
     }, 2_000)
     return () => {
@@ -148,23 +168,53 @@ export function DeviceConnection({
     }
   }
 
+  async function changeMethod(nextMethod: "code" | "qr") {
+    if (nextMethod === method) return
+    if (nextMethod === "qr") {
+      setMethod("qr")
+      if (!pairing || pairingStatus !== "pending") void createPairing()
+      return
+    }
+    if (pairing?.id && pairingStatus === "pending") {
+      setPairingBusy(true)
+      setPairingError("")
+      try {
+        await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true })
+      } catch (cause) {
+        if (!(isApiRequestError(cause) && cause.status === 404)) {
+          setPairingError(errorMessage(cause))
+          setPairingBusy(false)
+          return
+        }
+      }
+      setPairingBusy(false)
+    }
+    setPairing(null)
+    setPairingStatus(null)
+    setMethod("code")
+  }
+
   async function loadAuthorization(value = code) {
+    const requestId = authorizationRequestId.current + 1
+    authorizationRequestId.current = requestId
     setBusy(true)
     setError("")
     try {
       const result = await apiRequest<DeviceAuthorization>(
         `/v1/web/device-authorizations/${encodeURIComponent(value)}`
       )
+      if (requestId !== authorizationRequestId.current) return
       setAuthorization(result)
       if (result.status === "approved" || result.status === "denied") {
         setCompleted(result.status)
         removeAuthorizationCodeFromUrl()
       }
     } catch (cause) {
+      if (requestId !== authorizationRequestId.current) return
       setAuthorization(null)
       setError(errorMessage(cause))
     } finally {
-      setBusy(false)
+      if (requestId === authorizationRequestId.current) setBusy(false)
     }
   }
 
@@ -174,6 +224,7 @@ export function DeviceConnection({
     try {
       await navigator.clipboard.writeText(serverAddress)
       setServerAddressCopied(true)
+      window.setTimeout(() => setServerAddressCopied(false), 2_000)
     } catch {
       setServerAddressError("复制失败，请手动选择并复制服务器地址。")
     }
@@ -213,7 +264,9 @@ export function DeviceConnection({
         <ThemeToggle />
       </header>
       )}
-      <div className="grid w-full items-start gap-6 lg:grid-cols-2">
+      {signedIn ? <ToggleGroup className="grid w-full grid-cols-2" type="single" variant="outline" spacing={0} value={method} disabled={pairingBusy} onValueChange={(value) => { if (value) void changeMethod(value as "code" | "qr") }}><ToggleGroupItem value="code">输入验证码</ToggleGroupItem><ToggleGroupItem value="qr">手机扫码</ToggleGroupItem></ToggleGroup> : null}
+      <div className="grid w-full items-start gap-6">
+      {method === "code" ? (
       <Card className="w-full bg-card/90 shadow-sm">
         <CardHeader>
           <CardTitle>关联 NoteGen 设备</CardTitle>
@@ -244,12 +297,7 @@ export function DeviceConnection({
                 <span>
                   {completed === "approved" ? "设备授权已确认，可以直接打开 NoteGen 完成关联。" : "这次授权不会签发任何设备会话。"}
                 </span>
-                {completed === "approved" ? (
-                  <Button className="self-start" onClick={() => void openPairingInNoteGen()} disabled={pairingBusy}>
-                    {pairingBusy ? <Spinner data-icon="inline-start" /> : <ExternalLinkIcon data-icon="inline-start" />}
-                    {pairingBusy ? "正在打开…" : "打开 NoteGen 完成关联"}
-                  </Button>
-                ) : null}
+                {completed === "approved" ? <span>请返回刚才显示验证码的 NoteGen，客户端会自动继续连接。</span> : null}
               </AlertDescription>
             </Alert>
           ) : (
@@ -291,9 +339,12 @@ export function DeviceConnection({
                   id="device-code"
                   value={code}
                   onChange={(event) => {
-                    setCode(event.target.value.toUpperCase())
+                    const nextCode = formatDeviceCode(event.target.value)
+                    authorizationRequestId.current += 1
+                    setCode(nextCode)
                     setAuthorization(null)
                     setCompleted(null)
+                    if (signedIn && nextCode.length === 9) void loadAuthorization(nextCode)
                   }}
                   placeholder="ABCD-EFGH"
                   autoCapitalize="characters"
@@ -302,7 +353,7 @@ export function DeviceConnection({
                 <FieldDescription>验证码由 NoteGen 客户端显示，5 分钟内有效且只能使用一次。</FieldDescription>
               </Field>
               {signedIn && !authorization ? (
-                <Button onClick={() => void loadAuthorization()} disabled={busy || code.length < 8}>
+                <Button onClick={() => void loadAuthorization()} disabled={busy || code.length !== 9}>
                   {busy ? <Spinner data-icon="inline-start" /> : null}
                   查看设备
                 </Button>
@@ -349,7 +400,8 @@ export function DeviceConnection({
           </CardFooter>
         ) : null}
       </Card>
-      {signedIn ? (
+      ) : null}
+      {signedIn && method === "qr" ? (
         <Card className="w-full bg-card/90 shadow-sm">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -384,7 +436,7 @@ export function DeviceConnection({
               <Alert variant="destructive">
                 <XCircleIcon />
                 <AlertTitle>二维码已过期</AlertTitle>
-                <AlertDescription>请刷新二维码后再扫描。</AlertDescription>
+                <AlertDescription>二维码可能已过期或被撤销，请重新生成后再扫描。</AlertDescription>
               </Alert>
             ) : (
               <>
@@ -392,6 +444,7 @@ export function DeviceConnection({
                   <QRCode value={pairing.pairingUri} size={224} title="NoteGen 手机设备配对二维码" />
                 </div>
                 <Badge variant="outline">剩余 {formatRemainingTime(remainingSeconds)}</Badge>
+                <span className="sr-only" aria-live="polite">{remainingSeconds === 60 ? "二维码还有一分钟过期" : remainingSeconds === 10 ? "二维码还有十秒过期" : ""}</span>
                 <p className="text-center text-sm text-muted-foreground">
                   二维码包含一次性配对凭据。扫码成功或倒计时结束后会自动失效。
                 </p>
@@ -429,19 +482,17 @@ export function DeviceConnection({
   )
 }
 
+function formatDeviceCode(value: string): string {
+  const normalized = value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8)
+  return normalized.length > 4 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : normalized
+}
+
 const errorMessage = userFacingErrorMessage
 
 function formatRemainingTime(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${seconds.toString().padStart(2, "0")}`
-}
-
-function redirectToLogin(): void {
-  const returnPath = `${window.location.pathname}${window.location.search}`
-  const loginUrl = new URL("/", window.location.origin)
-  loginUrl.searchParams.set("next", returnPath)
-  window.location.replace(loginUrl.toString())
 }
 
 function removeAuthorizationCodeFromUrl(): void {
