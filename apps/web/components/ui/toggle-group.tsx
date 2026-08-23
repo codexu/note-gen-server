@@ -20,6 +20,36 @@ const ToggleGroupContext = React.createContext<
   orientation: "horizontal",
 })
 
+type ToggleGroupBaseProps = Omit<
+  ToggleGroupPrimitive.Props,
+  "value" | "defaultValue" | "onValueChange" | "multiple"
+> &
+  VariantProps<typeof toggleVariants> & {
+    spacing?: number
+    orientation?: "horizontal" | "vertical"
+  }
+
+type ToggleGroupProps = ToggleGroupBaseProps & (
+  | {
+      type: "single"
+      value?: string
+      defaultValue?: string
+      onValueChange?: (value: string) => void
+    }
+  | {
+      type: "multiple"
+      value?: readonly string[]
+      defaultValue?: readonly string[]
+      onValueChange?: (value: string[]) => void
+    }
+  | {
+      type?: undefined
+      value?: readonly string[]
+      defaultValue?: readonly string[]
+      onValueChange?: (value: string[]) => void
+    }
+)
+
 function ToggleGroup({
   className,
   variant,
@@ -27,12 +57,23 @@ function ToggleGroup({
   spacing = 2,
   orientation = "horizontal",
   children,
+  type,
+  value,
+  defaultValue,
+  onValueChange,
   ...props
-}: ToggleGroupPrimitive.Props &
-  VariantProps<typeof toggleVariants> & {
-    spacing?: number
-    orientation?: "horizontal" | "vertical"
-  }) {
+}: ToggleGroupProps) {
+  const single = type === "single"
+  const handleValueChange = onValueChange === undefined
+    ? undefined
+    : (nextValue: string[]) => {
+        if (single) {
+          ;(onValueChange as (next: string) => void)(nextValue[0] ?? "")
+        } else {
+          ;(onValueChange as (next: string[]) => void)(nextValue)
+        }
+      }
+
   return (
     <ToggleGroupPrimitive
       data-slot="toggle-group"
@@ -41,6 +82,10 @@ function ToggleGroup({
       data-spacing={spacing}
       data-orientation={orientation}
       style={{ "--gap": spacing } as React.CSSProperties}
+      multiple={type === "multiple"}
+      value={typeof value === "string" ? [value] : value}
+      defaultValue={typeof defaultValue === "string" ? [defaultValue] : defaultValue}
+      onValueChange={handleValueChange}
       className={cn(
         "group/toggle-group flex w-fit flex-row items-center gap-[--spacing(var(--gap))] rounded-lg data-[size=sm]:rounded-[min(var(--radius-md),10px)] data-vertical:flex-col data-vertical:items-stretch",
         className

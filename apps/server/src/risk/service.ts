@@ -171,7 +171,8 @@ export class RiskService {
       await this.audit?.recordInTransaction(tx, {
         actorType: 'staff', actorId: input.actorStaffId,
         action: existing === undefined ? 'risk.restriction.create' : 'risk.restriction.update',
-        targetType: 'account', targetId: input.accountId, requestId: input.requestId,
+        targetType: 'account', targetId: input.accountId,
+        ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
         metadata: { restrictionId: restriction.id, scope: input.scope, restrictionAction: input.action, reasonCode: input.reasonCode, expiresAt: input.expiresAt?.toISOString() ?? null },
       })
       return { id: restriction.id, created: existing === undefined }
@@ -192,7 +193,8 @@ export class RiskService {
         .where(eq(riskRestrictions.id, restriction.id))
       await this.audit?.recordInTransaction(tx, {
         actorType: 'staff', actorId: input.actorStaffId, action: 'risk.restriction.revoke',
-        targetType: 'account', targetId: restriction.subjectRef, requestId: input.requestId,
+        targetType: 'account', targetId: restriction.subjectRef,
+        ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
         metadata: { restrictionId: restriction.id, restrictionAction: restriction.action, source: restriction.source },
       })
     })
@@ -241,5 +243,7 @@ function userAgentFamily(value: string): string {
 
 function chooseStrictest<T extends { action: string }>(restrictions: T[]): T | undefined {
   const weight: Record<string, number> = { review: 1, challenge: 2, read_only: 3, lock: 4, deny: 5 }
-  return restrictions.reduce<T | undefined>((current, next) => current === undefined || weight[next.action] > weight[current.action] ? next : current, undefined)
+  return restrictions.reduce<T | undefined>((current, next) => (
+    current === undefined || (weight[next.action] ?? 0) > (weight[current.action] ?? 0) ? next : current
+  ), undefined)
 }

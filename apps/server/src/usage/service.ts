@@ -256,7 +256,7 @@ export class UsageService {
     if (updated.length !== 1) {
       throw new ApiError({
         code: 'device_limit_exceeded', message: 'Device limit is exceeded', statusCode: 409,
-        details: limit === null ? undefined : { metric: 'devices', limit: limit.toString() },
+        ...(limit === null ? {} : { details: { metric: 'devices', limit: limit.toString() } }),
       })
     }
   }
@@ -283,7 +283,7 @@ export class UsageService {
     if (updated.length !== 1) {
       throw new ApiError({
         code: 'workspace_limit_exceeded', message: 'Workspace limit is exceeded', statusCode: 409,
-        details: limit === null ? undefined : { metric: 'workspaces', limit: limit.toString() },
+        ...(limit === null ? {} : { details: { metric: 'workspaces', limit: limit.toString() } }),
       })
     }
   }

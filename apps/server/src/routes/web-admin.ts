@@ -98,7 +98,7 @@ const AdminJob = Type.Object({
 })
 const RiskRestriction = Type.Object({
   id: Type.String({ format: 'uuid' }),
-  scope: Type.Union([Type.Literal('authentication'), Type.Literal('recovery'), Type.Literal('device'), Type.Literal('sync_write'), Type.Literal('blob'), Type.Literal('billing'), Type.Literal('all')]),
+  scope: Type.Union([Type.Literal('authentication'), Type.Literal('recovery'), Type.Literal('registration'), Type.Literal('device'), Type.Literal('sync_write'), Type.Literal('blob'), Type.Literal('billing'), Type.Literal('all')]),
   action: Type.Union([Type.Literal('challenge'), Type.Literal('deny'), Type.Literal('lock'), Type.Literal('read_only'), Type.Literal('review')]),
   reasonCode: Type.String(), source: Type.String(), expiresAt: NullableTimestamp,
   createdBy: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]), revokedAt: NullableTimestamp,
@@ -112,7 +112,7 @@ const AccountRiskRestrictionBody = Type.Object({
   scope: Type.Union([Type.Literal('authentication'), Type.Literal('recovery'), Type.Literal('device'), Type.Literal('sync_write'), Type.Literal('blob'), Type.Literal('billing'), Type.Literal('all')]),
   action: Type.Union([Type.Literal('challenge'), Type.Literal('deny'), Type.Literal('lock'), Type.Literal('read_only'), Type.Literal('review')]),
   reasonCode: Type.String({ minLength: 3, maxLength: 100, pattern: '^[a-z0-9][a-z0-9_.-]*$' }),
-  expiresAt: Type.Optional(NullableTimestamp),
+  expiresAt: Type.Optional(Type.Union([Type.String({ format: 'date-time' }), Type.Null()])),
 })
 const AccountUsage = Type.Object({
   revision: Type.String(),

@@ -70,7 +70,12 @@ async function main(): Promise<void> {
   })
   if (verified.backupId !== backupId) throw new Error('Verified manifest backup ID does not match --backup-id')
   if (command === 'preflight') {
-    const result = await restorePreflight(config, verified, required(flags, 'manifest'), mode)
+    const result = await restorePreflight(
+      config,
+      verified,
+      required(flags, 'manifest'),
+      mode as 'clone' | 'preserve',
+    )
     process.stdout.write(`${JSON.stringify({ status: 'passed', backupId, mode, ...result })}\n`)
     return
   }
@@ -147,6 +152,7 @@ async function main(): Promise<void> {
       return created
     })
     await new RestoreFenceService(database).reconcile()
+    if (marker.authEpochAfter === null) throw new Error('Restore marker is missing the authentication epoch')
     process.stdout.write(`${JSON.stringify({ status: 'sanitized', markerId: marker.id, syncEpoch: marker.newSyncEpoch, authEpochAfter: marker.authEpochAfter.toString(), maintenance: 'offline', verifiedArtifacts: verified.artifacts, trustRevision: verified.trustRevision, sourceInstanceId: verified.instanceId, targetInstanceId: resultingInstanceId })}\n`)
   } finally {
     await database.close()

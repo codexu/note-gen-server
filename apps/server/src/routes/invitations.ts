@@ -7,10 +7,11 @@ import type { AuthService } from '../auth/service.js'
 import type { WebStepUpService } from '../step-up/service.js'
 import { assertTrustedOrigin, requireCsrf, requireWebSession, sessionContext, setSessionCookies, WEB_CSRF_COOKIE, WEB_SESSION_COOKIE } from './web-auth.js'
 import { ApiError } from '../errors.js'
+import { NullableTimestamp, Timestamp } from './api-schemas.js'
 
 const Invitation = Type.Object({
-  id: Type.String({ format: 'uuid' }), tokenHint: Type.String(), expiresAt: Type.String({ format: 'date-time' }), revokedAt: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
-  maxUses: Type.Integer(), useCount: Type.Integer(), note: Type.Union([Type.String(), Type.Null()]), createdAt: Type.String({ format: 'date-time' }), paused: Type.Boolean(),
+  id: Type.String({ format: 'uuid' }), tokenHint: Type.String(), expiresAt: Timestamp, revokedAt: NullableTimestamp,
+  maxUses: Type.Integer(), useCount: Type.Integer(), note: Type.Union([Type.String(), Type.Null()]), createdAt: Timestamp, paused: Type.Boolean(),
   delivery: Type.Union([Type.Null(), Type.Object({ status: Type.Union([Type.Literal('pending'), Type.Literal('sending'), Type.Literal('sent'), Type.Literal('dead_letter'), Type.Literal('delivery_unknown')]), errorCode: Type.Union([Type.String(), Type.Null()]) })]),
 })
 
@@ -37,7 +38,7 @@ export function createInvitationRoutes(config: AppConfig, invitations: Invitatio
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       return invitations.list(session.accountId)
     })
-    app.post('/v1/web/admin/invitations', { schema: { headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }), body: Type.Object({ expiresAt: Type.String({ format: 'date-time' }), maxUses: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })), note: Type.Optional(Type.String({ maxLength: 500 })), boundEmail: Type.Optional(Type.String({ minLength: 3, maxLength: 320 })), send: Type.Optional(Type.Boolean()) }), response: { 201: Type.Object({ id: Type.String({ format: 'uuid' }), token: Type.String(), url: Type.String(), expiresAt: Type.String({ format: 'date-time' }), deliveryQueued: Type.Boolean() }) } } }, async (request, reply) => {
+    app.post('/v1/web/admin/invitations', { schema: { headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }), body: Type.Object({ expiresAt: Type.String({ format: 'date-time' }), maxUses: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })), note: Type.Optional(Type.String({ maxLength: 500 })), boundEmail: Type.Optional(Type.String({ minLength: 3, maxLength: 320 })), send: Type.Optional(Type.Boolean()) }), response: { 201: Type.Object({ id: Type.String({ format: 'uuid' }), token: Type.String(), url: Type.String(), expiresAt: Timestamp, deliveryQueued: Type.Boolean() }) } } }, async (request, reply) => {
       assertTrustedOrigin(config, request.headers.origin)
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)
@@ -53,7 +54,7 @@ export function createInvitationRoutes(config: AppConfig, invitations: Invitatio
       await invitations.revoke(session.accountId, request.params.id)
       return reply.status(204).send(null)
     })
-    app.post('/v1/web/admin/invitations/:id/replace-and-send', { schema: { headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }), params: Type.Object({ id: Type.String({ format: 'uuid' }) }), response: { 201: Type.Object({ id: Type.String({ format: 'uuid' }), expiresAt: Type.String({ format: 'date-time' }), deliveryQueued: Type.Literal(true) }) } } }, async (request, reply) => {
+    app.post('/v1/web/admin/invitations/:id/replace-and-send', { schema: { headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }), params: Type.Object({ id: Type.String({ format: 'uuid' }) }), response: { 201: Type.Object({ id: Type.String({ format: 'uuid' }), expiresAt: Timestamp, deliveryQueued: Type.Literal(true) }) } } }, async (request, reply) => {
       assertTrustedOrigin(config, request.headers.origin)
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)

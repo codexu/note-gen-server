@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto'
 import { and, asc, desc, eq, sql } from 'drizzle-orm'
 import type { AppConfig } from '../config.js'
+import type { DatabaseContext } from '../database/client.js'
 import { accounts, supportCases, supportDiagnosticGrants, supportMessages } from '../database/schema.js'
 import { ApiError } from '../errors.js'
 import { assertAccountWriteAllowedInTransaction, type DeletionFenceTransaction } from '../compliance/deletion-fence.js'

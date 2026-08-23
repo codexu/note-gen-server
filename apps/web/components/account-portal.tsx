@@ -803,7 +803,7 @@ function OverviewSection({ overview, devices, onNavigate }: {
 }
 
 function sumByteStrings(...values: string[]): string {
-  return values.reduce((total, value) => total + BigInt(value || "0"), 0n).toString()
+  return values.reduce((total, value) => total + BigInt(value || "0"), BigInt(0)).toString()
 }
 
 function WorkspaceManagement({
@@ -1357,7 +1357,7 @@ function SystemManagement({
     <>
       {error ? <ErrorAlert message={error} /> : null}
       {managementError ? <ErrorAlert message={managementError} /> : null}
-      <ToggleGroup className="grid w-full grid-cols-2 sm:grid-cols-5" type="single" variant="outline" spacing={0} value={adminView} onValueChange={(value) => { if (value) onAdminViewChange(value as AdminDataView) }}>
+      <ToggleGroup className="grid w-full grid-cols-2 sm:grid-cols-5" variant="outline" spacing={0} value={[adminView]} onValueChange={(value) => { if (value[0]) onAdminViewChange(value[0] as AdminDataView) }}>
         <ToggleGroupItem value="overview">总览</ToggleGroupItem>
         <ToggleGroupItem value="accounts">账号</ToggleGroupItem>
         <ToggleGroupItem value="data">同步数据</ToggleGroupItem>

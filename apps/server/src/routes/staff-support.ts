@@ -3,6 +3,7 @@ import { Type } from '@sinclair/typebox'
 import type { StaffSessionService } from '../staff/session-service.js'
 import type { SupportService } from '../support/service.js'
 import { ApiError } from '../errors.js'
+import { NullableTimestamp, Timestamp } from './api-schemas.js'
 
 const STAFF_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -44,11 +45,11 @@ export function createStaffSupportRoutes(support: SupportService, sessions: Staf
 const staffHeaders = Type.Object({ 'x-staff-session-id': Type.String({ minLength: 36, maxLength: 36 }) })
 const caseSummary = Type.Object({
   id: Type.String({ format: 'uuid' }), category: Type.String(), severity: Type.String(), status: Type.String(), subject: Type.String(),
-  assignedStaffId: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]), lastMessageAt: Type.String({ format: 'date-time' }),
-  createdAt: Type.String({ format: 'date-time' }), updatedAt: Type.String({ format: 'date-time' }),
+  assignedStaffId: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]), lastMessageAt: NullableTimestamp,
+  createdAt: Timestamp, updatedAt: Timestamp,
 })
 const caseDetail = Type.Intersect([caseSummary, Type.Object({ messages: Type.Array(Type.Object({
-  id: Type.String({ format: 'uuid' }), authorType: Type.String(), visibility: Type.String(), body: Type.String(), createdAt: Type.String({ format: 'date-time' }),
+  id: Type.String({ format: 'uuid' }), authorType: Type.String(), visibility: Type.String(), body: Type.String(), createdAt: Timestamp,
 })) })])
 
 async function requireStaffSession(value: string | string[] | undefined, sessions: StaffSessionService, permission: 'support.read' | 'support.write' | 'support.diagnostics') {

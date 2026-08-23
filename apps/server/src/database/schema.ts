@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm'
 import {
   bigint, bigserial, boolean, check, foreignKey, index, integer, jsonb, pgEnum, pgTable,
-  primaryKey, text, timestamp, unique, uniqueIndex, uuid,
+  primaryKey, text, timestamp, uniqueIndex, uuid,
 } from 'drizzle-orm/pg-core'
 
 const timestamps = {
@@ -115,11 +115,7 @@ export const deploymentSettings = pgTable('deployment_settings', {
   initializedByAccountId: uuid('initialized_by_account_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  // PostgreSQL does not enforce singleton cardinality from a boolean primary key alone.
-  // This check makes the intended sole row explicit and keeps accidental ids invalid.
-  // The migration declares the same constraint for existing databases.
-])
+})
 
 /** Instance-wide write barrier, separate from deployment configuration revision. */
 export const maintenanceState = pgTable('maintenance_state', {

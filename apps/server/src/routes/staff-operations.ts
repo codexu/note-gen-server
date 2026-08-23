@@ -5,9 +5,8 @@ import type { StaffService } from '../staff/service.js'
 import type { StaffSessionService } from '../staff/session-service.js'
 import type { SupportService } from '../support/service.js'
 import { STAFF_SESSION_COOKIE } from './staff-auth.js'
+import { NullableTimestamp, Timestamp } from './api-schemas.js'
 
-const timestamp = Type.String({ format: 'date-time' })
-const nullableTimestamp = Type.Union([timestamp, Type.Null()])
 const nullableString = Type.Union([Type.String(), Type.Null()])
 
 export function createStaffOperationsRoutes(
@@ -20,7 +19,7 @@ export function createStaffOperationsRoutes(
       accountCount: Type.Integer(), activeAccountCount: Type.Integer(), newAccountCount: Type.Integer(),
       activeSubscriptionCount: Type.Integer(), openSupportCaseCount: Type.Integer(), urgentSupportCaseCount: Type.Integer(),
       reviewRiskEventCount: Type.Integer(), pendingDataRequestCount: Type.Integer(), activeStaffSessionCount: Type.Integer(),
-      generatedAt: timestamp,
+      generatedAt: Timestamp,
     }) } } }, async request => {
       const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
       return await staff.getOperationsOverview(session.staffId)
@@ -35,7 +34,7 @@ export function createStaffOperationsRoutes(
       response: { 200: Type.Array(Type.Object({
         id: Type.String({ format: 'uuid' }), login: Type.String(), identityState: Type.String(),
         status: Type.String(), workspaceCount: Type.Integer(), deviceCount: Type.Integer(),
-        subscriptionStatus: nullableString, createdAt: timestamp,
+        subscriptionStatus: nullableString, createdAt: Timestamp,
       })) },
     } }, async request => {
       const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
@@ -51,7 +50,7 @@ export function createStaffOperationsRoutes(
       response: { 200: Type.Array(Type.Object({
         id: Type.String(), eventType: Type.String(), accountId: nullableString, accountLogin: nullableString,
         outcome: Type.String(), reasonCodes: Type.Array(Type.String()), score: Type.Union([Type.Integer(), Type.Null()]),
-        createdAt: timestamp,
+        createdAt: Timestamp,
       })) },
     } }, async request => {
       const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
@@ -63,7 +62,7 @@ export function createStaffOperationsRoutes(
       response: { 200: Type.Array(Type.Object({
         id: Type.String({ format: 'uuid' }), accountId: nullableString, accountLogin: nullableString,
         provider: Type.String(), status: Type.String(), isCurrent: Type.Boolean(),
-        currentPeriodEnd: nullableTimestamp, createdAt: timestamp,
+        currentPeriodEnd: NullableTimestamp, createdAt: Timestamp,
       })) },
     } }, async request => {
       const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
@@ -75,7 +74,7 @@ export function createStaffOperationsRoutes(
       response: { 200: Type.Array(Type.Object({
         id: Type.String({ format: 'uuid' }), accountId: nullableString, accountLogin: nullableString,
         type: Type.String(), status: Type.String(), requestChannel: Type.String(),
-        dueAt: nullableTimestamp, createdAt: timestamp,
+        dueAt: NullableTimestamp, createdAt: Timestamp,
       })) },
     } }, async request => {
       const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
@@ -85,8 +84,8 @@ export function createStaffOperationsRoutes(
     if (support !== undefined) {
       app.get('/v1/staff/operations/support/cases', { schema: { response: { 200: Type.Array(Type.Object({
         id: Type.String({ format: 'uuid' }), category: Type.String(), severity: Type.String(), status: Type.String(),
-        subject: Type.String(), assignedStaffId: nullableString, lastMessageAt: nullableTimestamp,
-        createdAt: timestamp, updatedAt: timestamp,
+        subject: Type.String(), assignedStaffId: nullableString, lastMessageAt: NullableTimestamp,
+        createdAt: Timestamp, updatedAt: Timestamp,
       })) } } }, async request => {
         const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
         return await support.listForStaff(session.staffId, request.id)

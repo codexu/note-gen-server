@@ -10,6 +10,7 @@ import type { UsageService } from '../usage/service.js'
 import type { ComplianceService } from '../compliance/service.js'
 import type { RiskService } from '../risk/service.js'
 import type { MaintenanceCoordinator } from '../maintenance/coordinator.js'
+import { NullableTimestamp } from './api-schemas.js'
 
 export function createAccountContextRoutes(
   auth: AuthService,
@@ -26,7 +27,7 @@ export function createAccountContextRoutes(
     app.get('/v1/account/context', { schema: { response: { 200: Type.Object({
       account: Type.Object({ id: Type.String({ format: 'uuid' }), login: Type.String(), isAdmin: Type.Boolean(), totpEnabled: Type.Boolean() }),
       entitlements: Type.Object({ revision: Type.String(), features: Type.Record(Type.String(), Type.Boolean()), limits: Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Null()])) }),
-      usage: Type.Object({ enforced: Type.Boolean(), revision: Type.String(), metrics: Type.Record(Type.String(), Type.String()), updatedAt: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]) }),
+      usage: Type.Object({ enforced: Type.Boolean(), revision: Type.String(), metrics: Type.Record(Type.String(), Type.String()), updatedAt: NullableTimestamp }),
       restrictions: Type.Array(Type.Unknown()),
       actions: Type.Record(Type.String(), Type.Object({ effect: Type.Union([Type.Literal('allow'), Type.Literal('deny')]), reasonCode: Type.String() })),
       accountContextRevision: Type.String(),

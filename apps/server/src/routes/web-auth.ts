@@ -238,7 +238,7 @@ export function createWebAuthRoutes(
 
 async function recordWebAuthRiskEvent(
   risk: RiskService | undefined,
-  request: { body: Static<typeof CredentialsBody>, id: string, ip: string, headers: { 'user-agent'?: string | string[] }, log: { warn: (value: unknown, message: string) => void } },
+  request: { body: Static<typeof CredentialsBody>, id: string, ip: string, headers: Record<string, string | string[] | undefined>, log: { warn: (value: unknown, message: string) => void } },
   eventType: 'authentication.login' | 'authentication.registration',
   outcome: 'allowed' | 'rejected',
   error: unknown,
@@ -248,7 +248,9 @@ async function recordWebAuthRiskEvent(
   await risk.recordEvent({
     eventType, login: request.body.login, requestId: request.id, ip: request.ip,
     ...(typeof request.headers['user-agent'] === 'string' ? { userAgent: request.headers['user-agent'] } : {}),
-    accountId, outcome, reasonCode: error instanceof ApiError ? error.code : undefined,
+    ...(accountId === undefined ? {} : { accountId }),
+    outcome,
+    ...(error instanceof ApiError ? { reasonCode: error.code } : {}),
   }).catch((auditError: unknown) => request.log.warn({ err: auditError }, 'Failed to record authentication risk event'))
 }
 

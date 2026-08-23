@@ -119,7 +119,7 @@ export function createEventRoutes(
             if (message.type === 'document.subscribe'
               || message.type === 'document.unsubscribe') {
               handleDocumentSubscription(message, presenceConnection, presenceRooms)
-            } else {
+            } else if (message.type === 'presence.update' || message.type === 'presence.clear') {
               handlePresenceMessage(message, presenceConnection, presenceRooms)
             }
           } catch {
@@ -162,7 +162,7 @@ export function createEventRoutes(
             }))
           }
           authenticated = true
-          presenceConnection = {
+          const connection: PresenceConnection = {
             socket: currentSocket,
             deviceId: claims.deviceId,
             workspaceIds: new Set(uniqueWorkspaceIds),
@@ -170,14 +170,15 @@ export function createEventRoutes(
             presence: null,
             accountId: claims.accountId,
             credentialEpoch: claims.credentialEpoch,
-            instanceAuthEpoch: claims.instanceAuthEpoch,
-            issuedAt: claims.issuedAt,
+            ...(claims.instanceAuthEpoch === undefined ? {} : { instanceAuthEpoch: claims.instanceAuthEpoch }),
+            ...(claims.issuedAt === undefined ? {} : { issuedAt: claims.issuedAt }),
             rateTokens: REALTIME_BURST_BYTES,
             rateUpdatedAt: Date.now(),
           }
+          presenceConnection = connection
           for (const workspaceId of uniqueWorkspaceIds) {
             const room = presenceRooms.get(workspaceId) ?? new Set<PresenceConnection>()
-            room.add(presenceConnection)
+            room.add(connection)
             presenceRooms.set(workspaceId, room)
           }
           clearTimeout(authTimeout)

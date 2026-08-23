@@ -21,7 +21,7 @@ export function createStaffLegalHoldRoutes(holds: LegalHoldService, sessions: St
     app.post('/v1/internal/staff/compliance/legal-holds/:holdId/release', { config: { rateLimit: { max: 10, timeWindow: '1 hour' } }, schema: { headers, params: holdParams, body, response: { 204: Type.Null() } } }, async (request, reply) => {
       const session = await requireHighAssuranceStaffSession(request.headers['x-staff-session-id'], sessions)
       await holds.release(request.params.holdId, session.staffId, request.body.reasonCode)
-      return reply.status(204).send()
+      return reply.status(204).send(null)
     })
   }
 }

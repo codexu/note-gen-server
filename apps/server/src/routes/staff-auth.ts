@@ -55,7 +55,11 @@ export function createStaffAuthRoutes(
       assertLocalStaffAuthAvailable(config)
       assertTrustedOrigin(config, request.headers.origin)
       const session = await requireStaffCookieSession(request.cookies[STAFF_SESSION_COOKIE], sessions)
-      sessions.verifyCsrf(session, request.cookies[STAFF_CSRF_COOKIE], request.headers['x-csrf-token'])
+      sessions.verifyCsrf(
+        session,
+        request.cookies[STAFF_CSRF_COOKIE],
+        typeof request.headers['x-csrf-token'] === 'string' ? request.headers['x-csrf-token'] : undefined,
+      )
       await sessions.revokeSession(session.sessionId)
       clearStaffCookies(config, reply)
       return reply.status(204).send(null)

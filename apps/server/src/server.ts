@@ -78,7 +78,7 @@ async function main(): Promise<void> {
         instanceId,
         syncEpoch,
         database,
-        blobStorage: { async check() {}, async close() {} },
+        blobStorage: { async check() {} },
         installation: installationProbe,
         onInstallationComplete: finishInstallation,
       })
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
     const workspaces = new WorkspaceService(database, notifier)
     const workspaceCollaboration = new WorkspaceCollaborationService(database, workspaces, notifier)
     const syncProtocol = new DurableSyncService(database, workspaces, notifier, () => config.maxObjectBytes,
-      undefined, undefined, syncEpoch)
+      syncEpoch)
     const blobService = new BlobService(
       database, workspaces, blobStorage, () => config.maxBlobBytes, config.blobPartBytes,
       undefined, undefined, syncEpoch,
@@ -197,10 +197,10 @@ async function main(): Promise<void> {
       invitations,
       identities,
       usage,
-      mailProvider,
+      ...(mailProvider === undefined ? {} : { mailProvider }),
       mailOutbox,
       mailSecrets,
-      mailAdmin,
+      ...(mailAdmin === undefined ? {} : { mailAdmin }),
       risk,
       maintenanceCoordinator,
       accountAudit,

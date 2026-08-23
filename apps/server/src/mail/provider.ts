@@ -47,7 +47,8 @@ export function isMailMessage(value: unknown): value is MailMessage {
   const template = candidate.template as MailTemplateId
   return entries.length <= templateVariableKeys[template].length && entries.every(([key, item]) => (
     templateVariableKeys[template].includes(key) && typeof item === 'string' && item.length <= 8_192 && !/[\r\n]/.test(item)
-  )) && (variables.actionUrl === undefined || isSafeActionUrl(variables.actionUrl))
+  )) && (variables.actionUrl === undefined
+    || (typeof variables.actionUrl === 'string' && isSafeActionUrl(variables.actionUrl)))
 }
 
 interface MailLogger { info(bindings: Record<string, unknown>, message: string): void }

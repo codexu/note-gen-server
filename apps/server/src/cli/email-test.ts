@@ -18,10 +18,12 @@ async function main(): Promise<void> {
   try {
     const persistedInstallation = await new InstallationService(database, config, true).persistedSettings()
     if (persistedInstallation === undefined) throw new Error('Server installation is not complete')
+    if (persistedInstallation.deploymentMode !== 'self-hosted') {
+      throw new Error('This command is available only for self-hosted installations')
+    }
     applyPersistedDeploymentProfile(
       config,
       persistedInstallation.deploymentMode,
-      persistedInstallation.registrationPolicy === 'public' ? 'public' : 'disabled',
     )
     const deployment = new DeploymentService(database, config)
     await deployment.initialize()

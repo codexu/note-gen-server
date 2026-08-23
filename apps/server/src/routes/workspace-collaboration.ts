@@ -5,6 +5,7 @@ import { requireAuth } from '../auth/http-auth.js'
 import type { TokenService } from '../auth/tokens.js'
 import type { WorkspaceCollaborationService } from '../workspaces/collaboration-service.js'
 import { workspaceCapabilities } from '../workspaces/capabilities.js'
+import { NullableTimestamp, Timestamp } from './api-schemas.js'
 
 const WorkspaceParams = Type.Object({ workspaceId: Type.String({ format: 'uuid' }) })
 const MemberParams = Type.Object({
@@ -16,12 +17,16 @@ const InvitationParams = Type.Object({
   invitationId: Type.String({ format: 'uuid' }),
 })
 const Role = Type.Union([Type.Literal('viewer'), Type.Literal('editor'), Type.Literal('manager')])
-const Capability = Type.Union(workspaceCapabilities.map(capability => Type.Literal(capability)))
+const Capability = Type.Union([
+  Type.Literal('content.read'), Type.Literal('content.create'), Type.Literal('content.update'),
+  Type.Literal('content.delete'), Type.Literal('history.view'), Type.Literal('history.restore'),
+  Type.Literal('member.invite'), Type.Literal('member.update'), Type.Literal('member.remove'),
+  Type.Literal('workspace.rename'), Type.Literal('workspace.delete'),
+])
 const Membership = Type.Object({
   role: Role,
   capabilities: Type.Optional(Type.Array(Capability, { uniqueItems: true, maxItems: workspaceCapabilities.length })),
 })
-const NullableTimestamp = Type.Union([Type.String({ format: 'date-time' }), Type.Null()])
 const MemberResponse = Type.Object({
   accountId: Type.String({ format: 'uuid' }),
   login: Type.String(),
@@ -43,11 +48,11 @@ const InvitationResponse = Type.Object({
   ]),
   invitedByAccountId: Type.String({ format: 'uuid' }),
   acceptedByAccountId: Type.Union([Type.String({ format: 'uuid' }), Type.Null()]),
-  expiresAt: Type.String({ format: 'date-time' }),
+  expiresAt: Timestamp,
   acceptedAt: NullableTimestamp,
   revokedAt: NullableTimestamp,
-  createdAt: Type.String({ format: 'date-time' }),
-  updatedAt: Type.String({ format: 'date-time' }),
+  createdAt: Timestamp,
+  updatedAt: Timestamp,
 })
 
 export function createWorkspaceCollaborationRoutes(

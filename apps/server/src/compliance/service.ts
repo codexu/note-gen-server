@@ -20,12 +20,13 @@ export class ComplianceService {
     return createHmac('sha256', this.config.authSecret).update(`compliance-subject:v1:${accountId}`).digest('base64url')
   }
 
-  async listCurrentDocuments(locale: string): Promise<Array<{ id: string, type: string, version: string, contentRef: string, contentHash: string, effectiveAt: Date, requiresReacceptance: boolean }>> {
-    return await this.database.db.select({
+  async listCurrentDocuments(locale: string): Promise<Array<{ id: string, type: PolicyDocumentType, version: string, contentRef: string, contentHash: string, effectiveAt: Date, requiresReacceptance: boolean }>> {
+    const documents = await this.database.db.select({
       id: policyDocuments.id, type: policyDocuments.type, version: policyDocuments.version, contentRef: policyDocuments.contentRef,
       contentHash: policyDocuments.contentHash, effectiveAt: policyDocuments.effectiveAt, requiresReacceptance: policyDocuments.requiresReacceptance,
     }).from(policyDocuments).where(and(eq(policyDocuments.locale, locale), lte(policyDocuments.effectiveAt, new Date()), isNull(policyDocuments.retiredAt)))
       .orderBy(policyDocuments.type, desc(policyDocuments.effectiveAt))
+    return documents.map(document => ({ ...document, type: document.type as PolicyDocumentType }))
   }
 
   async requiredReacceptance(accountId: string): Promise<string[]> {
@@ -108,11 +109,12 @@ export class ComplianceService {
     })
   }
 
-  async listDataRequests(accountId: string): Promise<Array<{ id: string, type: string, status: string, dueAt: Date | null, completedAt: Date | null, createdAt: Date }>> {
-    return await this.database.db.select({
+  async listDataRequests(accountId: string): Promise<Array<{ id: string, type: DataRequestType, status: string, dueAt: Date | null, completedAt: Date | null, createdAt: Date }>> {
+    const requests = await this.database.db.select({
       id: dataRequests.id, type: dataRequests.type, status: dataRequests.status, dueAt: dataRequests.dueAt,
       completedAt: dataRequests.completedAt, createdAt: dataRequests.createdAt,
     }).from(dataRequests).where(eq(dataRequests.accountId, accountId)).orderBy(desc(dataRequests.createdAt))
+    return requests.map(request => ({ ...request, type: request.type as DataRequestType }))
   }
 
   private assertInternalTest(): void {

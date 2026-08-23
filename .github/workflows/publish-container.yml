@@ -3,7 +3,7 @@ name: Publish container image
 on:
   push:
     branches:
-      - feat/sync-foundation
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -44,7 +44,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/feat/sync-foundation' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-

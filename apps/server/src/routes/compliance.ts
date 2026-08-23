@@ -6,13 +6,14 @@ import type { WebSessionService } from '../auth/web-session-service.js'
 import type { WebStepUpService } from '../step-up/service.js'
 import type { AppConfig } from '../config.js'
 import { assertTrustedOrigin, requireCsrf, requireWebSession, WEB_CSRF_COOKIE, WEB_SESSION_COOKIE } from './web-auth.js'
+import { NullableTimestamp, Timestamp } from './api-schemas.js'
 
 const PolicyType = Type.Union([Type.Literal('terms'), Type.Literal('privacy'), Type.Literal('data_processing'), Type.Literal('cookie')])
 const DataRequestType = Type.Union([Type.Literal('access'), Type.Literal('export'), Type.Literal('correct'), Type.Literal('delete'), Type.Literal('restrict'), Type.Literal('object')])
 
 export function createComplianceRoutes(config: AppConfig, compliance: ComplianceService, webSessions: WebSessionService, deletion?: DeletionService, stepUps?: WebStepUpService): FastifyPluginAsyncTypebox {
   return async function complianceRoutes(app) {
-    app.get('/v1/web/policies/current', { schema: { querystring: Type.Object({ locale: Type.Optional(Type.String({ minLength: 2, maxLength: 20 })) }), response: { 200: Type.Array(Type.Object({ id: Type.String({ format: 'uuid' }), type: PolicyType, version: Type.String(), contentRef: Type.String(), contentHash: Type.String(), effectiveAt: Type.String({ format: 'date-time' }), requiresReacceptance: Type.Boolean() })) } } }, async (request) => {
+    app.get('/v1/web/policies/current', { schema: { querystring: Type.Object({ locale: Type.Optional(Type.String({ minLength: 2, maxLength: 20 })) }), response: { 200: Type.Array(Type.Object({ id: Type.String({ format: 'uuid' }), type: PolicyType, version: Type.String(), contentRef: Type.String(), contentHash: Type.String(), effectiveAt: Timestamp, requiresReacceptance: Type.Boolean() })) } } }, async (request) => {
       return await compliance.listCurrentDocuments(request.query.locale ?? 'en')
     })
 
@@ -30,13 +31,13 @@ export function createComplianceRoutes(config: AppConfig, compliance: Compliance
       return reply.status(202).send(created)
     })
 
-    app.get('/v1/web/account/data-requests', { schema: { response: { 200: Type.Array(Type.Object({ id: Type.String({ format: 'uuid' }), type: DataRequestType, status: Type.String(), dueAt: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]), completedAt: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]), createdAt: Type.String({ format: 'date-time' }) })) } } }, async (request) => {
+    app.get('/v1/web/account/data-requests', { schema: { response: { 200: Type.Array(Type.Object({ id: Type.String({ format: 'uuid' }), type: DataRequestType, status: Type.String(), dueAt: NullableTimestamp, completedAt: NullableTimestamp, createdAt: Timestamp })) } } }, async (request) => {
       const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
       return await compliance.listDataRequests(session.accountId)
     })
 
     if (deletion !== undefined) {
-      app.post('/v1/web/account/deletion', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } }, schema: { headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }), body: Type.Object({ password: Type.String({ minLength: 8, maxLength: 1_024 }), confirmation: Type.Literal('DELETE') }), response: { 202: Type.Object({ caseId: Type.String({ format: 'uuid' }), status: Type.Union([Type.Literal('cooling_off'), Type.Literal('held')]), cancelUntil: Type.String({ format: 'date-time' }), purgeAfter: Type.String({ format: 'date-time' }), cancelToken: Type.String() }) } } }, async (request, reply) => {
+      app.post('/v1/web/account/deletion', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } }, schema: { headers: Type.Object({ 'x-step-up-token': Type.Optional(Type.String()) }), body: Type.Object({ password: Type.String({ minLength: 8, maxLength: 1_024 }), confirmation: Type.Literal('DELETE') }), response: { 202: Type.Object({ caseId: Type.String({ format: 'uuid' }), status: Type.Union([Type.Literal('cooling_off'), Type.Literal('held')]), cancelUntil: Timestamp, purgeAfter: Timestamp, cancelToken: Type.String() }) } } }, async (request, reply) => {
         assertTrustedOrigin(config, request.headers.origin)
         const session = await requireWebSession(request.cookies[WEB_SESSION_COOKIE], webSessions)
         requireCsrf(request.headers['x-csrf-token'], request.cookies[WEB_CSRF_COOKIE], session, webSessions)

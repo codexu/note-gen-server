@@ -122,26 +122,27 @@ export async function buildApp(
     ? dependencies.database as DatabaseContext : undefined)
   registerErrorHandler(app)
   app.addHook('onRequest', async (request) => {
+    const path = request.url.split('?', 1)[0] ?? '/'
     const safetyFailure = dependencies.deployment?.getSafetyFailure()
-    if (safetyFailure !== undefined && request.url.split('?')[0] !== '/health/live' && request.url.split('?')[0] !== '/health/ready') {
+    if (safetyFailure !== undefined && path !== '/health/live' && path !== '/health/ready') {
       throw new ApiError({
         code: 'startup_safety_gate_closed', message: 'Instance startup safety gate is closed', statusCode: 503,
         retryable: false, details: { reason: safetyFailure },
       })
     }
     if (dependencies.maintenanceCoordinator !== undefined) {
-      await dependencies.maintenanceCoordinator.requireServingAllowed(request.url.split('?')[0])
+      await dependencies.maintenanceCoordinator.requireServingAllowed(path)
     }
   })
   app.addHook('preHandler', async (request) => {
-    const path = request.url.split('?')[0]
+    const path = request.url.split('?', 1)[0] ?? '/'
     if (dependencies.maintenanceCoordinator !== undefined && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       await dependencies.maintenanceCoordinator.requireMutationAllowed(path)
     }
   })
   app.addHook('preHandler', async (request) => {
     if (dependencies.tokens === undefined || dependencies.auth === undefined) return
-    const path = request.url.split('?')[0]
+    const path = request.url.split('?', 1)[0] ?? '/'
     // All Workspace mutations create or alter sync-domain state, including
     // key envelopes and recovery material. Do not limit the policy/risk gate
     // to the newest durable-command route: an older client could otherwise

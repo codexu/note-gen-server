@@ -44,6 +44,6 @@ export class OperationPolicy {
   allow(): PolicyDecision { return { effect: 'allow' } }
 
   deny(code: string, statusCode: 403 | 409 | 423 | 429 | 503, retryable = false, details?: Record<string, string | number | boolean>): PolicyDecision {
-    return { effect: 'deny', code, statusCode, retryable, details }
+    return { effect: 'deny', code, statusCode, retryable, ...(details === undefined ? {} : { details }) }
   }
 }

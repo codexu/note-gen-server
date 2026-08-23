@@ -264,7 +264,7 @@ export function DeviceConnection({
         <ThemeToggle />
       </header>
       )}
-      {signedIn ? <ToggleGroup className="grid w-full grid-cols-2" type="single" variant="outline" spacing={0} value={method} disabled={pairingBusy} onValueChange={(value) => { if (value) void changeMethod(value as "code" | "qr") }}><ToggleGroupItem value="code">输入验证码</ToggleGroupItem><ToggleGroupItem value="qr">手机扫码</ToggleGroupItem></ToggleGroup> : null}
+      {signedIn ? <ToggleGroup className="grid w-full grid-cols-2" variant="outline" spacing={0} value={[method]} disabled={pairingBusy} onValueChange={(value) => { if (value[0]) void changeMethod(value[0] as "code" | "qr") }}><ToggleGroupItem value="code">输入验证码</ToggleGroupItem><ToggleGroupItem value="qr">手机扫码</ToggleGroupItem></ToggleGroup> : null}
       <div className="grid w-full items-start gap-6">
       {method === "code" ? (
       <Card className="w-full bg-card/90 shadow-sm">

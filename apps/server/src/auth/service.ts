@@ -36,7 +36,7 @@ function parseCachedRefreshSession(value: string, accountId: string, deviceId: s
     if (session.accountId !== accountId || session.deviceId !== deviceId
       || typeof session.accessToken !== 'string' || session.accessToken.length < 16
       || typeof session.refreshToken !== 'string' || session.refreshToken.length < 20
-      || !Number.isSafeInteger(expiresIn) || expiresIn <= 0 || expiresIn > 900) return null
+      || typeof expiresIn !== 'number' || !Number.isSafeInteger(expiresIn) || expiresIn <= 0 || expiresIn > 900) return null
     return {
       accountId: session.accountId, deviceId: session.deviceId,
       accessToken: session.accessToken, refreshToken: session.refreshToken,
@@ -327,8 +327,6 @@ export class AuthService {
       await tx.update(devices).set({ lastSeenAt: now, updatedAt: now }).where(eq(devices.id, deviceId))
       return {
         compromised: false as const,
-        accountId: stored.accountId,
-        deviceId: stored.deviceId,
         ...session,
       }
     })

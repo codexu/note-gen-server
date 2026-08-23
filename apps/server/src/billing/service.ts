@@ -114,7 +114,8 @@ export class EntitlementService {
     if (input.actorStaffId === undefined || this.staff === undefined) {
       throw new ApiError({ code: 'billing_staff_authority_required', message: 'Staff billing authority is required', statusCode: 403 })
     }
-    await this.staff.requirePermission(input.actorStaffId, 'billing.grant')
+    const actorStaffId = input.actorStaffId
+    await this.staff.requirePermission(actorStaffId, 'billing.grant')
     if (input.expiresAt <= new Date()) throw new ApiError({ code: 'billing_grant_expiry_invalid', message: 'Internal grant expiry must be in the future', statusCode: 400 })
     const entitlements = parseDocument(input.entitlements)
     return await this.database.db.transaction(async (tx) => {
@@ -133,7 +134,7 @@ export class EntitlementService {
       await tx.update(billingAccountStates).set({ revision: sql`${billingAccountStates.revision} + 1`, updatedAt: new Date() })
         .where(eq(billingAccountStates.accountId, input.accountId))
       await this.audit?.recordInTransaction(tx, {
-        actorType: 'staff', actorId: input.actorStaffId, action: 'billing.entitlement_grant.create',
+        actorType: 'staff', actorId: actorStaffId, action: 'billing.entitlement_grant.create',
         targetType: 'account', targetId: input.accountId, ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
         metadata: { grantId: created.id, sourceRef: input.sourceRef, priority: input.priority ?? 100, expiresAt: input.expiresAt.toISOString() },
       })

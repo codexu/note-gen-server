@@ -29,8 +29,8 @@ export class RestoreFenceService {
         const restoredAccounts = await tx.select({ id: accounts.id }).from(accounts)
         if (restoredAccounts.length > 0) {
           await tx.insert(riskRestrictions).values(restoredAccounts.map(account => ({
-            subjectType: 'account', subjectRef: account.id, scope: 'authentication', action: 'review',
-            reasonCode: 'credential_review_required', source: 'automatic',
+            subjectType: 'account' as const, subjectRef: account.id, scope: 'authentication' as const,
+            action: 'review' as const, reasonCode: 'credential_review_required', source: 'automatic' as const,
           }))).onConflictDoNothing()
         }
         const now = new Date()

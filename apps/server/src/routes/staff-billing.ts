@@ -19,7 +19,9 @@ export function createStaffBillingRoutes(entitlements: EntitlementService, sessi
       const requestHash = createHash('sha256').update(JSON.stringify(request.body)).digest('base64url')
       return reply.status(201).send(await entitlements.createInternalGrant({
         accountId: request.params.accountId, sourceRef: request.body.sourceRef, requestHash,
-        entitlements: request.body.entitlements, expiresAt, priority: request.body.priority, reason: request.body.reason,
+        entitlements: request.body.entitlements, expiresAt,
+        ...(request.body.priority === undefined ? {} : { priority: request.body.priority }),
+        ...(request.body.reason === undefined ? {} : { reason: request.body.reason }),
         actorStaffId: session.staffId, requestId: request.id,
       }))
     })

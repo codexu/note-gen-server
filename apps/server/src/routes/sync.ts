@@ -4,8 +4,7 @@ import type { AuthService } from '../auth/service.js'
 import { requireAuth } from '../auth/http-auth.js'
 import type { TokenService } from '../auth/tokens.js'
 import type { DurableSyncService } from '../durable-sync/service.js'
-import { syncObjectKinds } from '../sync/types.js'
-import { workspaceCapabilities } from '../workspaces/capabilities.js'
+import { NullableTimestamp, SyncObjectKindSchema, Timestamp } from './api-schemas.js'
 
 const Counter = Type.String({ pattern: '^\\d{1,19}$' })
 const Hash = Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' })
@@ -15,8 +14,13 @@ const ObjectVersionParams = Type.Object({
   objectId: Type.String({ format: 'uuid' }),
   revision: Counter,
 })
-const Kind = Type.Union(syncObjectKinds.map(kind => Type.Literal(kind)))
-const Capability = Type.Union(workspaceCapabilities.map(capability => Type.Literal(capability)))
+const Kind = SyncObjectKindSchema
+const Capability = Type.Union([
+  Type.Literal('content.read'), Type.Literal('content.create'), Type.Literal('content.update'),
+  Type.Literal('content.delete'), Type.Literal('history.view'), Type.Literal('history.restore'),
+  Type.Literal('member.invite'), Type.Literal('member.update'), Type.Literal('member.remove'),
+  Type.Literal('workspace.rename'), Type.Literal('workspace.delete'),
+])
 const Envelope = {
   keyVersion: Type.Integer({ minimum: 1 }),
   ciphertext: Type.String({ pattern: '^[A-Za-z0-9_-]+$' }),
@@ -55,7 +59,7 @@ const SyncEvent = Type.Object({
   ciphertext: NullableString,
   ciphertextHash: Type.Union([Hash, Type.Null()]),
   metadata: Type.Record(Type.String(), Type.Unknown()),
-  createdAt: Type.String({ format: 'date-time' }),
+  createdAt: Timestamp,
 })
 const ObjectVersion = Type.Object({
   workspaceId: Type.String({ format: 'uuid' }),
@@ -72,7 +76,7 @@ const ObjectVersion = Type.Object({
   blobRefs: Type.Array(Hash),
   sourceDeviceId: Type.String({ format: 'uuid' }),
   deleted: Type.Boolean(),
-  createdAt: Type.String({ format: 'date-time' }),
+  createdAt: Timestamp,
 })
 const Conflict = Type.Object({
   workspaceId: Type.String({ format: 'uuid' }),
@@ -89,9 +93,9 @@ const Conflict = Type.Object({
   createdSequence: Counter,
   resolvedSequence: NullableCounter,
   resolvedByDeviceId: NullableUuid,
-  resolvedAt: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
-  createdAt: Type.String({ format: 'date-time' }),
-  updatedAt: Type.String({ format: 'date-time' }),
+  resolvedAt: NullableTimestamp,
+  createdAt: Timestamp,
+  updatedAt: Timestamp,
 })
 const Command = Type.Union([
   Type.Object({
@@ -220,7 +224,7 @@ export function createSyncRoutes(
             }),
             keyVersions: Type.Array(Type.Object({
               keyVersion: Type.Integer({ minimum: 1 }),
-              createdAt: Type.String({ format: 'date-time' }),
+              createdAt: Timestamp,
             })),
             syncEpoch: Type.String({ format: 'uuid' }),
             websocketUrl: Type.String({ format: 'uri' }),
@@ -358,7 +362,7 @@ export function createSyncRoutes(
             objectId: Type.String({ format: 'uuid' }), kind: Kind, parentObjectId: NullableUuid,
             nameCiphertext: NullableString, nameBlindIndexPresent: Type.Boolean(), currentRevision: Counter,
             ciphertext: Type.String(), ciphertextHash: Hash, keyVersion: Type.Integer({ minimum: 1 }),
-            blobRefs: Type.Array(Hash), deletedAt: Type.Union([Type.String({ format: 'date-time' }), Type.Null()]),
+            blobRefs: Type.Array(Hash), deletedAt: NullableTimestamp,
             document: Type.Union([Type.Object({
               documentId: Type.String(), latestDocumentSequence: Counter, checkpointDocumentSequence: Counter,
               checkpointId: NullableUuid, checkpointKeyVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
@@ -387,7 +391,7 @@ export function createSyncRoutes(
             workspaceId: Type.String({ format: 'uuid' }), documentId: Type.String(), documentSequence: Counter,
             updateId: Type.String({ format: 'uuid' }), eventSequence: Counter,
             sourceDeviceId: Type.String({ format: 'uuid' }), keyVersion: Type.Integer({ minimum: 1 }),
-            ciphertext: Type.String(), ciphertextHash: Hash, createdAt: Type.String({ format: 'date-time' }),
+            ciphertext: Type.String(), ciphertextHash: Hash, createdAt: Timestamp,
           })),
           checkpoint: Type.Union([Type.Object({
             objectId: Type.String({ format: 'uuid' }), documentSequence: Counter,

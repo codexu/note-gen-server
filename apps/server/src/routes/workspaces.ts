@@ -113,6 +113,7 @@ export function createWorkspaceRoutes(
             owner: Type.Boolean(),
             role: Type.Union([
               Type.Literal('owner'), Type.Literal('viewer'), Type.Literal('editor'), Type.Literal('manager'),
+              Type.Null(),
             ]),
             capabilities: Type.Array(Type.String()),
             nameCiphertext: Type.String(),

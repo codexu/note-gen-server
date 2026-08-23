@@ -96,9 +96,9 @@ export class DurableSyncService {
     private readonly workspaces: WorkspaceService,
     private readonly notifier: ChangeNotifier,
     private readonly maxObjectBytes: number | (() => number),
+    private readonly syncEpoch: string,
     private readonly usage?: UsageService,
     private readonly storageLimitResolver?: (accountId: string) => Promise<bigint | null>,
-    private readonly syncEpoch?: string,
   ) {}
 
   async session(
@@ -109,7 +109,6 @@ export class DurableSyncService {
     protocolVersion: number,
     expectedSyncEpoch?: string,
   ) {
-    if (this.syncEpoch === undefined) throw new Error('Protocol v1 requires a sync epoch')
     if (expectedSyncEpoch !== undefined) this.#assertSyncEpoch(expectedSyncEpoch)
     const access = await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const cursor = counter(cursorValue, 'cursor')
@@ -151,7 +150,7 @@ export class DurableSyncService {
     return {
       protocol: {
         requestedVersion: protocolVersion,
-        selectedVersion: 1,
+        selectedVersion: 1 as const,
         compatible: protocolVersion === 1,
       },
       workspace: {
@@ -206,7 +205,7 @@ export class DurableSyncService {
         results.push(rejected)
       }
     }
-    return { results, ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }) }
+    return { results, syncEpoch: this.syncEpoch }
   }
 
   async recordCommandIngress(accountId: string, workspaceId: string, bytes: bigint, requestId: string): Promise<void> {
@@ -241,7 +240,7 @@ export class DurableSyncService {
       nextCursor: page.at(-1)?.sequence ?? after,
       latestSequence: latestSequence.toString(),
       hasMore,
-      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+      syncEpoch: this.syncEpoch,
     }
   }
 
@@ -267,7 +266,7 @@ export class DurableSyncService {
     }).returning({ acknowledgedSequence: syncDeviceCursors.acknowledgedSequence })
     return {
       acknowledgedSequence: (cursor?.acknowledgedSequence ?? through).toString(),
-      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+      syncEpoch: this.syncEpoch,
     }
   }
 
@@ -325,7 +324,7 @@ export class DurableSyncService {
     const resources = resourceRows.map(row => withCurrentRevision(row.version))
     return {
       object: withCurrentRevision(version), resources,
-      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+      syncEpoch: this.syncEpoch,
     }
   }
 
@@ -351,7 +350,7 @@ export class DurableSyncService {
       versions: page.map(serializeObjectVersion),
       nextBefore: hasMore ? page.at(-1)?.revision.toString() ?? null : null,
       hasMore,
-      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+      syncEpoch: this.syncEpoch,
     }
   }
 
@@ -461,7 +460,7 @@ export class DurableSyncService {
       conflicts: unresolved.map(serializeConflict),
       nextObjectId: hasMore ? page.at(-1)?.manifest.objectId ?? null : null,
       hasMore,
-      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+      syncEpoch: this.syncEpoch,
     }
   }
 
@@ -507,12 +506,12 @@ export class DurableSyncService {
       checkpoint,
       nextDocumentSequence: page.at(-1)?.documentSequence.toString() ?? after,
       hasMore,
-      ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+      syncEpoch: this.syncEpoch,
     }
   }
 
   #assertSyncEpoch(expectedSyncEpoch: string | undefined): void {
-    if (this.syncEpoch !== undefined && expectedSyncEpoch !== this.syncEpoch) {
+    if (expectedSyncEpoch !== this.syncEpoch) {
       throw new ApiError({ code: 'sync_epoch_changed', message: 'Server restore epoch changed; re-bootstrap before continuing', statusCode: 409 })
     }
   }
@@ -531,7 +530,7 @@ export class DurableSyncService {
         eq(syncCommands.workspaceId, workspaceId), eq(syncCommands.commandId, command.commandId),
       )).limit(1)
       if (previous !== undefined) {
-        if (this.syncEpoch !== undefined && previous.syncEpoch !== this.syncEpoch) {
+        if (previous.syncEpoch !== this.syncEpoch) {
           throw new ApiError({
             code: 'command_id_reused',
             message: 'Command ID belongs to another server restore epoch',
@@ -547,7 +546,7 @@ export class DurableSyncService {
       const applied = await this.#apply(tx, accountId, deviceId, workspaceId, command, storageLimit)
       await tx.insert(syncCommands).values({
         workspaceId, commandId: command.commandId, sourceDeviceId: deviceId, requestHash,
-        ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+        syncEpoch: this.syncEpoch,
         result: applied as unknown as Record<string, unknown>,
       })
       const releasesStorage = command.type === 'delete-object' || command.type === 'delete-subtree'
@@ -590,7 +589,7 @@ export class DurableSyncService {
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       await tx.insert(syncCommands).values({
         workspaceId, commandId: command.commandId, sourceDeviceId: deviceId, requestHash,
-        ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
+        syncEpoch: this.syncEpoch,
         result: result as unknown as Record<string, unknown>,
       }).onConflictDoNothing()
     })
@@ -1149,7 +1148,7 @@ export class DurableSyncService {
         eq(syncCommands.workspaceId, workspaceId), eq(syncCommands.commandId, command.requiresCommandId),
       )).limit(1)
       if (required === undefined || required.result.status !== 'applied'
-        || (this.syncEpoch !== undefined && required.syncEpoch !== this.syncEpoch)) {
+        || required.syncEpoch !== this.syncEpoch) {
         throw new ApiError({
           code: 'required_command_not_applied', message: 'Required command was not applied',
           statusCode: 409,

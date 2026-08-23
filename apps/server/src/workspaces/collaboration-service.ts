@@ -48,10 +48,13 @@ export class WorkspaceCollaborationService {
       accountId: workspace.ownerAccountId,
       login: workspace.ownerLogin,
       role: 'owner' as const,
-      capabilities: workspaceCapabilities,
+      capabilities: [...workspaceCapabilities],
       joinedAt: null,
       updatedAt: null,
-    }, ...members]
+    }, ...members.map(member => ({
+      ...member,
+      capabilities: normalizeWorkspaceCapabilities(member.capabilities),
+    }))]
   }
 
   async listInvitations(accountId: string, workspaceId: string) {
@@ -198,7 +201,7 @@ export class WorkspaceCollaborationService {
       accountId: member.accountId,
       login: account.login,
       role: member.role,
-      capabilities: member.capabilities,
+      capabilities: normalizeWorkspaceCapabilities(member.capabilities),
       joinedAt: member.joinedAt,
       updatedAt: member.updatedAt,
     }
@@ -308,7 +311,7 @@ function tokenDigest(token: string): string {
 
 function serializeInvitation(invitation: typeof workspaceInvitations.$inferSelect) {
   const { tokenHash: _tokenHash, ...safe } = invitation
-  return safe
+  return { ...safe, capabilities: normalizeWorkspaceCapabilities(safe.capabilities) }
 }
 
 function workspaceNotFound(): ApiError {

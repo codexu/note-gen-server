@@ -78,7 +78,8 @@ export class LegalHoldService {
         }
       }
       await this.audit?.recordInTransaction(tx, {
-        actorType: 'staff', actorId: actorStaffId, action: 'legal-hold.release', targetType: 'account', targetId: hold.accountId ?? undefined,
+        actorType: 'staff', actorId: actorStaffId, action: 'legal-hold.release', targetType: 'account',
+        ...(hold.accountId === null ? {} : { targetId: hold.accountId }),
         metadata: { holdId, reasonCode, authority: 'staff' },
       })
     })

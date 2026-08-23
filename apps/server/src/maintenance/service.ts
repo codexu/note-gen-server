@@ -3,7 +3,7 @@ import { and, asc, eq, isNull, lt, or, sql } from 'drizzle-orm'
 import type { AppConfig } from '../config.js'
 import type { DatabaseContext } from '../database/client.js'
 import {
-  blobs, blobUploads, bootstrapSessions, deviceAuthorizations, devicePairings,
+  blobUploads, bootstrapSessions, deviceAuthorizations, devicePairings,
   stepUpGrants, supportDiagnosticGrants, syncBootstrapSessions, syncDeviceCursors,
   webSessions, workspaces,
 } from '../database/schema.js'

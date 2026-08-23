@@ -1,6 +1,8 @@
 import { loadConfig } from '../config.js'
 import { createDatabase } from '../database/client.js'
 import { LegalHoldService } from '../compliance/legal-hold-service.js'
+import { AccountServiceAudit } from '../audit/service.js'
+import { StaffService } from '../staff/service.js'
 
 function usage(): never {
   throw new Error('Usage: legal-hold place <account-id> --actor=<admin-id> --reason=<code> --confirm=PLACE_LEGAL_HOLD | release <hold-id> --actor=<admin-id> --reason=<code> --confirm=RELEASE_LEGAL_HOLD')
@@ -21,7 +23,12 @@ async function main(): Promise<void> {
   const config = loadConfig()
   const database = createDatabase({ ...config, databasePoolSize: 1 })
   try {
-    const holds = new LegalHoldService(database, config)
+    const holds = new LegalHoldService(
+      database,
+      config,
+      new StaffService(database),
+      new AccountServiceAudit(database),
+    )
     if (command === 'place') process.stdout.write(`${JSON.stringify(await holds.place(target, actor, reason))}\n`)
     else {
       await holds.release(target, actor, reason)
