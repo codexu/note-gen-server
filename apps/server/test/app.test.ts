@@ -26,11 +26,13 @@ const config: AppConfig = {
   webPublicBaseUrl: 'http://localhost:3789',
   deploymentMode: 'self-hosted',
   hostedReleaseStage: 'internal-test',
+  hostedRegistrationPolicy: 'disabled',
   billingProvider: 'none', billingProviderEnvironment: 'test', billingMerchantEntity: '',
   hostedMailProvider: 'log', mailDriver: 'disabled', mailFromAddress: '', mailFromName: 'NoteGen', mailReplyTo: '', mailDefaultLocale: 'zh-CN',
   smtpHost: '', smtpPort: 587, smtpTlsMode: 'starttls-required', smtpUsername: '', smtpPassword: '', smtpConnectTimeoutMs: 10_000, smtpCommandTimeoutMs: 15_000, smtpTlsRejectUnauthorized: true,
   hostedDataRegion: 'local-test', pendingEmailVerificationDays: 7,
   accountDeletionCoolingOffDays: 30, accountDeletionRetentionDays: 90,
+  deletionLedgerPath: './data/test-deletion-ledger',
   legalHoldApprovalAuthority: 'platform-admin', usageEnforcement: 'disabled',
   capabilitiesEnable: [], capabilitiesDisable: [],
 }

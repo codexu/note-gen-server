@@ -16,7 +16,7 @@ describe('security configuration', () => {
 describe('TokenService', () => {
   it('signs scoped short-lived access claims and hashes refresh tokens', async () => {
     const tokens = new TokenService('0123456789abcdef0123456789abcdef', 'https://sync.example.test')
-    const claims = { accountId: 'account-id', deviceId: 'device-id' }
+    const claims = { accountId: 'account-id', deviceId: 'device-id', credentialEpoch: 'credential-epoch' }
     const accessToken = await tokens.signAccessToken(claims)
     expect(await tokens.verifyAccessToken(accessToken)).toMatchObject({
       accountId: claims.accountId,
