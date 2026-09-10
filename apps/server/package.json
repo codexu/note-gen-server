@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:self": "tsx scripts/self-test.ts",
+    "test:migration-upgrade": "tsx scripts/migration-upgrade-test.ts",
     "test:integration": "vitest run test/*.integration.test.ts",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",

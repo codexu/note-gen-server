@@ -14,6 +14,7 @@
     "typecheck": "turbo typecheck",
     "test": "turbo test",
     "test:self": "pnpm --filter @notegen/server test:self",
+    "test:migration-upgrade": "pnpm --filter @notegen/server test:migration-upgrade",
     "test:integration": "pnpm --filter @notegen/server test:integration",
     "db:generate": "pnpm --filter @notegen/server db:generate",
     "db:migrate": "pnpm --filter @notegen/server db:migrate",

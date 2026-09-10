@@ -20,7 +20,7 @@ NoteGen Server 自托管目前处于实验阶段。部署方式、配置和数�
 
 ## 启动官方镜像
 
-官方镜像为 `ghcr.io/codexu/note-gen-server:edge`，支持 `linux/amd64` 和 `linux/arm64`。以下流程直接拉取镜像，不会在部署服务器上编译源码。
+官方镜像为 `ghcr.io/codexu/note-gen-server:latest`，支持 `linux/amd64` 和 `linux/arm64`。以下流程直接拉取 release 分支发布的最新版本，不会在部署服务器上编译源码。需要稳定复现时，将 `NOTEGEN_SERVER_IMAGE` 固定为完整版本标签，例如 `ghcr.io/codexu/note-gen-server:0.1.0`。
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git

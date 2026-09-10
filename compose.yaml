@@ -2,7 +2,7 @@ name: notegen-server
 
 services:
   server:
-    image: ${NOTEGEN_SERVER_IMAGE:-ghcr.io/codexu/note-gen-server:edge}
+    image: ${NOTEGEN_SERVER_IMAGE:-ghcr.io/codexu/note-gen-server:latest}
     restart: unless-stopped
     depends_on:
       postgres:
