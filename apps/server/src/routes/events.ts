@@ -75,7 +75,9 @@ export function createEventRoutes(
       config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     }, (socket) => {
       let authenticated = false
+      let authenticating = false
       let alive = true
+      let authorizationCheckRunning = false
       const unsubscribe: Array<() => void> = []
       let sessionTimeout: NodeJS.Timeout | undefined
       let presenceConnection: PresenceConnection | null = null
@@ -88,6 +90,16 @@ export function createEventRoutes(
         alive = false
         socket.ping()
       }, 30_000)
+      // Revocation/password changes must also invalidate idle connections.
+      // This reads the shared DB, so it covers every server process even when
+      // a notification is lost or the account was changed by a local CLI.
+      const authorizationCheck = setInterval(() => {
+        if (!presenceConnection || authorizationCheckRunning) return
+        authorizationCheckRunning = true
+        void assertConnectionActive(presenceConnection).catch(() => {
+          socket.close(1008, 'Authorization revoked')
+        }).finally(() => { authorizationCheckRunning = false })
+      }, 5_000)
 
       socket.on('pong', () => { alive = true })
       socket.on('close', () => cleanup())
@@ -97,6 +109,7 @@ export function createEventRoutes(
       const cleanup = (): void => {
         clearTimeout(authTimeout)
         clearInterval(heartbeat)
+        clearInterval(authorizationCheck)
         if (sessionTimeout !== undefined) clearTimeout(sessionTimeout)
         for (const stop of unsubscribe.splice(0)) stop()
         if (presenceConnection) {
@@ -114,6 +127,9 @@ export function createEventRoutes(
         if (authenticated) {
           if (!presenceConnection) return
           try {
+            await auth.assertDeviceActive(presenceConnection.accountId, presenceConnection.deviceId,
+              presenceConnection.credentialEpoch, presenceConnection.instanceAuthEpoch, presenceConnection.issuedAt)
+            if (currentSocket.readyState !== currentSocket.OPEN) return
             consumeRealtimeBudget(presenceConnection, Buffer.byteLength(raw.toString()))
             const message = parseRealtimeMessage(raw)
             if (message.type === 'document.subscribe'
@@ -127,6 +143,11 @@ export function createEventRoutes(
           }
           return
         }
+        if (authenticating) {
+          currentSocket.close(1008, 'Authentication already in progress')
+          return
+        }
+        authenticating = true
         try {
           const message = parseAuthenticateMessage(raw)
           if (syncEpoch !== undefined && message.expectedSyncEpoch !== syncEpoch) {
@@ -141,6 +162,7 @@ export function createEventRoutes(
           await Promise.all(uniqueWorkspaceIds.map((id) => (
             workspaces.assertCapability(claims.accountId, id, 'content.read')
           )))
+          if (currentSocket.readyState !== currentSocket.OPEN) return
           unsubscribe.push(notifier.subscribeAccount(claims.accountId, () => {
             if (currentSocket.readyState === currentSocket.OPEN) {
               sendWithBackpressure(currentSocket, JSON.stringify({ type: 'account.workspaces-changed' }))
@@ -192,7 +214,17 @@ export function createEventRoutes(
           }))
         } catch {
           currentSocket.close(1008, 'Authentication failed')
+        } finally {
+          authenticating = false
         }
+      }
+
+      async function assertConnectionActive(connection: PresenceConnection): Promise<void> {
+        await auth.assertDeviceActive(connection.accountId, connection.deviceId,
+          connection.credentialEpoch, connection.instanceAuthEpoch, connection.issuedAt)
+        await Promise.all([...connection.workspaceIds].map(id => (
+          workspaces.assertCapability(connection.accountId, id, 'content.read')
+        )))
       }
     })
   }
@@ -292,6 +324,7 @@ function handleDocumentSubscription(
     return
   }
   if (connection.documentIds.has(key)) return
+  if (connection.documentIds.size >= 100) throw new Error('Too many document subscriptions')
   connection.documentIds.add(key)
   const payload = JSON.stringify({
     type: 'document.sync-request',

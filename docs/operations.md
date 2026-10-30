@@ -87,7 +87,7 @@ sync.example.com {
 
 - 所有实例使用相同的 `AUTH_SECRET`、`PUBLIC_BASE_URL` 和数据库。
 - Blob 使用同一个 S3-compatible Bucket；本地文件系统 Volume 不适合跨主机扩容。
-- 反向代理支持普通负载均衡；WebSocket 不要求粘性会话。
+- PostgreSQL 的事件唤醒支持普通负载均衡；光标、画布 presence 和文档订阅仍是进程内状态。当前公测支持单副本；多副本不能保证协作在线状态完整。
 - migration 仍应作为部署前的单独步骤执行，避免所有副本同时承担升级工作。
 
 多实例发布时先由一个实例执行迁移，再以 `MIGRATE_ON_START=false` 启动其余服务副本。单机本地开发保持默认值 `true` 即可。
@@ -123,7 +123,7 @@ pnpm --filter @notegen/server maintenance:mode -- enable --mode write_drain --re
 pnpm --filter @notegen/server maintenance:mode -- disable --confirm DISABLE_MAINTENANCE
 ```
 
-这是维护围栏的初始切片，尚未提供跨实例 ack、在途 Blob lease 计数或 Web 管理入口。realtime `document.update` 会在下一条可变消息时收到 `server.maintenance` 后关闭；尚未维护状态变更时主动枚举并断开所有已连接 WebSocket。不要把 `write_drain` 的当前状态误解为已完成完整 backup/upgrade drain。
+这是维护围栏的初始切片，尚未提供跨实例 ack、在途 Blob lease 计数或 Web 管理入口。设备撤销、密码失效和账号停用会在下一条入站消息或每 5 秒的后台复核时关闭既有 WebSocket（还需数据库正常响应）。不要把 `write_drain` 的当前状态误解为已完成完整 backup/upgrade drain。
 
 后台每小时自动执行一次小批量维护，也可在本机手动执行：
 
