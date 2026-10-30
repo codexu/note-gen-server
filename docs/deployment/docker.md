@@ -18,9 +18,9 @@ NoteGen Server 自托管目前处于实验阶段。部署方式、配置和数�
 - 用于远程访问的域名和 HTTPS 反向代理；仅本机实验时不需要
 - 能够拉取 `ghcr.io/codexu/note-gen-server` 的网络
 
-## 启动官方镜像
+## 当前版本启动方式
 
-官方镜像为 `ghcr.io/codexu/note-gen-server:latest`，支持 `linux/amd64` 和 `linux/arm64`。以下流程直接拉取 release 分支发布的最新版本，不会在部署服务器上编译源码。需要稳定复现时，将 `NOTEGEN_SERVER_IMAGE` 固定为完整版本标签，例如 `ghcr.io/codexu/note-gen-server:0.1.0`。
+本次安全与恢复修复尚未发布镜像。`latest` 和 `0.1.0` 不能当成已经可用；2026-10-30 核对存在的 `sha-e258b44` 是旧构建，不含这些修复。当前使用源码构建：
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git
@@ -28,33 +28,24 @@ cd note-gen-server
 cp .env.docker.example .env
 ```
 
-分别运行两次下面的命令，为 `POSTGRES_PASSWORD` 和 `AUTH_SECRET` 生成不同的值：
+分别运行三次 `openssl rand -hex 32`，为 `POSTGRES_PASSWORD`、`AUTH_SECRET`、`SETUP_TOKEN` 生成不同的随机值，并设置客户端实际访问的 `PUBLIC_BASE_URL`。`SETUP_TOKEN` 是安装所有权凭据，不是管理员密码，不能公开发送；安装完成后入口永久关闭，可从环境文件移除它。已有实例不要求补设。
+
+示例默认 `NOTEGEN_SERVER_IMAGE=notegen-server:dev`：
 
 ```bash
-openssl rand -hex 32
+docker compose -f compose.yaml -f compose.dev.yaml up -d --build
+docker compose ps
+curl --fail http://127.0.0.1:3789/health/ready
 ```
 
-编辑 `.env`，至少确认：
+首次启动会等待 PostgreSQL 并执行迁移。使用本机连接或 HTTPS 打开 Web，输入安装凭据、管理员账号与独立密码，再完成安装。之后才向其他用户开放入口。
 
-- `POSTGRES_PASSWORD`：随机生成的数据库密码
-- `AUTH_SECRET`：另一个随机值，上线后不要随意更换
-- `PUBLIC_BASE_URL`：NoteGen 客户端实际访问的地址
-
-启动并查看状态：
+后续维护者完成 [镜像发布](container-publishing.md) 并核对匿名拉取成功后，将 `NOTEGEN_SERVER_IMAGE` 改为该次实际发布的版本或 digest，才使用：
 
 ```bash
 docker compose pull
 docker compose up -d
-docker compose ps
 ```
-
-首次启动会等待 PostgreSQL 就绪并自动执行尚未应用的数据库迁移。两个服务都显示为 `healthy` 后，检查：
-
-```bash
-curl --fail http://127.0.0.1:3789/health/ready
-```
-
-访问 `PUBLIC_BASE_URL`，根据安装向导设置实例名称和首位管理员。安装完成后，在 NoteGen 的同步设置中填写同一个服务器地址。
 
 ## 容量保护
 

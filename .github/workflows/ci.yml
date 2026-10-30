@@ -73,7 +73,7 @@ jobs:
   publish:
     needs: verify
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/release')
     runs-on: ubuntu-latest
     permissions:
@@ -129,9 +129,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/release' }}
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.ref == 'refs/heads/release' }}
-            type=raw,value=${{ steps.version.outputs.minor }},enable=${{ github.ref == 'refs/heads/release' }}
+            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.minor }}
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title=NoteGen Server

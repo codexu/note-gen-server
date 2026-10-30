@@ -391,7 +391,7 @@ export function createSyncRoutes(
     }, async (request, reply) => {
       const claims = await requireAuth(request, tokens, auth)
       await sync.releaseBootstrap(claims.accountId, request.params.workspaceId, request.params.bootstrapId, request.query.expectedSyncEpoch)
-      return reply.code(204).send()
+      return reply.code(204).send(null)
     })
 
     app.get('/v1/workspaces/:workspaceId/documents/:documentId/updates', {
