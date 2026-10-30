@@ -9,5 +9,6 @@ out/
 !.env.docker.example
 coverage/
 data/
+recovery/
 *.log
 .DS_Store

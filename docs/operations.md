@@ -92,26 +92,11 @@ sync.example.com {
 
 多实例发布时先由一个实例执行迁移，再以 `MIGRATE_ON_START=false` 启动其余服务副本。单机本地开发保持默认值 `true` 即可。
 
-## 备份
+## 备份与恢复
 
-旧的网页备份接口和 `scripts/backup.sh` 已停用。它们只能生成数据库 dump 或普通 Blob 拷贝，缺少统一 manifest、认证签名、加密、版本固定与离线恢复预检；不得把该类文件标记为可恢复备份，也不得为新备份继续使用它们。
+当前可执行范围是单副本、文件系统 Blob、离线且未加密的签名备份。官方源码构建镜像包含 PostgreSQL 17 的 `pg_dump` / `pg_restore`，以及编译后的 `backup`、`restore`、维护模式 CLI。操作步骤、信任材料生成、隔离恢复和回退见 [单机备份恢复手册](deployment/backup-restore.md)。
 
-备份与恢复仅按 [账号服务备份规格](account-service/10-self-hosted-backup-restore.md) 的统一离线流程执行。当前已提供 run/drill/restore-marker 数据模型、启动时 credential epoch fence、bootstrap reissue guard，以及只读的 detached-signature/trust/artifact 校验器；统一 artifact runner、加密、Blob snapshot 与 offline restore CLI 尚在交付中，因此生产部署者需要继续使用经过本地审计的外部灾备流程，并明确其未获得本项目的 verified-backup 认定。
-
-## 恢复
-
-恢复会覆盖实例数据，因此不提供自动执行的无确认脚本。统一离线恢复工具交付前，不要按历史步骤直接覆盖运行中的实例；它们没有写入 restore marker，无法保证旧凭据、旧设备与旧客户端被 fencing。历史 artifact 只能在隔离副本中由运维人员人工取证。
-
-统一工具的目标流程将是：
-
-1. 停止 `server` 进程并确认备份目录。
-2. 对当前 PostgreSQL 和 Blob Volume 再做一次应急备份。
-3. 使用 `pg_restore --clean --if-exists` 恢复 `database.dump`。
-4. 将备份的 `blobs` 内容恢复到 Blob Volume。
-5. 启动服务，检查 `/health/ready`。
-6. 使用一个新设备执行 bootstrap，并随机下载附件核对 ciphertext hash。
-
-默认零配置同步的 managed key 会随数据库备份保存，因此恢复数据库即可让用户重新登录同步。用户启用高级端到端加密后，服务端不再保存可解密密钥；恢复后仍需要客户端同步口令或恢复密钥。
+`operations.unifiedBackup` 和 `operations.preserveRestore` 的 Web capability 继续关闭：不提供网页一键恢复、在线/S3快照、自动排程或已演练的原地恢复保证。离线 CLI 的存在不等于当前实例已通过恢复验收。旧数据库 dump 不能自行标记为可信统一备份。
 
 ## 手动维护
 
@@ -123,7 +108,7 @@ pnpm --filter @notegen/server maintenance:mode -- enable --mode write_drain --re
 pnpm --filter @notegen/server maintenance:mode -- disable --confirm DISABLE_MAINTENANCE
 ```
 
-这是维护围栏的初始切片，尚未提供跨实例 ack、在途 Blob lease 计数或 Web 管理入口。设备撤销、密码失效和账号停用会在下一条入站消息或每 5 秒的后台复核时关闭既有 WebSocket（还需数据库正常响应）。不要把 `write_drain` 的当前状态误解为已完成完整 backup/upgrade drain。
+维护模式会阻止后续 HTTP 变更，但不代表所有在途操作已经结束。离线备份前必须停止所有 server 进程；不要把 `write_drain` 当作完整快照 drain。设备撤销、密码失效和账号停用会在下一条入站消息或每 5 秒的后台复核时关闭既有 WebSocket（还需数据库正常响应）。
 
 后台每小时自动执行一次小批量维护，也可在本机手动执行：
 
@@ -139,7 +124,7 @@ pnpm --filter @notegen/server maintenance
 
 ## 升级
 
-停止本机服务后，更新依赖、执行迁移并按你的进程管理方式重新启动。统一备份 runner 交付前，请使用经本地审计的外部灾备流程。
+停止本机服务后，更新依赖、执行迁移并按你的进程管理方式重新启动。升级前先按 [备份恢复手册](deployment/backup-restore.md) 保存签名备份并完成隔离恢复。
 
 若数据库 Schema 与服务端版本不兼容，服务不会进入 ready 状态。不要跳过 migration 或手工修改 Drizzle journal。
 

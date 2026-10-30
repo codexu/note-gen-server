@@ -1,5 +1,6 @@
 import { createHash, verify as verifySignature } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
 
 const MAX_MANIFEST_BYTES = 1_048_576
@@ -190,7 +191,11 @@ async function readLimitedText(path: string, maxBytes: number, subject: string):
   return readFile(path, 'utf8')
 }
 
-async function hashFile(path: string): Promise<string> { return sha256(await readFile(path)) }
+async function hashFile(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer)
+  return hash.digest('hex')
+}
 function sha256(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex') }
 function parseJson(text: string, subject: string): unknown { try { return JSON.parse(text) } catch { throw new Error(`Invalid ${subject} JSON`) } }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }

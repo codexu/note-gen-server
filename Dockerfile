@@ -35,7 +35,16 @@ COPY packages/contracts/package.json packages/contracts/package.json
 
 RUN pnpm install --prod --frozen-lockfile
 
-FROM node:24-bookworm-slim AS runner
+# Keep pg_dump/pg_restore on the same major as Compose's PostgreSQL server.
+FROM postgres:17-bookworm AS runner
+
+COPY --from=base /usr/local/bin/node /usr/local/bin/node
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends libstdc++6 libatomic1 ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --gid 1000 node \
+  && useradd --uid 1000 --gid node --create-home node
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
@@ -57,6 +66,8 @@ RUN mkdir -p /app/data/blobs /app/data/backups \
   && chown -R node:node /app
 
 USER node
+
+ENTRYPOINT []
 
 EXPOSE 3789
 

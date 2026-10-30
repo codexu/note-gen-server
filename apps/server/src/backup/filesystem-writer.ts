@@ -1,6 +1,6 @@
 import { createHash, sign as signDetached } from 'node:crypto'
 import { constants } from 'node:fs'
-import { createWriteStream } from 'node:fs'
+import { createReadStream, createWriteStream } from 'node:fs'
 import { access, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -158,7 +158,9 @@ async function readPrivateKey(path: string): Promise<string> {
 
 async function artifact(absolutePath: string, relativePath: string): Promise<{ path: string, sha256: string, size: bigint }> {
   const details = await stat(absolutePath)
-  return { path: relativePath, sha256: createHash('sha256').update(await readFile(absolutePath)).digest('hex'), size: BigInt(details.size) }
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(absolutePath)) hash.update(chunk as Buffer)
+  return { path: relativePath, sha256: hash.digest('hex'), size: BigInt(details.size) }
 }
 
 async function artifactsUnder(root: string, base: string): Promise<Array<{ path: string, sha256: string, size: bigint }>> {
