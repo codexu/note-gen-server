@@ -41,6 +41,7 @@ type PresenceMessage = PresenceUpdateMessage | PresenceClearMessage
 
 interface PresenceState extends PresenceUpdateMessage {
   deviceId: string
+  accountId: string
 }
 
 interface PresenceConnection {
@@ -387,7 +388,7 @@ function handlePresenceMessage(
       }
     }
   }
-  connection.presence = { ...message, deviceId: connection.deviceId }
+  connection.presence = { ...message, deviceId: connection.deviceId, accountId: connection.accountId }
   for (const peer of room) {
     if (peer !== connection) sendPresence(connection.presence, peer.socket)
   }
@@ -420,6 +421,7 @@ function sendPresence(presence: PresenceState, socket: WebSocket): void {
     workspaceId: presence.workspaceId,
     documentId: presence.documentId,
     deviceId: presence.deviceId,
+    accountId: presence.accountId,
     label: presence.label,
     anchor: presence.anchor,
     head: presence.head,
