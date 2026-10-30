@@ -53,10 +53,21 @@ export class FilesystemBlobStorage implements BlobStorage {
         output.once('finish', resolvePromise)
         output.once('error', reject)
       })
+      const assembled = await open(temporaryTarget, 'r')
+      try { await assembled.sync() } finally { await assembled.close() }
       // `rename` replaces an existing target on POSIX, which would violate the
       // immutable ready-object contract. A hard-link publish is atomic within
       // this filesystem and fails with EEXIST if another writer won the key.
       await link(temporaryTarget, target)
+      // Include newly-created workspace/prefix directories, not only the
+      // final file's containing directory, before publishing ready in SQL.
+      let directoryPath = dirname(target)
+      while (true) {
+        const directory = await open(directoryPath, 'r')
+        try { await directory.sync() } finally { await directory.close() }
+        if (directoryPath === this.#root) break
+        directoryPath = dirname(directoryPath)
+      }
       await rm(temporaryTarget, { force: true })
       await this.abortUpload(storageKey, providerUploadId)
     } catch (error) {
