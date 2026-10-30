@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
   ArrowRightIcon,
+  ChevronDownIcon,
   CircleCheckIcon,
   HistoryIcon,
   LaptopIcon,
@@ -118,6 +119,7 @@ export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthen
   const [capabilities, setCapabilities] = useState<ServerCapabilities | null>(null)
   const [installationStatus, setInstallationStatus] = useState<InstallationStatus | null>(null)
   const [overview, setOverview] = useState<SyncOverview | null>(null)
+  const [dashboardState, setDashboardState] = useState<"loading" | "ready" | "error">("loading")
   const [workspaces, setWorkspaces] = useState<WebWorkspace[]>([])
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
   const [recentlyDeletedWorkspace, setRecentlyDeletedWorkspace] = useState<WebWorkspace | null>(null)
@@ -159,6 +161,7 @@ export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthen
     if (devicesResult.status === "fulfilled") setDevices(devicesResult.value)
     if (overviewResult.status === "fulfilled") setOverview(overviewResult.value)
     if (workspacesResult.status === "fulfilled") setWorkspaces(workspacesResult.value)
+    setDashboardState(devicesResult.status === "fulfilled" && overviewResult.status === "fulfilled" ? "ready" : "error")
 
     const failures = [
       devicesResult.status === "rejected" ? { label: "设备", reason: devicesResult.reason } : null,
@@ -349,6 +352,7 @@ export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthen
       setAdminWorkspaces([])
       setAdminDevices([])
       setAdminStatus(null)
+      setDashboardState("loading")
       setSection("overview")
       window.history.replaceState(null, "", window.location.pathname)
     } catch (cause) {
@@ -537,12 +541,13 @@ export function AccountPortal({ forceAuthenticationFlow = false }: { forceAuthen
       }}
     >
       {error ? <ErrorAlert message={error} /> : null}
-      {section === "overview" ? <><OverviewSection overview={overview} devices={devices} onNavigate={navigateSection} />{account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}</> : null}
+      {section === "overview" ? <><OverviewSection overview={overview} devices={devices} state={dashboardState} onNavigate={navigateSection} />{account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}</> : null}
       {section === "instance" && account.isAdmin ? <AdminInstanceSummary refreshVersion={adminRefreshVersion} /> : null}
       {section === "experiments" && account.isAdmin ? <ExperimentalCenter refreshVersion={adminRefreshVersion} /> : null}
       {section === "operations" && account.isAdmin ? <OperationsCenter refreshVersion={adminRefreshVersion} /> : null}
       {section === "workspaces" ? (
         <WorkspaceManagement
+          accountId={account.id}
           workspaces={workspaces}
           recentlyDeletedWorkspace={recentlyDeletedWorkspace}
           deletingWorkspaceId={deletingWorkspaceId}
@@ -630,11 +635,13 @@ function LoginBenefit({
   )
 }
 
-function OverviewSection({ overview, devices, onNavigate }: {
+function OverviewSection({ overview, devices, state, onNavigate }: {
   overview: SyncOverview | null
   devices: Device[]
+  state: "loading" | "ready" | "error"
   onNavigate: (section: AdminSection) => void
 }) {
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const contentStats = summarizeContentKinds(overview?.kinds ?? [])
   const activityChart = summarizeSyncActivity(
     overview?.activityTimeline ?? [],
@@ -649,11 +656,19 @@ function OverviewSection({ overview, devices, onNavigate }: {
   ) : "0"
   const activeDevices = devices.filter((device) => !device.revokedAt)
   const behindDevices = activeDevices.filter((device) => device.syncStatus === "behind")
-  const health = activeDevices.length === 0
-    ? { label: "等待连接设备", description: "关联第一台 NoteGen 设备后，服务器会自动建立同步空间。", variant: "outline" as const }
+  const unconfirmedDevices = activeDevices.filter((device) => device.syncStatus !== "caught-up" && device.syncStatus !== "behind")
+  const hasSyncedBefore = Boolean(overview?.lastActivityAt)
+  const health = state === "loading"
+    ? { label: "正在检查同步状态", description: "正在读取设备和服务器的同步记录。", variant: "outline" as const }
+    : state === "error"
+    ? { label: "同步状态待确认", description: "暂时无法更新同步状态。请检查网络并点击右上角刷新；下方可能是上次读取的数据。", variant: "outline" as const }
+    : activeDevices.length === 0
+    ? { label: "等待连接设备", description: hasSyncedBefore ? "云端已有同步内容。关联 NoteGen 设备后，可以继续同步。" : "关联第一台 NoteGen 设备后，在客户端完成工作区配置即可开始同步。", variant: "outline" as const }
     : behindDevices.length > 0
-      ? { label: `${behindDevices.length} 台设备尚未追平`, description: "打开对应设备上的 NoteGen，让它保持联网以完成同步。", variant: "destructive" as const }
-      : { label: "同步正常", description: `${activeDevices.length} 台设备已连接${overview?.lastActivityAt ? `，最近同步于 ${formatDate(overview.lastActivityAt)}` : "，正在等待首次同步"}。`, variant: "secondary" as const }
+      ? { label: `${behindDevices.length} 台设备等待同步`, description: "打开对应设备上的 NoteGen，保持联网以接收最新变更。离线设备会在下次连接时继续同步。", variant: "outline" as const }
+      : unconfirmedDevices.length > 0
+        ? { label: hasSyncedBefore ? `${unconfirmedDevices.length} 台设备等待首次确认` : "等待首次同步", description: "设备已关联。请打开 NoteGen 完成工作区配置并保持联网，收到设备确认后会更新这里的状态。", variant: "outline" as const }
+        : { label: "已同步", description: `服务器已收到 ${activeDevices.length} 台设备的同步确认${overview?.lastActivityAt ? `，最近变更于 ${formatDate(overview.lastActivityAt)}` : "，目前没有内容变更"}。`, variant: "secondary" as const }
 
   return (
     <>
@@ -666,31 +681,31 @@ function OverviewSection({ overview, devices, onNavigate }: {
               <CardDescription>{health.description}</CardDescription>
             </div>
           </div>
-          <Button variant={activeDevices.length === 0 ? "default" : "outline"} onClick={() => onNavigate(activeDevices.length === 0 ? "connect" : "devices")}>
-            {activeDevices.length === 0 ? "关联第一台设备" : "查看设备"}
+          <Button disabled={state === "loading"} variant={activeDevices.length === 0 ? "default" : "outline"} onClick={() => onNavigate(activeDevices.length === 0 ? "connect" : "devices")}>
+            {activeDevices.length === 0 ? hasSyncedBefore ? "关联设备继续同步" : "关联第一台设备" : "查看设备"}
           </Button>
         </CardHeader>
       </Card>
       <Card>
         <CardHeader>
           <CardTitle>同步概览</CardTitle>
-          <CardDescription>汇总当前账号的同步对象、物理存储、序列和加密状态；已移除附件会按保留策略延迟回收。</CardDescription>
+          <CardDescription>查看已同步的内容、空间使用和最近变更。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Metric
             label="同步内容"
-            value={`${overview?.objectCount ?? 0} 项`}
-            detail={`${overview?.deletedObjectCount ?? 0} 项删除记录 · ${formatBytes(overview?.objectBytes ?? "0")} 加密数据`}
+            value={overview ? `${overview.objectCount} 项` : "待确认"}
+            detail="笔记、记录、对话和其他同步内容"
           />
           <Metric
-            label="附件占用（含保留）"
-            value={formatBytes(overview?.blobBytes ?? "0")}
-            detail={`${overview?.blobCount ?? 0} 个存储 Blob`}
+            label="使用空间"
+            value={overview ? formatBytes(storage ? enforcedBytes : sumByteStrings(overview.objectBytes, overview.blobBytes)) : "待确认"}
+            detail="包含尚未到期的历史保留内容"
           />
           <Metric
-            label="最新序列"
-            value={overview?.latestSequence ?? "0"}
-            detail={overview?.lastActivityAt ? `更新于 ${formatDate(overview.lastActivityAt)}` : "还没有同步活动"}
+            label="最近内容变更"
+            value={overview?.lastActivityAt ? formatDate(overview.lastActivityAt) : overview ? "暂无变更" : "待确认"}
+            detail={`${activeDevices.length} 台已关联设备`}
           />
           <Metric
             label="加密模式"
@@ -700,22 +715,46 @@ function OverviewSection({ overview, devices, onNavigate }: {
         </CardContent>
       </Card>
 
-      {storage ? (
+      <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
         <Card>
-          <CardHeader>
-            <CardTitle>存储核算</CardTitle>
-            <CardDescription>
-              服务端按活跃数据、上传预留和历史保留的总和核算安全上限。删除内容后，历史保留空间会按保留策略延迟释放。
-            </CardDescription>
+          <CardHeader className="flex flex-col items-start justify-between gap-3 sm:flex-row">
+            <div className="flex flex-col gap-2">
+              <CardTitle>技术详情</CardTitle>
+              <CardDescription>排查同步和存储问题时，可展开查看序列与空间核算。</CardDescription>
+            </div>
+            <CollapsibleTrigger render={<Button variant="outline" size="sm" />}>
+              {detailsOpen ? "收起详情" : "展开详情"}
+              <ChevronDownIcon data-icon="inline-end" />
+            </CollapsibleTrigger>
           </CardHeader>
-          <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Metric label="核算合计" value={formatBytes(enforcedBytes)} detail="这是实例空间上限实际核对的总量" />
-            <Metric label="活跃数据" value={formatBytes(activeBytes)} detail="对象、协作文档和当前附件" />
-            <Metric label="上传预留" value={formatBytes(storage.reservedBlobBytes)} detail="进行中的附件上传预占空间" />
-            <Metric label="历史保留" value={formatBytes(storage.retainedBytes)} detail="版本与变更记录到期后自动回收" />
-          </CardContent>
+          <CollapsibleContent>
+            <CardContent className="flex flex-col gap-4">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <Metric label="最新序列" value={overview?.latestSequence ?? "待确认"} detail="服务器中的同步事件序列" />
+                <Metric label="删除记录" value={overview ? `${overview.deletedObjectCount} 项` : "待确认"} detail="等待按保留策略清理的记录" />
+                <Metric label="同步对象数据" value={overview ? formatBytes(overview.objectBytes) : "待确认"} detail="同步对象的加密数据大小" />
+                <Metric label="附件占用（含保留）" value={overview ? formatBytes(overview.blobBytes) : "待确认"} detail={overview ? `${overview.blobCount} 个存储对象` : "尚未读取"} />
+              </div>
+              {storage ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>存储核算</CardTitle>
+                    <CardDescription>
+                      服务端按活跃数据、上传预留和历史保留的总和核算安全上限。删除内容后，历史保留空间会按保留策略延迟释放。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <Metric label="核算合计" value={formatBytes(enforcedBytes)} detail="这是实例空间上限实际核对的总量" />
+                    <Metric label="活跃数据" value={formatBytes(activeBytes)} detail="对象、协作文档和当前附件" />
+                    <Metric label="上传预留" value={formatBytes(storage.reservedBlobBytes)} detail="进行中的附件上传预占空间" />
+                    <Metric label="历史保留" value={formatBytes(storage.retainedBytes)} detail="版本与变更记录到期后自动回收" />
+                  </CardContent>
+                </Card>
+              ) : null}
+            </CardContent>
+          </CollapsibleContent>
         </Card>
-      ) : null}
+      </Collapsible>
 
       <Card>
         <CardHeader>
@@ -793,7 +832,10 @@ function OverviewSection({ overview, devices, onNavigate }: {
                   </div>
                 </div>
               </div>
-            ) : <ActionEmpty icon={LaptopIcon} title="还没有同步活动" description="关联设备并在 NoteGen 中完成首次同步后，最近活动会显示在这里。" action="关联设备" onAction={() => onNavigate("connect")} />}
+            ) : state !== "ready" ? <ActionEmpty icon={HistoryIcon} title="同步活动待确认" description="暂时没有可展示的活动数据，请等待加载或刷新后重试。" />
+              : overview?.lastActivityAt ? <ActionEmpty icon={CircleCheckIcon} title="最近 1 小时没有内容变更" description={`最近一次变更于 ${formatDate(overview.lastActivityAt)}。没有新变更时，这里会保持为空。`} />
+              : activeDevices.length > 0 ? <ActionEmpty icon={LaptopIcon} title="等待首次同步活动" description="设备已经关联。请在 NoteGen 中完成工作区配置并同步内容，活动随后会显示在这里。" action="查看设备" onAction={() => onNavigate("devices")} />
+              : <ActionEmpty icon={LaptopIcon} title="还没有同步活动" description="关联设备并在 NoteGen 中完成首次同步后，最近活动会显示在这里。" action="关联设备" onAction={() => onNavigate("connect")} />}
           </CardContent>
         </Card>
       </div>
@@ -807,25 +849,59 @@ function sumByteStrings(...values: string[]): string {
 }
 
 function WorkspaceManagement({
+  accountId,
   workspaces,
   recentlyDeletedWorkspace,
   deletingWorkspaceId,
   onDelete,
   onRestore,
 }: {
+  accountId: string
   workspaces: WebWorkspace[]
   recentlyDeletedWorkspace: WebWorkspace | null
   deletingWorkspaceId: string | null
   onDelete: (id: string) => Promise<void>
   onRestore: (id: string) => Promise<void>
 }) {
+  const [labels, setLabels] = useState<Record<string, string>>({})
+  const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null)
+  const [draftLabel, setDraftLabel] = useState("")
+  const labelsStorageKey = `notegen:workspace-labels:${accountId}`
+
+  useEffect(() => {
+    setLabels({})
+    setEditingWorkspaceId(null)
+    try {
+      const stored: unknown = JSON.parse(window.localStorage.getItem(labelsStorageKey) ?? "{}")
+      if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return
+      setLabels(Object.fromEntries(Object.entries(stored).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length <= 80)))
+    } catch {
+      // Browser-local remarks are optional; sync data is unaffected if storage is unavailable.
+    }
+  }, [labelsStorageKey])
+
+  function saveLabel(workspaceId: string) {
+    const nextLabels = { ...labels }
+    const label = draftLabel.trim()
+    if (label) nextLabels[workspaceId] = label
+    else delete nextLabels[workspaceId]
+    try {
+      window.localStorage.setItem(labelsStorageKey, JSON.stringify(nextLabels))
+      setLabels(nextLabels)
+      setEditingWorkspaceId(null)
+      toast.add({ title: label ? "工作区备注已保存" : "工作区备注已移除", type: "success" })
+    } catch {
+      toast.add({ title: "无法保存备注", description: "当前浏览器无法保存本地数据，请检查浏览器存储设置。", type: "error" })
+    }
+  }
+
   const sorted = [...workspaces].sort((left, right) => (
     Number(right.isDefault) - Number(left.isDefault)
     || Number(right.isNoteGenDefault) - Number(left.isNoteGenDefault)
     || right.objectCount - left.objectCount
     || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
   ))
-  const historicalCount = workspaces.filter((workspace) => (
+  const additionalCount = workspaces.filter((workspace) => (
     !workspace.isDefault && !workspace.isNoteGenDefault
   )).length
 
@@ -833,45 +909,61 @@ function WorkspaceManagement({
     <Card>
       <CardHeader>
         <CardTitle>工作区列表</CardTitle>
-        <CardDescription>查看个人数据空间、默认写作工作区和历史工作区；只有真正的历史工作区可以软删除。</CardDescription>
+        <CardDescription>查看个人数据空间和写作工作区。客户端名称不会在此解密，可添加仅保存在当前浏览器的备注，方便区分。</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {recentlyDeletedWorkspace ? <Alert><HistoryIcon /><AlertTitle>历史工作区已删除</AlertTitle><AlertDescription className="flex flex-col items-start gap-3"><span>工作区 {recentlyDeletedWorkspace.id.slice(0, 8)} 已进入软删除状态，可以立即恢复。</span><Button size="sm" variant="outline" disabled={deletingWorkspaceId !== null} onClick={() => void onRestore(recentlyDeletedWorkspace.id)}>{deletingWorkspaceId === recentlyDeletedWorkspace.id ? <Spinner data-icon="inline-start" /> : null}撤销删除</Button></AlertDescription></Alert> : null}
-        {historicalCount ? (
+        {recentlyDeletedWorkspace ? <Alert><HistoryIcon /><AlertTitle>云端工作区已删除</AlertTitle><AlertDescription className="flex flex-col items-start gap-3"><span>{labels[recentlyDeletedWorkspace.id] ?? `工作区 ${recentlyDeletedWorkspace.id.slice(0, 8)}`} 已进入软删除状态，可以立即恢复。</span><Button size="sm" variant="outline" disabled={deletingWorkspaceId !== null} onClick={() => void onRestore(recentlyDeletedWorkspace.id)}>{deletingWorkspaceId === recentlyDeletedWorkspace.id ? <Spinner data-icon="inline-start" /> : null}撤销删除</Button></AlertDescription></Alert> : null}
+        {additionalCount ? (
           <Alert>
             <HistoryIcon />
-            <AlertTitle>发现 {historicalCount} 个历史工作区</AlertTitle>
-            <AlertDescription>历史工作区按内容数量排序。删除会影响其全部同步数据，请确认不再使用后操作。</AlertDescription>
+            <AlertTitle>{additionalCount} 个其他写作工作区</AlertTitle>
+            <AlertDescription>这些工作区可能仍在设备上使用。删除会影响其全部云端同步内容，请先在客户端核对工作区，再确认是否删除。</AlertDescription>
           </Alert>
         ) : null}
         {sorted.length ? (
           <ItemGroup>
             {sorted.map((workspace) => {
               const protectedWorkspace = workspace.isDefault || workspace.isNoteGenDefault
-              const title = workspace.isDefault
+              const title = labels[workspace.id] || (workspace.isDefault
                 ? "个人数据空间"
                 : workspace.isNoteGenDefault
                   ? `默认写作工作区 ${workspace.id.slice(0, 8)}`
-                  : `历史工作区 ${workspace.id.slice(0, 8)}`
+                  : `写作工作区 ${workspace.id.slice(0, 8)}`)
               const kindLabel = workspace.isDefault
                 ? "个人数据"
-                : workspace.isNoteGenDefault ? "默认写作" : "历史"
+                : workspace.isNoteGenDefault ? "默认写作" : "写作工作区"
               return <Item key={workspace.id} variant="outline">
                 <ItemMedia variant="icon">{protectedWorkspace ? <ServerIcon /> : <HistoryIcon />}</ItemMedia>
                 <ItemContent>
                   <ItemTitle>{title}</ItemTitle>
                   <ItemDescription>
-                    {workspace.objectCount} 项内容 · {workspace.deletedObjectCount} 项删除记录 · 创建于 {formatDate(workspace.createdAt)}
+                    {workspace.objectCount} 项内容 · 最近更新 {formatDate(workspace.updatedAt)} · 创建于 {formatDate(workspace.createdAt)}
                   </ItemDescription>
+                  <p className="break-all text-xs text-muted-foreground">工作区 ID：{workspace.id}</p>
+                  {editingWorkspaceId === workspace.id ? (
+                    <form className="mt-2" onSubmit={(event) => { event.preventDefault(); saveLabel(workspace.id) }}>
+                      <FieldGroup>
+                        <Field>
+                          <FieldLabel htmlFor={`workspace-label-${workspace.id}`}>浏览器备注</FieldLabel>
+                          <Input id={`workspace-label-${workspace.id}`} autoFocus maxLength={80} placeholder="例如：个人笔记、家庭共享" value={draftLabel} onChange={(event) => setDraftLabel(event.target.value)} />
+                          <FieldDescription>仅当前浏览器可见；留空保存可移除备注，不会修改客户端的工作区名称。</FieldDescription>
+                        </Field>
+                        <Field>
+                          <div className="flex gap-2"><Button type="submit" size="sm">保存备注</Button><Button type="button" size="sm" variant="ghost" onClick={() => setEditingWorkspaceId(null)}>取消</Button></div>
+                        </Field>
+                      </FieldGroup>
+                    </form>
+                  ) : null}
                 </ItemContent>
                 <ItemActions className="flex-wrap justify-end">
                   <Badge variant={protectedWorkspace ? "secondary" : "outline"}>
                     {kindLabel}
                   </Badge>
                   <Badge variant="outline">{workspace.encryptionMode === "managed" ? "托管加密" : "E2EE"}</Badge>
+                  <Button size="sm" variant="outline" onClick={() => { setEditingWorkspaceId(workspace.id); setDraftLabel(labels[workspace.id] ?? "") }}>{labels[workspace.id] ? "编辑备注" : "添加备注"}</Button>
                   {!protectedWorkspace ? <DangerConfirmButton
-                    label="删除"
-                    title="删除这个历史工作区？"
+                    label="删除云端工作区"
+                    title={`删除“${title}”的云端内容？`}
                     description="工作区及其同步内容将进入软删除状态。确认所有设备都不再使用它后再继续。"
                     disabled={deletingWorkspaceId !== null}
                     busy={deletingWorkspaceId === workspace.id}

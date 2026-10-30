@@ -33,6 +33,7 @@ export function DeviceConnection({
   const [code, setCode] = useState("")
   const [authorization, setAuthorization] = useState<DeviceAuthorization | null>(null)
   const [signedIn, setSignedIn] = useState<boolean | null>(null)
+  const [accountId, setAccountId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [completed, setCompleted] = useState<"approved" | "denied" | null>(null)
@@ -44,14 +45,17 @@ export function DeviceConnection({
   const [serverAddress, setServerAddress] = useState("")
   const [serverAddressError, setServerAddressError] = useState("")
   const [serverAddressCopied, setServerAddressCopied] = useState(false)
-  const [method, setMethod] = useState<"code" | "qr">("code")
+  const [target, setTarget] = useState<"current" | "other">("current")
+  const [method, setMethod] = useState<"code" | "qr">("qr")
   const authorizationRequestId = useRef(0)
-  const activePairing = useRef<{ id: string, status: DevicePairingStatus | null } | null>(null)
+  const activePairing = useRef<{ id: string, status: DevicePairingStatus | null, accountId: string | null } | null>(null)
 
   useEffect(() => {
     const initialCode = new URLSearchParams(window.location.search).get("code") ?? ""
     setCode(formatDeviceCode(initialCode))
     if (initialCode) {
+      setTarget("other")
+      setMethod("code")
       const url = new URL(window.location.href)
       url.pathname = "/connect/"
       url.searchParams.set("section", "connect")
@@ -60,10 +64,22 @@ export function DeviceConnection({
     void apiRequest<{ publicBaseUrl: string }>("/v1/capabilities")
       .then((result) => setServerAddress(result.publicBaseUrl))
       .catch(() => setServerAddressError("无法读取服务器地址，请刷新页面后重试。"))
-    void apiRequest("/v1/web/session")
-      .then(() => {
+    void apiRequest<{ account: { id: string } }>("/v1/web/session")
+      .then((session) => {
+        setAccountId(session.account.id)
         setSignedIn(true)
-        if (initialCode) void loadAuthorization(initialCode)
+        if (initialCode) {
+          storeCurrentDevicePairing(session.account.id, null)
+          void loadAuthorization(initialCode)
+        }
+        else {
+          const savedPairing = readCurrentDevicePairing(session.account.id)
+          if (savedPairing) {
+            setPairing(savedPairing)
+            setPairingStatus("pending")
+            setRemainingSeconds(savedPairing.expiresIn)
+          }
+        }
       })
       .catch((cause) => {
         if (isApiRequestError(cause) && cause.status === 401) {
@@ -75,11 +91,12 @@ export function DeviceConnection({
   }, [])
 
   useEffect(() => {
-    activePairing.current = pairing ? { id: pairing.id, status: pairingStatus } : null
-  }, [pairing, pairingStatus])
+    activePairing.current = pairing ? { id: pairing.id, status: pairingStatus, accountId } : null
+  }, [pairing, pairingStatus, accountId])
 
   useEffect(() => () => {
     const current = activePairing.current
+    if (current?.accountId) storeCurrentDevicePairing(current.accountId, null)
     if (current?.status === "pending") {
       void apiRequest(`/v1/web/device-pairings/${current.id}`, { method: "DELETE", csrf: true }).catch(() => undefined)
     }
@@ -87,6 +104,7 @@ export function DeviceConnection({
 
   useEffect(() => {
     if (!pairing || pairingStatus !== "pending") return
+    let active = true
     const updateRemaining = () => {
       const remaining = Math.max(0, Math.ceil((new Date(pairing.expiresAt).getTime() - Date.now()) / 1_000))
       setRemainingSeconds(remaining)
@@ -97,7 +115,12 @@ export function DeviceConnection({
     const polling = window.setInterval(() => {
       void apiRequest<{ status: DevicePairingStatus, expiresAt: string }>(
         `/v1/web/device-pairings/${pairing.id}`
-      ).then((result) => setPairingStatus(result.status)).catch((cause) => {
+      ).then((result) => {
+        if (!active) return
+        setPairingStatus(result.status)
+        setPairingError("")
+      }).catch((cause) => {
+        if (!active) return
         if (isApiRequestError(cause) && cause.status === 404) {
           setPairingStatus("expired")
           setPairingError("")
@@ -107,6 +130,7 @@ export function DeviceConnection({
       })
     }, 2_000)
     return () => {
+      active = false
       window.clearInterval(countdown)
       window.clearInterval(polling)
     }
@@ -114,7 +138,10 @@ export function DeviceConnection({
 
   async function replacePairing(): Promise<DevicePairing> {
     if (pairing?.id && pairingStatus === "pending") {
-      await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true })
+      await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true }).catch((cause) => {
+        if (!isPairingUnavailable(cause)) throw cause
+      })
+      if (accountId) storeCurrentDevicePairing(accountId, null)
     }
     const result = await apiRequest<DevicePairing>("/v1/web/device-pairings", {
       method: "POST",
@@ -123,6 +150,7 @@ export function DeviceConnection({
     setPairing(result)
     setPairingStatus("pending")
     setRemainingSeconds(result.expiresIn)
+    if (target === "current" && accountId) storeCurrentDevicePairing(accountId, result)
     return result
   }
 
@@ -151,21 +179,38 @@ export function DeviceConnection({
     }
   }
 
-  async function cancelPairing() {
-    if (!pairing) return
+  async function cancelPairing(): Promise<boolean> {
+    if (!pairing) return true
     setPairingBusy(true)
     setPairingError("")
     try {
       if (pairingStatus === "pending") {
-        await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true })
+        await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true }).catch((cause) => {
+          if (!isPairingUnavailable(cause)) throw cause
+        })
       }
       setPairing(null)
       setPairingStatus(null)
+      if (accountId) storeCurrentDevicePairing(accountId, null)
+      return true
     } catch (cause) {
       setPairingError(errorMessage(cause))
+      return false
     } finally {
       setPairingBusy(false)
     }
+  }
+
+  async function changeTarget(nextTarget: "current" | "other"): Promise<boolean> {
+    if (nextTarget === target) return true
+    if (pairing && !await cancelPairing()) return false
+    setTarget(nextTarget)
+    setPairingError("")
+    return true
+  }
+
+  async function useDeviceCode() {
+    if (await changeTarget("other")) setMethod("code")
   }
 
   async function changeMethod(nextMethod: "code" | "qr") {
@@ -181,7 +226,7 @@ export function DeviceConnection({
       try {
         await apiRequest(`/v1/web/device-pairings/${pairing.id}`, { method: "DELETE", csrf: true })
       } catch (cause) {
-        if (!(isApiRequestError(cause) && cause.status === 404)) {
+        if (!isPairingUnavailable(cause)) {
           setPairingError(errorMessage(cause))
           setPairingBusy(false)
           return
@@ -258,15 +303,39 @@ export function DeviceConnection({
           </span>
           <div>
             <h1 className="text-lg font-semibold">关联新设备</h1>
-            <p className="text-sm text-muted-foreground">确认授权后，客户端会自动开始同步。</p>
+            <p className="text-sm text-muted-foreground">先关联设备，再返回 NoteGen 查看工作区和同步进度。</p>
           </div>
         </div>
         <ThemeToggle />
       </header>
       )}
-      {signedIn ? <ToggleGroup className="grid w-full grid-cols-2" variant="outline" spacing={0} value={[method]} disabled={pairingBusy} onValueChange={(value) => { if (value[0]) void changeMethod(value[0] as "code" | "qr") }}><ToggleGroupItem value="code">输入验证码</ToggleGroupItem><ToggleGroupItem value="qr">手机扫码</ToggleGroupItem></ToggleGroup> : null}
+      {signedIn ? <ToggleGroup type="single" className="grid w-full grid-cols-2" variant="outline" spacing={0} value={target} disabled={pairingBusy || busy} onValueChange={(value) => { if (value === "current" || value === "other") void changeTarget(value) }} aria-label="选择要关联的设备"><ToggleGroupItem value="current">连接当前设备</ToggleGroupItem><ToggleGroupItem value="other">连接其他设备</ToggleGroupItem></ToggleGroup> : null}
       <div className="grid w-full items-start gap-6">
-      {method === "code" ? (
+      {signedIn && target === "current" ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>连接这台设备上的 NoteGen</CardTitle>
+            <CardDescription>已安装 NoteGen 时，点击下方按钮打开应用并关联当前账号。首次连接后，请在客户端确认工作区和同步进度。</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            {pairingError ? <Alert variant="destructive"><ShieldCheckIcon /><AlertTitle>暂时无法关联</AlertTitle><AlertDescription>{pairingError}</AlertDescription></Alert> : null}
+            {pairingStatus === "consumed" ? <Alert><CheckCircle2Icon /><AlertTitle>设备已关联</AlertTitle><AlertDescription>请回到 NoteGen，确认工作区并查看首次同步进度。</AlertDescription></Alert>
+              : pairingStatus === "expired" ? <Alert><XCircleIcon /><AlertTitle>这次关联已过期</AlertTitle><AlertDescription>请重新点击“打开 NoteGen 并关联”，生成新的关联请求。</AlertDescription></Alert>
+              : pairingStatus === "pending" ? <Alert><LaptopIcon /><AlertTitle>等待 NoteGen 完成关联</AlertTitle><AlertDescription>请在浏览器提示中允许打开 NoteGen。此次请求剩余 {formatRemainingTime(remainingSeconds)}，成功后会自动更新。</AlertDescription></Alert> : null}
+            <p className="text-sm text-muted-foreground">应用没有打开时，也可以在 NoteGen 的同步设置中发起浏览器授权，再使用客户端验证码完成关联。</p>
+          </CardContent>
+          <CardFooter className="flex flex-wrap gap-2">
+            <Button onClick={() => void openPairingInNoteGen()} disabled={pairingBusy || pairingStatus === "consumed"}>
+              {pairingBusy ? <Spinner data-icon="inline-start" /> : <ExternalLinkIcon data-icon="inline-start" />}
+              {pairingStatus === "pending" ? "重新打开 NoteGen 并关联" : "打开 NoteGen 并关联"}
+            </Button>
+            {pairingStatus === "pending" ? <Button variant="outline" disabled={pairingBusy} onClick={() => void cancelPairing()}>取消这次关联</Button> : null}
+            <Button variant="outline" disabled={pairingBusy} onClick={() => void useDeviceCode()}>改用客户端验证码</Button>
+          </CardFooter>
+        </Card>
+      ) : null}
+      {signedIn && target === "other" ? <ToggleGroup type="single" className="grid w-full grid-cols-2" variant="outline" spacing={0} value={method} disabled={pairingBusy || busy} onValueChange={(value) => { if (value === "code" || value === "qr") void changeMethod(value) }} aria-label="选择关联方式"><ToggleGroupItem value="qr">手机扫码</ToggleGroupItem><ToggleGroupItem value="code">客户端验证码</ToggleGroupItem></ToggleGroup> : null}
+      {signedIn !== true || (target === "other" && method === "code") ? (
       <Card className="w-full bg-card/90 shadow-sm">
         <CardHeader>
           <CardTitle>关联 NoteGen 设备</CardTitle>
@@ -297,7 +366,7 @@ export function DeviceConnection({
                 <span>
                   {completed === "approved" ? "设备授权已确认，可以直接打开 NoteGen 完成关联。" : "这次授权不会签发任何设备会话。"}
                 </span>
-                {completed === "approved" ? <span>请返回刚才显示验证码的 NoteGen，客户端会自动继续连接。</span> : null}
+                {completed === "approved" ? <span>请返回刚才显示验证码的 NoteGen，确认工作区并查看同步进度。</span> : null}
               </AlertDescription>
             </Alert>
           ) : (
@@ -329,7 +398,7 @@ export function DeviceConnection({
                   </Button>
                 </div>
                 <FieldDescription>
-                  在 NoteGen 客户端的同步设置中填写此地址，然后输入下方验证码完成关联。
+                  在要连接的 NoteGen 客户端中打开“设置 → 同步”，填写此地址并选择浏览器授权，再将客户端显示的验证码填到下方。
                 </FieldDescription>
                 <FieldError>{serverAddressError}</FieldError>
               </Field>
@@ -401,7 +470,7 @@ export function DeviceConnection({
         ) : null}
       </Card>
       ) : null}
-      {signedIn && method === "qr" ? (
+      {signedIn && target === "other" && method === "qr" ? (
         <Card className="w-full bg-card/90 shadow-sm">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -430,7 +499,7 @@ export function DeviceConnection({
               <Alert>
                 <CheckCircle2Icon />
                 <AlertTitle>手机已成功关联</AlertTitle>
-                <AlertDescription>二维码已经失效，手机正在初始化同步空间。</AlertDescription>
+                <AlertDescription>二维码已经失效。请在手机 NoteGen 中确认工作区并查看同步进度。</AlertDescription>
               </Alert>
             ) : pairingStatus === "expired" ? (
               <Alert variant="destructive">
@@ -455,10 +524,6 @@ export function DeviceConnection({
             <Button onClick={() => void createPairing()} disabled={pairingBusy}>
               {pairingBusy ? <Spinner data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
               {pairing ? "刷新二维码" : "生成配对二维码"}
-            </Button>
-            <Button variant="outline" onClick={() => void openPairingInNoteGen()} disabled={pairingBusy}>
-              <ExternalLinkIcon data-icon="inline-start" />
-              打开 NoteGen 关联
             </Button>
             {pairing ? (
               <Button variant="outline" onClick={() => void cancelPairing()} disabled={pairingBusy}>
@@ -488,6 +553,38 @@ function formatDeviceCode(value: string): string {
 }
 
 const errorMessage = userFacingErrorMessage
+
+function isPairingUnavailable(cause: unknown): boolean {
+  return isApiRequestError(cause) && (cause.status === 404 || cause.code === "pairing_not_pending")
+}
+
+function storeCurrentDevicePairing(accountId: string, pairing: DevicePairing | null): void {
+  try {
+    const key = `notegen:current-device-pairing:${accountId}`
+    if (pairing) window.sessionStorage.setItem(key, JSON.stringify({ id: pairing.id, expiresAt: pairing.expiresAt }))
+    else window.sessionStorage.removeItem(key)
+  } catch {
+    // Pairing still works when the browser does not allow session storage.
+  }
+}
+
+function readCurrentDevicePairing(accountId: string): DevicePairing | null {
+  try {
+    const stored: unknown = JSON.parse(window.sessionStorage.getItem(`notegen:current-device-pairing:${accountId}`) ?? "null")
+    if (typeof stored === "object" && stored !== null && "id" in stored && typeof stored.id === "string"
+      && /^[a-f0-9-]{36}$/i.test(stored.id) && "expiresAt" in stored && typeof stored.expiresAt === "string") {
+      const expiresIn = Math.ceil((Date.parse(stored.expiresAt) - Date.now()) / 1_000)
+      if (Number.isFinite(expiresIn) && expiresIn > 0) {
+        // The one-time credential is never persisted; only the authenticated status lookup is restored.
+        return { id: stored.id, expiresAt: stored.expiresAt, expiresIn, pairingUri: "" }
+      }
+    }
+  } catch {
+    // Ignore expired, invalid, or unavailable browser session data.
+  }
+  storeCurrentDevicePairing(accountId, null)
+  return null
+}
 
 function formatRemainingTime(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60)

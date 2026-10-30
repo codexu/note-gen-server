@@ -60,9 +60,9 @@ export type AdminSection = "overview" | "workspaces" | "devices" | "connect" | "
 
 const sectionDetails: Record<AdminSection, { title: string; description: string }> = {
   overview: { title: "仪表盘", description: "查看同步服务、存储和最近活动。" },
-  workspaces: { title: "工作区管理", description: "检查默认与历史工作区，并清理测试数据。" },
+  workspaces: { title: "工作区管理", description: "查看同步工作区、添加浏览器备注并管理云端内容。" },
   devices: { title: "设备管理", description: "查看关联设备并撤销不再使用的会话。" },
-  connect: { title: "关联新设备", description: "输入客户端验证码或扫描二维码，安全地关联新设备。" },
+  connect: { title: "关联新设备", description: "连接当前设备上的 NoteGen，或为其他设备扫码和授权。" },
   security: { title: "账户安全", description: "修改账号密码并更新登录凭据。" },
   instance: { title: "实例状态", description: "查看服务健康、存储、任务以及需要处理的事项。" },
   operations: { title: "访问与配置", description: "管理注册、邀请、运行参数和邮件投递。" },
