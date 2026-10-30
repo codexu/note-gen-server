@@ -28,6 +28,9 @@ const EnvironmentSchema = Type.Object({
   MAX_OBJECT_BYTES: Type.Integer({ minimum: 1 }),
   MAX_REQUEST_BYTES: Type.Integer({ minimum: 1024 * 1024 }),
   MAX_BLOB_BYTES: Type.Integer({ minimum: 1 }),
+  ACCOUNT_STORAGE_MAX_BYTES: Type.Integer({ minimum: 1024 * 1024, maximum: Number.MAX_SAFE_INTEGER }),
+  INSTANCE_STORAGE_MAX_BYTES: Type.Integer({ minimum: 1024 * 1024, maximum: Number.MAX_SAFE_INTEGER }),
+  STORAGE_MIN_FREE_BYTES: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   BLOB_PART_BYTES: Type.Integer({ minimum: 1024 * 1024 }),
   CHANGE_RETENTION_DAYS: Type.Integer({ minimum: 1 }),
   VERSION_RETENTION_DAYS: Type.Integer({ minimum: 1 }),
@@ -101,6 +104,9 @@ export interface AppConfig {
   readonly maxObjectBytes: number
   readonly maxRequestBytes: number
   readonly maxBlobBytes: number
+  readonly accountStorageMaxBytes?: number
+  readonly instanceStorageMaxBytes?: number
+  readonly storageMinFreeBytes?: number
   readonly blobPartBytes: number
   readonly changeRetentionDays: number
   readonly versionRetentionDays: number
@@ -207,6 +213,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     MAX_OBJECT_BYTES: integer(environment.MAX_OBJECT_BYTES, 2 * 1024 * 1024),
     MAX_REQUEST_BYTES: integer(environment.MAX_REQUEST_BYTES, 16 * 1024 * 1024),
     MAX_BLOB_BYTES: integer(environment.MAX_BLOB_BYTES, 2 * 1024 * 1024 * 1024),
+    ACCOUNT_STORAGE_MAX_BYTES: integer(environment.ACCOUNT_STORAGE_MAX_BYTES, 5 * 1024 ** 3),
+    INSTANCE_STORAGE_MAX_BYTES: integer(environment.INSTANCE_STORAGE_MAX_BYTES, 50 * 1024 ** 3),
+    STORAGE_MIN_FREE_BYTES: integer(environment.STORAGE_MIN_FREE_BYTES, 1024 ** 3),
     BLOB_PART_BYTES: integer(environment.BLOB_PART_BYTES, 8 * 1024 * 1024),
     CHANGE_RETENTION_DAYS: integer(environment.CHANGE_RETENTION_DAYS, 90),
     VERSION_RETENTION_DAYS: integer(environment.VERSION_RETENTION_DAYS, 90),
@@ -373,6 +382,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     maxObjectBytes: candidate.MAX_OBJECT_BYTES,
     maxRequestBytes: candidate.MAX_REQUEST_BYTES,
     maxBlobBytes: candidate.MAX_BLOB_BYTES,
+    accountStorageMaxBytes: candidate.ACCOUNT_STORAGE_MAX_BYTES,
+    instanceStorageMaxBytes: candidate.INSTANCE_STORAGE_MAX_BYTES,
+    storageMinFreeBytes: candidate.STORAGE_MIN_FREE_BYTES,
     blobPartBytes: candidate.BLOB_PART_BYTES,
     changeRetentionDays: candidate.CHANGE_RETENTION_DAYS,
     versionRetentionDays: candidate.VERSION_RETENTION_DAYS,

@@ -7,6 +7,7 @@ import { assertAccountWriteAllowedInTransaction } from '../compliance/deletion-f
 import type { ChangeNotifier } from '../sync/types.js'
 import type { UsageService } from '../usage/service.js'
 import { workspaceCapabilities, type WorkspaceCapability } from './capabilities.js'
+import type { StorageCapacityGuard } from '../storage/capacity-guard.js'
 
 const NOTEGEN_DEFAULT_LIBRARY_IDEMPOTENCY_KEY = 'notegen.default-library.v1'
 
@@ -39,6 +40,7 @@ export class WorkspaceService {
     private readonly notifier: ChangeNotifier,
     private readonly usage?: UsageService,
     private readonly workspaceLimitResolver?: (accountId: string) => Promise<bigint | null>,
+    private readonly capacity?: StorageCapacityGuard,
   ) {}
 
   async create(accountId: string, input: CreateWorkspaceInput): Promise<{ id: string, createdAt: Date, latestSequence: string, nameCiphertext: string, created: boolean }> {
@@ -48,6 +50,7 @@ export class WorkspaceService {
     const workspaceLimit = await this.#workspaceLimit(accountId)
     const requestHash = input.idempotencyKey === undefined ? undefined : workspaceCreationHash(input)
     const created = await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       if (input.idempotencyKey !== undefined) {
@@ -94,6 +97,7 @@ export class WorkspaceService {
         }
       }
       await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
+      await this.capacity?.assertLocalSpace()
       const [workspace] = await tx.insert(workspaces).values({
         accountId,
         type: 'library',
@@ -109,6 +113,7 @@ export class WorkspaceService {
       await tx.insert(workspaceKeyEnvelopes).values(input.envelopes.map((envelope) => ({
         workspaceId: workspace.id, keyVersion: input.keyVersion, ...envelope,
       })))
+      await this.capacity?.assertBudget(tx, accountId)
       return { ...workspace, latestSequence: '0', nameCiphertext: input.nameCiphertext, created: true }
     })
     if (created.created) await this.#publishWorkspaceListChanged(accountId)
@@ -167,6 +172,7 @@ export class WorkspaceService {
     }
     const workspaceLimit = await this.#workspaceLimit(accountId)
     const result = await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [existing] = await tx.select({
@@ -198,6 +204,7 @@ export class WorkspaceService {
       }
 
       await this.usage?.admitWorkspace(tx, accountId, workspaceLimit)
+      await this.capacity?.assertLocalSpace()
 
       const [workspace] = await tx.insert(workspaces).values({
         accountId,
@@ -217,6 +224,7 @@ export class WorkspaceService {
         keyVersion: 1,
         ...envelope,
       })
+      await this.capacity?.assertBudget(tx, accountId)
       return {
         ...workspace,
         latestSequence: workspace.latestSequence.toString(),
@@ -593,7 +601,9 @@ export class WorkspaceService {
     await this.#validateDeviceRecipients(accountId, input.envelopes)
     try {
       const key = await this.database.db.transaction(async (tx) => {
+        await this.capacity?.lock(tx)
         await assertAccountWriteAllowedInTransaction(tx, accountId)
+        await this.capacity?.assertLocalSpace()
         const [key] = await tx.insert(workspaceKeys).values({
           workspaceId, keyVersion: input.keyVersion,
         }).returning({ keyVersion: workspaceKeys.keyVersion, createdAt: workspaceKeys.createdAt })
@@ -601,6 +611,7 @@ export class WorkspaceService {
         await tx.insert(workspaceKeyEnvelopes).values(input.envelopes.map((envelope) => ({
           workspaceId, keyVersion: input.keyVersion, ...envelope,
         })))
+        await this.capacity?.assertBudget(tx, accountId)
         return key
       })
       await this.#publishKeysChanged(workspaceId, input.keyVersion)
@@ -619,10 +630,14 @@ export class WorkspaceService {
     await this.#validateDeviceRecipients(accountId, [envelope])
     try {
       const [created] = await this.database.db.transaction(async (tx) => {
+        await this.capacity?.lock(tx)
         await assertAccountWriteAllowedInTransaction(tx, accountId)
-        return await tx.insert(workspaceKeyEnvelopes).values({
+        await this.capacity?.assertLocalSpace()
+        const result = await tx.insert(workspaceKeyEnvelopes).values({
           workspaceId, keyVersion, ...envelope,
         }).returning()
+        await this.capacity?.assertBudget(tx, accountId)
+        return result
       })
       if (created === undefined) throw new Error('Workspace key envelope insert returned no row')
       await this.#publishKeysChanged(workspaceId, keyVersion)
@@ -655,6 +670,7 @@ export class WorkspaceService {
       wrappedKey: envelope.wrappedKey, kdfSalt: envelope.kdfSalt, kdfParams: envelope.kdfParams,
     })).digest('base64url')
     const result = await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [previous] = await tx.select({
         id: workspaceKeyEnvelopes.id,
@@ -670,6 +686,7 @@ export class WorkspaceService {
         }
         return { id: previous.id, status: 'active' as const, created: false }
       }
+      await this.capacity?.assertLocalSpace()
       const [key] = await tx.select({ keyVersion: workspaceKeys.keyVersion }).from(workspaceKeys).where(and(
         eq(workspaceKeys.workspaceId, workspaceId), eq(workspaceKeys.keyVersion, keyVersion),
       )).limit(1)
@@ -683,6 +700,7 @@ export class WorkspaceService {
         replacementRequestHash: requestHash,
       }).returning({ id: workspaceKeyEnvelopes.id })
       if (created === undefined) throw new Error('Recovery envelope insert returned no row')
+      await this.capacity?.assertBudget(tx, accountId)
       return { id: created.id, status: 'active' as const, created: true }
     })
     if (result.created) await this.#publishKeysChanged(workspaceId, keyVersion)
@@ -705,7 +723,9 @@ export class WorkspaceService {
       })
     }
     await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
+      const before = await this.capacity?.readBudget(tx, accountId)
       const [key] = await tx.select({ keyVersion: workspaceKeys.keyVersion }).from(workspaceKeys).where(and(
         eq(workspaceKeys.workspaceId, workspaceId),
         eq(workspaceKeys.keyVersion, keyVersion),
@@ -722,6 +742,7 @@ export class WorkspaceService {
         keyVersion,
         ...envelope,
       })))
+      await this.capacity?.assertBudget(tx, accountId, before)
     })
     await this.#publishKeysChanged(workspaceId, keyVersion)
   }
@@ -745,7 +766,9 @@ export class WorkspaceService {
     }
 
     await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
+      const before = await this.capacity?.readBudget(tx, accountId)
       const [workspace] = await tx.select({ isDefault: workspaces.isDefault }).from(workspaces).where(and(
         eq(workspaces.id, workspaceId),
         eq(workspaces.accountId, accountId),
@@ -778,6 +801,7 @@ export class WorkspaceService {
         kdfSalt: null,
         kdfParams: null,
       })))
+      await this.capacity?.assertBudget(tx, accountId, before)
     })
     await Promise.all(keys.map(key => this.#publishKeysChanged(workspaceId, key.keyVersion)))
   }
@@ -836,14 +860,21 @@ export class WorkspaceService {
   }
 
   async rename(accountId: string, workspaceId: string, nameCiphertext: string) {
-    await this.assertCapability(accountId, workspaceId, 'workspace.rename')
-    const [updated] = await this.database.db.update(workspaces).set({
-      nameCiphertext,
-      updatedAt: new Date(),
-    }).where(and(eq(workspaces.id, workspaceId), isNull(workspaces.deletedAt))).returning({
-      id: workspaces.id,
-      nameCiphertext: workspaces.nameCiphertext,
-      updatedAt: workspaces.updatedAt,
+    const access = await this.assertCapability(accountId, workspaceId, 'workspace.rename')
+    const updated = await this.database.db.transaction(async tx => {
+      await this.capacity?.lock(tx)
+      await assertAccountWriteAllowedInTransaction(tx, accountId)
+      const before = await this.capacity?.readBudget(tx, access.ownerAccountId)
+      const [row] = await tx.update(workspaces).set({
+        nameCiphertext,
+        updatedAt: new Date(),
+      }).where(and(eq(workspaces.id, workspaceId), isNull(workspaces.deletedAt))).returning({
+        id: workspaces.id,
+        nameCiphertext: workspaces.nameCiphertext,
+        updatedAt: workspaces.updatedAt,
+      })
+      await this.capacity?.assertBudget(tx, access.ownerAccountId, before)
+      return row
     })
     if (updated === undefined) {
       throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })

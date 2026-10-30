@@ -13,6 +13,7 @@ import type { WorkspaceService } from '../workspaces/service.js'
 import type { CiphertextEnvelope, SyncCommand, SyncCommandResult } from './types.js'
 import type { UsageService } from '../usage/service.js'
 import type { WorkspaceCapability } from '../workspaces/capabilities.js'
+import type { StorageCapacityGuard } from '../storage/capacity-guard.js'
 
 const cacheableRejectionCodes = new Set([
   'request_invalid', 'object_too_large', 'ciphertext_hash_mismatch',
@@ -99,6 +100,7 @@ export class DurableSyncService {
     private readonly syncEpoch: string,
     private readonly usage?: UsageService,
     private readonly storageLimitResolver?: (accountId: string) => Promise<bigint | null>,
+    private readonly capacity?: StorageCapacityGuard,
   ) {}
 
   async session(
@@ -373,8 +375,9 @@ export class DurableSyncService {
     expectedSyncEpoch?: string,
   ) {
     this.#assertSyncEpoch(expectedSyncEpoch)
-    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
+    const access = await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
     const session = await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       await tx.delete(syncBootstrapSessions).where(sql`${syncBootstrapSessions.expiresAt} <= now()`)
       if (bootstrapId !== null) {
@@ -392,6 +395,7 @@ export class DurableSyncService {
       const [lockedWorkspace] = await tx.select({ latestSequence: workspaces.latestSequence }).from(workspaces)
         .where(eq(workspaces.id, workspaceId)).limit(1).for('update')
       if (lockedWorkspace === undefined) throw new ApiError({ code: 'workspace_not_found', message: 'Workspace not found', statusCode: 404 })
+      await this.capacity?.assertLocalSpace()
       const activeSessions = await tx.select({ id: syncBootstrapSessions.id }).from(syncBootstrapSessions).where(and(
         eq(syncBootstrapSessions.workspaceId, workspaceId), gt(syncBootstrapSessions.expiresAt, new Date()),
       )).limit(8)
@@ -421,6 +425,7 @@ export class DurableSyncService {
           on d.workspace_id = o.workspace_id and d.object_id = o.object_id
         where o.workspace_id = ${workspaceId}
       `)
+      await this.capacity?.assertBudget(tx, access.ownerAccountId)
       return created
     })
     const rows = await this.database.db.select({ manifest: syncBootstrapObjects, object: objectVersions })
@@ -531,6 +536,7 @@ export class DurableSyncService {
     const requestHash = createHash('sha256').update(JSON.stringify(command)).digest('base64url')
     const storageLimit = this.storageLimitResolver === undefined ? null : await this.storageLimitResolver(accountId)
     const result = await this.database.db.transaction(async (tx) => {
+      await this.capacity?.lock(tx)
       await assertAccountWriteAllowedInTransaction(tx, accountId)
       const [lockedWorkspace] = await tx.select({ id: workspaces.id }).from(workspaces).where(and(
         eq(workspaces.id, workspaceId), eq(workspaces.accountId, accountId), isNull(workspaces.deletedAt),
@@ -552,6 +558,9 @@ export class DurableSyncService {
         return { ...(previous.result as SyncCommandResult), duplicate: true }
       }
 
+      const releasesStorage = command.type === 'delete-object' || command.type === 'delete-subtree'
+        || (command.type === 'resolve-conflict' && command.deleteObject === true)
+      if (!releasesStorage) await this.capacity?.assertLocalSpace()
       if (storageLimit !== null) await this.usage?.reconcileCurrentInTransaction(tx, accountId)
       const applied = await this.#apply(tx, accountId, deviceId, workspaceId, command, storageLimit)
       await tx.insert(syncCommands).values({
@@ -559,8 +568,10 @@ export class DurableSyncService {
         syncEpoch: this.syncEpoch,
         result: applied as unknown as Record<string, unknown>,
       })
-      const releasesStorage = command.type === 'delete-object' || command.type === 'delete-subtree'
-        || (command.type === 'resolve-conflict' && command.deleteObject === true)
+      // Allow a real deletion even if an operator lowered the budget below
+      // existing use. Failed/conflicting delete requests must not become an
+      // unbounded encrypted-conflict storage bypass.
+      if (!releasesStorage || applied.status !== 'applied') await this.capacity?.assertBudget(tx, accountId)
       if (storageLimit !== null && this.usage !== undefined && !releasesStorage) {
         const exact = await this.usage.reconcileCurrentInTransaction(tx, accountId)
         if (exact !== undefined

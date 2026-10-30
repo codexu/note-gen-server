@@ -41,6 +41,7 @@ import { BackupInventoryService } from './backup/inventory-service.js'
 import { AccountServiceAudit } from './audit/service.js'
 import { InstallationService } from './installation/service.js'
 import { WorkspaceCollaborationService } from './workspaces/collaboration-service.js'
+import { StorageCapacityGuard } from './storage/capacity-guard.js'
 
 async function main(): Promise<void> {
   const config = loadConfig()
@@ -160,13 +161,14 @@ async function main(): Promise<void> {
     await admin.recoverInterruptedJobs()
     notifier = new PostgresChangeNotifier(database.sql)
     await notifier.initialize()
-    const workspaces = new WorkspaceService(database, notifier)
+    const capacity = new StorageCapacityGuard(config)
+    const workspaces = new WorkspaceService(database, notifier, undefined, undefined, capacity)
     const workspaceCollaboration = new WorkspaceCollaborationService(database, workspaces, notifier)
     const syncProtocol = new DurableSyncService(database, workspaces, notifier, () => config.maxObjectBytes,
-      syncEpoch)
+      syncEpoch, undefined, undefined, capacity)
     const blobService = new BlobService(
       database, workspaces, blobStorage, () => config.maxBlobBytes, config.blobPartBytes,
-      undefined, undefined, syncEpoch,
+      undefined, undefined, syncEpoch, capacity,
     )
     const maintenance = new MaintenanceService(
       database, blobStorage, config, maintenanceCoordinator,

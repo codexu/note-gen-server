@@ -8,6 +8,7 @@ import type { BlobStorage } from '../storage/blob-storage.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import { BLOB_COMPLETION_LEASE_MS } from './constants.js'
 import type { UsageService } from '../usage/service.js'
+import type { StorageCapacityGuard } from '../storage/capacity-guard.js'
 
 export class BlobService {
   constructor(
@@ -19,6 +20,7 @@ export class BlobService {
     private readonly usage?: UsageService,
     private readonly storageLimitResolver?: (accountId: string) => Promise<bigint | null>,
     private readonly syncEpoch?: string,
+    private readonly capacity?: StorageCapacityGuard,
   ) {}
 
   async createUpload(
@@ -27,7 +29,7 @@ export class BlobService {
     input: { blobId: string, expectedSize: string, ciphertextHash: string, expectedSyncEpoch?: string },
   ) {
     this.#assertExpectedSyncEpoch(input.expectedSyncEpoch)
-    await this.workspaces.assertCapability(accountId, workspaceId, 'content.create')
+    const access = await this.workspaces.assertCapability(accountId, workspaceId, 'content.create')
     const expectedSize = parseSize(input.expectedSize)
     if (expectedSize === 0n) {
       throw new ApiError({ code: 'blob_empty', message: 'Blob must contain at least one byte', statusCode: 400 })
@@ -83,6 +85,7 @@ export class BlobService {
     }
 
     const storageKey = `${workspaceId}/${input.blobId.slice(0, 2)}/${input.blobId}`
+    await this.capacity?.assertLocalSpace(expectedSize)
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
     const storageLimit = this.storageLimitResolver === undefined ? null : await this.storageLimitResolver(accountId)
     const reservation = this.usage === undefined ? undefined : await this.usage.reserveBlob({
@@ -94,6 +97,7 @@ export class BlobService {
       const startedProviderUploadId = await this.storage.beginUpload(storageKey)
       providerUploadId = startedProviderUploadId
       const [upload] = await this.database.db.transaction(async (tx) => {
+        await this.capacity?.lock(tx)
         await assertAccountWriteAllowedInTransaction(tx, accountId)
         await tx.insert(blobs).values({
           workspaceId, blobId: input.blobId, size: expectedSize,
@@ -105,12 +109,14 @@ export class BlobService {
             storageKey, state: 'uploading', updatedAt: new Date(),
           },
         })
-        return tx.insert(blobUploads).values({
+        const created = await tx.insert(blobUploads).values({
           workspaceId, blobId: input.blobId, storageKey, providerUploadId: startedProviderUploadId,
           expectedSize, expiresAt,
           ...(this.syncEpoch === undefined ? {} : { syncEpoch: this.syncEpoch }),
           ...(reservation === undefined ? {} : { usageReservationId: reservation.reservationId }),
         }).returning({ id: blobUploads.id, expiresAt: blobUploads.expiresAt })
+        await this.capacity?.assertBudget(tx, access.ownerAccountId)
+        return created
       })
       if (upload === undefined) throw new Error('Blob upload insert returned no row')
       if (reservation !== undefined) await this.usage?.markExternalStarted(reservation.reservationId)
@@ -171,6 +177,7 @@ export class BlobService {
         },
       })
     }
+    await this.capacity?.assertLocalSpace(BigInt(data.byteLength))
     const etag = await this.storage.writePart(upload.storageKey, upload.providerUploadId, partNumber, data)
     const received = await this.database.db.transaction(async (tx) => {
       await assertAccountWriteAllowedInTransaction(tx, accountId)
@@ -244,6 +251,7 @@ export class BlobService {
         throw new ApiError({ code: 'blob_incomplete', message: 'Uploaded parts do not match expected size', statusCode: 409 })
       }
       if (!await this.storage.exists(upload.storageKey)) {
+        await this.capacity?.assertLocalSpace(upload.expectedSize)
         await this.storage.completeUpload(
           upload.storageKey,
           upload.providerUploadId,
