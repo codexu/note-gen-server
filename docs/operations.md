@@ -13,6 +13,7 @@ createdb -O notegen notegen
 
 - `DATABASE_URL`
 - `AUTH_SECRET`
+- 首次安装的 `SETUP_TOKEN`（至少 32 个独立随机字符）
 - `PUBLIC_BASE_URL`
 
 然后运行：
@@ -23,7 +24,7 @@ pnpm dev
 curl --fail http://localhost:3789/health/ready
 ```
 
-可使用 `openssl rand -hex 32` 分别生成数据库密码和 `AUTH_SECRET`；十六进制数据库密码可直接安全放入 PostgreSQL URL。
+可使用 `openssl rand -hex 32` 分别生成数据库密码、`AUTH_SECRET` 和 `SETUP_TOKEN`；十六进制数据库密码可直接安全放入 PostgreSQL URL。
 
 `pnpm dev` 会先执行全部 Drizzle migration，成功后才启动 HTTP 服务。
 
@@ -47,7 +48,7 @@ curl --fail http://localhost:3789/health/ready
 
 ## 首次安装
 
-空数据库启动后只装配安装页面、健康检查和安装 API。访问 Web 页面并完成向导。服务会在安装响应结束后自动关闭安装态监听、重新读取数据库配置并装配完整服务；页面检测到就绪后自动进入普通登录入口。空实例不要求额外安装密钥，因此应先完成安装，再开放公网入口。
+空数据库启动后只装配安装页面、健康检查和安装 API。访问 Web 页面并完成向导。服务会在安装响应结束后自动关闭安装态监听、重新读取数据库配置并装配完整服务；页面检测到就绪后自动进入普通登录入口。空实例要求操作者在服务器环境变量中配置至少 32 个随机字符的 `SETUP_TOKEN`，并在安装页输入；服务端以恒定时间比较验证所有权。安装成功后入口由数据库永久关闭，凭据不再可用。先完成安装，再开放公网入口。
 
 系统管理员可以在 Web 后台的“系统管理”中授予或移除其他账号的管理员权限、停用或恢复账号，并查看后台操作审计。停用使用独立的 `suspended_at` 状态，不会进入账号删除保留期；账号申请删除仍由 `disabled_at` 和维护任务处理。系统会阻止停用、降级或删除最后一个可用管理员。
 

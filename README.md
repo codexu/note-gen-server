@@ -118,7 +118,7 @@ createuser notegen
 createdb -O notegen notegen
 ```
 
-复制并填写本地配置。`DATABASE_URL`、`AUTH_SECRET` 与 `PUBLIC_BASE_URL` 必须设置为自己的值：
+复制并填写本地配置。`DATABASE_URL`、`AUTH_SECRET`、首次安装的 `SETUP_TOKEN` 与 `PUBLIC_BASE_URL` 必须设置为自己的值：
 
 ```bash
 cp .env.example .env

@@ -21,6 +21,7 @@ export function createInstallationRoutes(
     app.post('/v1/installation/complete', {
       config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
       schema: {
+        headers: Type.Object({ 'x-setup-token': Type.Optional(Type.String({ maxLength: 1024 })) }),
         body: Type.Object({
           serverName: Type.String({ minLength: 1, maxLength: 100, pattern: '.*\\S.*' }),
           administrator: Type.Object({
@@ -37,7 +38,7 @@ export function createInstallationRoutes(
       },
     }, async (request, reply) => {
       assertTrustedOrigin(config, request.headers.origin)
-      const result = await installation.complete(request.body)
+      const result = await installation.complete(request.body, request.headers['x-setup-token'])
       if (onInstallationComplete !== undefined) {
         reply.raw.once('finish', onInstallationComplete)
       }

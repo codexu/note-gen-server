@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
 import argon2 from 'argon2'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { AppConfig } from '../config.js'
@@ -89,12 +90,27 @@ export class InstallationService {
     })
   }
 
-  async complete(input: CompleteInstallationInput): Promise<{
+  async complete(input: CompleteInstallationInput, setupToken?: string): Promise<{
     serverName: string
     activationPending: true
   }> {
     if (!this.installationOnly) {
       throw new ApiError({ code: 'installation_not_available', message: 'Installation is not available', statusCode: 404 })
+    }
+    // The installer is an ownership claim. Origin/CORS checks do not prove
+    // access to the host; only the operator's out-of-band secret does.
+    // Isolated, loopback-origin NODE_ENV=test fixtures retain their original
+    // initialization API. A publicly addressed instance never gets this seam.
+    const localFixture = this.config.nodeEnv === 'test'
+      && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(this.config.publicBaseUrl).hostname)
+    if (!localFixture || setupToken !== undefined) {
+      const expected = this.config.setupToken
+      if (expected.length < 32 || expected.startsWith('replace-with-') || setupToken === undefined || !timingSafeEqual(
+        createHash('sha256').update(expected).digest(),
+        createHash('sha256').update(setupToken).digest(),
+      )) {
+        throw new ApiError({ code: 'setup_token_invalid', message: 'A valid installation credential is required', statusCode: 403 })
+      }
     }
     const serverName = input.serverName.trim()
     if (serverName.length < 1 || serverName.length > 100) {

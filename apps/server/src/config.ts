@@ -14,7 +14,7 @@ const EnvironmentSchema = Type.Object({
   SERVER_NAME: Type.String({ minLength: 1, maxLength: 100 }),
   TRUST_PROXY: Type.Boolean(),
   AUTH_SECRET: Type.String({ minLength: 32 }),
-  SETUP_TOKEN: Type.String(),
+  SETUP_TOKEN: Type.String({ maxLength: 1024 }),
   REGISTRATION_MODE: Type.Union([Type.Literal('closed'), Type.Literal('open')]),
   BLOB_STORAGE_DRIVER: Type.Union([Type.Literal('filesystem'), Type.Literal('s3')]),
   BLOB_STORAGE_PATH: Type.String({ minLength: 1 }),
@@ -192,9 +192,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     SERVER_NAME: environment.SERVER_NAME?.trim() || 'NoteGen Sync Server',
     TRUST_PROXY: environment.TRUST_PROXY === 'true',
     AUTH_SECRET: environment.AUTH_SECRET ?? 'development-only-auth-secret-change-me',
-    // Kept as an optional legacy import source for old uninitialized/restore
-    // flows. New installations are claimed directly through the Web guide.
-    SETUP_TOKEN: environment.SETUP_TOKEN ?? '',
+    // Required to prove ownership of a new instance; never returned over HTTP.
+    SETUP_TOKEN: environment.SETUP_TOKEN?.trim() ?? '',
     REGISTRATION_MODE: environment.REGISTRATION_MODE === 'open' ? 'open' : 'closed',
     BLOB_STORAGE_DRIVER: environment.BLOB_STORAGE_DRIVER === 's3' ? 's3' : 'filesystem',
     BLOB_STORAGE_PATH: environment.BLOB_STORAGE_PATH ?? './data/blobs',
@@ -266,7 +265,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     throw new Error(`Invalid server configuration: ${errors}`)
   }
 
-  if (candidate.NODE_ENV === 'production' && candidate.AUTH_SECRET === 'development-only-auth-secret-change-me') {
+  if (candidate.NODE_ENV === 'production' && (candidate.AUTH_SECRET === 'development-only-auth-secret-change-me'
+    || candidate.AUTH_SECRET.startsWith('replace-with-'))) {
     throw new Error('AUTH_SECRET must be explicitly configured in production')
   }
 

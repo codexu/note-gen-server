@@ -12,6 +12,7 @@ services:
       DATABASE_URL: postgresql://notegen:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/notegen
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
       AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
       TRUST_PROXY: ${TRUST_PROXY:-false}
       BLOB_STORAGE_DRIVER: filesystem
       BLOB_STORAGE_PATH: /app/data/blobs

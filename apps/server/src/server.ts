@@ -69,6 +69,9 @@ async function main(): Promise<void> {
     const installationProbe = new InstallationService(database, config, true)
     let persistedInstallation = await installationProbe.persistedSettings()
     if (persistedInstallation === undefined) {
+      if (config.nodeEnv !== 'test' && (config.setupToken.length < 32 || config.setupToken.startsWith('replace-with-'))) {
+        throw new Error('An empty instance requires SETUP_TOKEN with at least 32 random characters; enter it in the installation guide')
+      }
       let finishInstallation!: () => void
       const installationCompleted = new Promise<void>((resolve) => { finishInstallation = resolve })
       const instanceId = await getOrCreateInstanceId(database)

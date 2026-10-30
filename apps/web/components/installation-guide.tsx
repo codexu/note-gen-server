@@ -24,13 +24,15 @@ const COPY = {
     firstInstall: "首次安装",
     title: "创建管理员账号",
     description: "这个账号将拥有实例管理权限。登录后可以继续配置注册、邮件、存储限制和数据保留策略。",
+    setupToken: "安装凭据",
+    setupTokenDescription: "输入服务器环境变量 SETUP_TOKEN 中的随机值。安装成功后凭据立即失效。",
     administratorLogin: "管理员账号",
     administratorPassword: "管理员密码",
     passwordDescription: "至少 8 个字符，请使用独立密码。",
     confirmPassword: "确认密码",
     passwordMismatch: "两次输入的密码不一致。",
     securityTitle: "完成初始化后再开放公网",
-    securityDescription: "空实例允许首位访问者创建管理员。请先完成此步骤，再配置公开反向代理或开放端口。",
+    securityDescription: "只有持有服务器安装凭据的人可以创建管理员。请使用 HTTPS 或本机连接，并在完成初始化后开放访问。",
     install: "创建管理员并启动",
     installing: "正在初始化",
     failed: "安装失败",
@@ -42,13 +44,15 @@ const COPY = {
     firstInstall: "First installation",
     title: "Create an administrator account",
     description: "This account will have full instance administration access. Registration, email, storage limits, and retention policies can be configured after signing in.",
+    setupToken: "Installation credential",
+    setupTokenDescription: "Enter the random SETUP_TOKEN configured on the server. It stops working after installation.",
     administratorLogin: "Administrator account",
     administratorPassword: "Administrator password",
     passwordDescription: "Use at least 8 characters and a password unique to this service.",
     confirmPassword: "Confirm password",
     passwordMismatch: "The passwords do not match.",
     securityTitle: "Finish initialization before exposing the server",
-    securityDescription: "The first visitor to an empty instance can create its administrator. Complete this page before configuring a public reverse proxy or opening the port.",
+    securityDescription: "Only the holder of the server installation credential can create its administrator. Use HTTPS or a local connection and finish initialization before opening access.",
     install: "Create administrator and start",
     installing: "Initializing",
     failed: "Installation failed",
@@ -64,6 +68,7 @@ export function InstallationGuide({ initialStatus, onStatusChange }: {
 }) {
   const { locale } = useLocale()
   const c = COPY[locale]
+  const [setupToken, setSetupToken] = useState("")
   const [login, setLogin] = useState("")
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -102,7 +107,7 @@ export function InstallationGuide({ initialStatus, onStatusChange }: {
   }, [initialStatus.activationPending, onStatusChange])
 
   const passwordMismatch = confirmPassword.length > 0 && password !== confirmPassword
-  const canSubmit = login.trim().length > 0 && password.length >= 8 && password === confirmPassword
+  const canSubmit = setupToken.trim().length >= 32 && login.trim().length > 0 && password.length >= 8 && password === confirmPassword
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -112,11 +117,13 @@ export function InstallationGuide({ initialStatus, onStatusChange }: {
     try {
       const result = await apiRequest<{ serverName: string, activationPending: true }>("/v1/installation/complete", {
         method: "POST",
+        headers: { "x-setup-token": setupToken.trim() },
         body: JSON.stringify({
           serverName: initialStatus.serverName,
           administrator: { login: login.trim(), password },
         }),
       })
+      setSetupToken("")
       setPassword("")
       setConfirmPassword("")
       onStatusChange({ installationRequired: false, activationPending: result.activationPending, serverName: result.serverName })
@@ -168,8 +175,13 @@ export function InstallationGuide({ initialStatus, onStatusChange }: {
           <CardContent className="flex flex-col gap-6">
             <FieldGroup>
               <Field>
+                <FieldLabel htmlFor="installation-token">{c.setupToken}</FieldLabel>
+                <Input id="installation-token" type="password" value={setupToken} onChange={(event) => setSetupToken(event.target.value)} autoComplete="off" minLength={32} maxLength={1024} autoFocus required />
+                <FieldDescription>{c.setupTokenDescription}</FieldDescription>
+              </Field>
+              <Field>
                 <FieldLabel htmlFor="installation-login">{c.administratorLogin}</FieldLabel>
-                <Input id="installation-login" value={login} onChange={(event) => setLogin(event.target.value)} autoComplete="username" maxLength={200} autoFocus required />
+                <Input id="installation-login" value={login} onChange={(event) => setLogin(event.target.value)} autoComplete="username" maxLength={200} required />
               </Field>
               <Field>
                 <FieldLabel htmlFor="installation-password">{c.administratorPassword}</FieldLabel>
@@ -214,13 +226,13 @@ function InstallationLayout({ children }: { children: ReactNode }) {
 function installationErrorMessage(cause: unknown, locale: Locale): string {
   if (locale === "zh-CN") {
     if (isApiRequestError(cause)) {
-      const messages: Record<string, string> = { installation_already_completed: "实例已经完成安装。", installation_existing_data: "数据库中已经存在账号数据，不能作为全新实例初始化。", installation_server_name_invalid: "服务名称配置无效。", installation_administrator_required: "必须创建首位管理员账号。", installation_administrator_invalid: "管理员账号格式不正确。" }
+      const messages: Record<string, string> = { setup_token_invalid: "安装凭据无效，请核对服务器 SETUP_TOKEN。", installation_already_completed: "实例已经完成安装。", installation_existing_data: "数据库中已经存在账号数据，不能作为全新实例初始化。", installation_server_name_invalid: "服务名称配置无效。", installation_administrator_required: "必须创建首位管理员账号。", installation_administrator_invalid: "管理员账号格式不正确。" }
       return messages[cause.code] ?? `安装请求失败（HTTP ${cause.status}）。`
     }
     return cause instanceof TypeError ? "无法连接同步服务器，请确认服务已启动。" : "安装未完成，请稍后重试。"
   }
   if (isApiRequestError(cause)) {
-    const messages: Record<string, string> = { installation_already_completed: "This instance has already been installed.", installation_existing_data: "The database already contains account data and cannot be initialized as a new instance.", installation_server_name_invalid: "The configured service name is invalid.", installation_administrator_required: "An initial administrator account is required.", installation_administrator_invalid: "The administrator account format is invalid." }
+    const messages: Record<string, string> = { setup_token_invalid: "Invalid installation credential. Check SETUP_TOKEN on the server.", installation_already_completed: "This instance has already been installed.", installation_existing_data: "The database already contains account data and cannot be initialized as a new instance.", installation_server_name_invalid: "The configured service name is invalid.", installation_administrator_required: "An initial administrator account is required.", installation_administrator_invalid: "The administrator account format is invalid." }
     return messages[cause.code] ?? `The installation request failed (HTTP ${cause.status}).`
   }
   return cause instanceof TypeError ? "Could not connect to the sync server. Make sure it is running." : "Installation did not finish. Try again."
