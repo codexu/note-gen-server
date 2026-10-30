@@ -354,6 +354,16 @@ export class DurableSyncService {
     }
   }
 
+  async releaseBootstrap(accountId: string, workspaceId: string, bootstrapId: string, expectedSyncEpoch: string) {
+    this.#assertSyncEpoch(expectedSyncEpoch)
+    await this.workspaces.assertCapability(accountId, workspaceId, 'content.read')
+    // Deleting the temporary session cascades only its snapshot manifest.
+    // Objects, versions, device cursors and user data remain unchanged.
+    await this.database.db.delete(syncBootstrapSessions).where(and(
+      eq(syncBootstrapSessions.id, bootstrapId), eq(syncBootstrapSessions.workspaceId, workspaceId),
+    ))
+  }
+
   async bootstrap(
     accountId: string,
     workspaceId: string,

@@ -146,6 +146,9 @@ GET .../sync/bootstrap?afterObjectId=<id>&bootstrapId=<uuid>&expectedSyncEpoch=<
 
 Session 过期时丢弃 staging 中未完成的 manifest 并从第一页重新开始，不能把不同快照的页面拼接在一起。服务端在 session 存活期间保护该快照依赖的历史版本不被清理。
 
+`features.bootstrapRelease=true` 时，客户端完成读取或中止读取（包括解密失败、取消和重新扫描）后，必须在 `finally` 中调用
+`DELETE /v1/workspaces/:workspaceId/sync/bootstrap/:bootstrapId?expectedSyncEpoch=<uuid>`，释放本次操作创建的临时快照。该接口要求当前账号对工作区具有 `content.read` 权限，重复释放返回 `204`；它只删除该快照会话及其临时 manifest，不修改用户对象、历史版本或设备游标。若后续处理仍需由快照保护服务端历史版本，应在完成这些读取后再释放。旧服务端未声明此能力时，客户端仍依赖快照的 30 分钟闲置过期机制。每个工作区最多同时保留 8 个活动快照，容量限制应提示等待，不能无限重建快照。
+
 不能为每页重新选择快照，否则分页期间的并发修改可能被遗漏。
 
 ## Blob

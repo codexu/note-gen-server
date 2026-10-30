@@ -382,6 +382,18 @@ export function createSyncRoutes(
       )
     })
 
+    app.delete('/v1/workspaces/:workspaceId/sync/bootstrap/:bootstrapId', {
+      schema: {
+        params: Type.Object({ workspaceId: Type.String({ format: 'uuid' }), bootstrapId: Type.String({ format: 'uuid' }) }),
+        querystring: Type.Object({ expectedSyncEpoch: Type.String({ format: 'uuid' }) }),
+        response: { 204: Type.Null() },
+      },
+    }, async (request, reply) => {
+      const claims = await requireAuth(request, tokens, auth)
+      await sync.releaseBootstrap(claims.accountId, request.params.workspaceId, request.params.bootstrapId, request.query.expectedSyncEpoch)
+      return reply.code(204).send()
+    })
+
     app.get('/v1/workspaces/:workspaceId/documents/:documentId/updates', {
       schema: {
         params: Type.Object({ workspaceId: Type.String({ format: 'uuid' }), documentId: Type.String({ minLength: 1, maxLength: 512 }) }),
