@@ -15,7 +15,7 @@ ghcr.io/codexu/note-gen-server
 - 每次同时构建 `linux/amd64` 与 `linux/arm64`，并生成 provenance、SBOM 和 artifact attestation。
 - CI 会在独立临时数据库中还原到倒数第二条 migration，写入代表性的账户、工作区和加密对象，再升级到当前版本并校验数据与 migration 账本。升级测试失败时不会发布镜像。
 
-根目录、服务端、管理 Web 和 contracts 的 `package.json` 版本必须一致，否则发布任务会停止。Compose 要求明确设置 `NOTEGEN_SERVER_IMAGE`。当前示例使用本地源码构建镜像，待维护者发布并核对版本存在后再改成 GHCR 标签或 digest。本次准备发布 `0.1.0-beta.1`；工作流成功和匿名拉取验证完成前，不应视为已可用。
+根目录、服务端、管理 Web 和 contracts 的 `package.json` 版本必须一致，否则发布任务会停止。Compose 要求明确设置 `NOTEGEN_SERVER_IMAGE`。当前示例固定到已发布并通过匿名拉取验证的 `0.1.0-beta.1`。本次发布记录见 [GitHub Actions](https://github.com/codexu/note-gen-server/actions/runs/41249600438)，镜像 digest 为 `sha256:622fc2a8a0b016e29032085a94a4943f3d460b2e1e0567963c04b87c26ce267a`。
 
 ## 首次发布后的必要设置
 
@@ -66,7 +66,7 @@ rm -rf "$notegen_docker_config"
 
 清单应包含 `linux/amd64` 与 `linux/arm64`。同时记录该次发布的 digest；需要固定精确构建时可使用 `ghcr.io/codexu/note-gen-server@sha256:...`。
 
-确认成功后，将 `.env.docker.example` 的默认镜像改为已发布的完整版本，并同步 README、Docker 部署文档的快速启动命令。部署者在 `.env` 中设置：
+每次确认新版本成功后，将 `.env.docker.example` 的默认镜像改为该完整版本，并同步 README、Docker 部署文档的快速启动命令。当前部署者在 `.env` 中设置：
 
 ```dotenv
 NOTEGEN_SERVER_IMAGE=ghcr.io/codexu/note-gen-server:0.1.0-beta.1

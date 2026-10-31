@@ -10,18 +10,19 @@ NoteGen Sync Server 是 NoteGen 客户端使用的免费同步服务。官方公
 
 ### Docker Compose（推荐体验）
 
-适合单副本个人测试实例。本次准备发布 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1`，同时提供 `beta` 频道。发布并核对匿名拉取完成前，先从当前源码构建，再按部署文档完成安装。
+适合单副本个人测试实例。测试版镜像 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1` 已发布，可匿名拉取，支持 Linux AMD64 和 ARM64。
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git
 cd note-gen-server
 cp .env.docker.example .env
 # 分别生成数据库密码、AUTH_SECRET、SETUP_TOKEN，并填写 PUBLIC_BASE_URL
-docker compose -f compose.yaml -f compose.dev.yaml up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
 ```
 
-发布完成后，可把 `NOTEGEN_SERVER_IMAGE` 改为已经核对存在的版本或 digest，再使用 `docker compose pull` 和 `docker compose up -d`。镜像发布规则见 [容器发布](docs/deployment/container-publishing.md)。
+示例配置已固定到 `0.1.0-beta.1`。完成管理员安装后即可连接 NoteGen；后续升级先备份，再修改镜像版本并重新拉取、启动。镜像发布规则见 [容器发布](docs/deployment/container-publishing.md)。
 
 详细的首次初始化、HTTPS、日志和数据说明见 [Docker Compose 部署](docs/deployment/docker.md)。
 

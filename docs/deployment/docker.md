@@ -20,7 +20,7 @@ NoteGen Server 自托管目前处于实验阶段。部署方式、配置和数�
 
 ## 当前版本启动方式
 
-本次准备发布测试镜像 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1`，同时提供 `beta` 频道。发布成功并核对匿名拉取前，当前仍使用源码构建：
+测试镜像 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1` 已发布，支持 `linux/amd64` 与 `linux/arm64`，并已验证匿名拉取。部署时固定完整版本；`beta` 频道会随测试版本更新。先下载部署配置：
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git
@@ -30,17 +30,18 @@ cp .env.docker.example .env
 
 分别运行三次 `openssl rand -hex 32`，为 `POSTGRES_PASSWORD`、`AUTH_SECRET`、`SETUP_TOKEN` 生成不同的随机值，并设置客户端实际访问的 `PUBLIC_BASE_URL`。`SETUP_TOKEN` 是安装所有权凭据，不是管理员密码，不能公开发送；安装完成后入口永久关闭，可从环境文件移除它。已有实例不要求补设。
 
-示例默认 `NOTEGEN_SERVER_IMAGE=notegen-server:dev`：
+示例默认 `NOTEGEN_SERVER_IMAGE=ghcr.io/codexu/note-gen-server:0.1.0-beta.1`，无需本机构建：
 
 ```bash
-docker compose -f compose.yaml -f compose.dev.yaml up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
 curl --fail http://127.0.0.1:3789/health/ready
 ```
 
 首次启动会等待 PostgreSQL 并执行迁移。使用本机连接或 HTTPS 打开 Web，输入安装凭据、管理员账号与独立密码，再完成安装。之后才向其他用户开放入口。
 
-维护者完成 [镜像发布](container-publishing.md) 并核对匿名拉取成功后，将 `.env` 中的 `NOTEGEN_SERVER_IMAGE` 改为 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1`（或该次发布的 digest），再使用：
+后续升级前先完成备份，将 `.env` 中的 `NOTEGEN_SERVER_IMAGE` 改为新版本（或该次发布的 digest），再执行：
 
 ```bash
 docker compose pull
@@ -76,7 +77,7 @@ sync.example.com {
 
 ## 从本地源码构建容器
 
-贡献者可以复用同一套运行拓扑，只把官方镜像替换为当前工作区构建结果：
+贡献者可以复用同一套运行拓扑，先在 `.env` 中设置 `NOTEGEN_SERVER_IMAGE=notegen-server:dev`，再用开发覆盖文件构建：
 
 ```bash
 docker compose -f compose.yaml -f compose.dev.yaml up -d --build
