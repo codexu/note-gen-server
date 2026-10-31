@@ -220,6 +220,8 @@ export interface RuntimeConfigurationContract {
   serverName: string
   maxObjectBytes: number
   maxBlobBytes: number
+  accountStorageMaxBytes: number
+  instanceStorageMaxBytes: number
   changeRetentionDays: number
   versionRetentionDays: number
   tombstoneRetentionDays: number

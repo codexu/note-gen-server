@@ -10,7 +10,7 @@ NoteGen Sync Server 是 NoteGen 客户端使用的免费同步服务。官方公
 
 ### Docker Compose（推荐体验）
 
-适合单副本个人测试实例。当前安装保护、容量限制和恢复工具的修复尚未发布到 GHCR；先从当前源码构建，再按部署文档完成安装。不要将不存在的 `latest` 或旧镜像当成已包含本次修复。
+适合单副本个人测试实例。本次准备发布 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1`，同时提供 `beta` 频道。发布并核对匿名拉取完成前，先从当前源码构建，再按部署文档完成安装。
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git

@@ -123,6 +123,8 @@ const RuntimeConfiguration = Type.Object({
   serverName: Type.String({ minLength: 1, maxLength: 100 }),
   maxObjectBytes: Type.Integer({ minimum: 1, maximum: 67_108_864 }),
   maxBlobBytes: Type.Integer({ minimum: 1, maximum: 1_099_511_627_776 }),
+  accountStorageMaxBytes: Type.Integer({ minimum: 1_048_576, maximum: Number.MAX_SAFE_INTEGER }),
+  instanceStorageMaxBytes: Type.Integer({ minimum: 1_048_576, maximum: Number.MAX_SAFE_INTEGER }),
   changeRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),
   versionRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),
   tombstoneRetentionDays: Type.Integer({ minimum: 1, maximum: 3650 }),

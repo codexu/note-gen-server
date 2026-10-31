@@ -94,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
             echo "Invalid release version: $VERSION"
             exit 1
           fi
@@ -106,6 +106,15 @@ jobs:
               exit 1
             fi
           done
+
+          if [[ "$VERSION" == *-* ]]; then
+            CHANNEL="${VERSION#*-}"
+            echo "channel=${CHANNEL%%.*}" >> "$GITHUB_OUTPUT"
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=latest" >> "$GITHUB_OUTPUT"
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "minor=$(printf '%s' "$VERSION" | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
@@ -128,10 +137,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
-            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.channel }}
             type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.minor }},enable=${{ steps.version.outputs.stable == 'true' }}
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title=NoteGen Server

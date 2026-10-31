@@ -20,7 +20,7 @@ NoteGen Server 自托管目前处于实验阶段。部署方式、配置和数�
 
 ## 当前版本启动方式
 
-本次安全与恢复修复尚未发布镜像。`latest` 和 `0.1.0` 不能当成已经可用；2026-10-30 核对存在的 `sha-e258b44` 是旧构建，不含这些修复。当前使用源码构建：
+本次准备发布测试镜像 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1`，同时提供 `beta` 频道。发布成功并核对匿名拉取前，当前仍使用源码构建：
 
 ```bash
 git clone https://github.com/codexu/note-gen-server.git
@@ -40,7 +40,7 @@ curl --fail http://127.0.0.1:3789/health/ready
 
 首次启动会等待 PostgreSQL 并执行迁移。使用本机连接或 HTTPS 打开 Web，输入安装凭据、管理员账号与独立密码，再完成安装。之后才向其他用户开放入口。
 
-后续维护者完成 [镜像发布](container-publishing.md) 并核对匿名拉取成功后，将 `NOTEGEN_SERVER_IMAGE` 改为该次实际发布的版本或 digest，才使用：
+维护者完成 [镜像发布](container-publishing.md) 并核对匿名拉取成功后，将 `.env` 中的 `NOTEGEN_SERVER_IMAGE` 改为 `ghcr.io/codexu/note-gen-server:0.1.0-beta.1`（或该次发布的 digest），再使用：
 
 ```bash
 docker compose pull
@@ -49,7 +49,9 @@ docker compose up -d
 
 ## 容量保护
 
-默认每账号 5 GiB、实例合计 50 GiB；分别通过 `ACCOUNT_STORAGE_MAX_BYTES`、`INSTANCE_STORAGE_MAX_BYTES` 配置。预算包含当前密文、保留历史、工作区名称与全部密钥封套、删除后尚未清理的数据和附件上传预占，因此删除笔记不会立即回收全部预算。共享库计入所有者。超过预算会拒绝新增写入，保留读取、删除和取消上传；压缩名称或以更小封套替换现有内容也可继续减少已占用容量。
+默认每账号 5 GiB、实例合计 50 GiB。管理员可在 Web 后台的“实例运维 → 访问与配置 → 运行配置”中修改“每账号容量上限（GiB）”和“实例总容量上限（GiB）”，输入当前密码并保存后立即生效，无需重启。支持小数，最小为 1 MiB。
+
+`ACCOUNT_STORAGE_MAX_BYTES`、`INSTANCE_STORAGE_MAX_BYTES` 用作首次安装或旧实例尚未保存容量设置时的初始值；后台保存后以数据库配置为准，重启不会被环境变量覆盖。调低上限不会删除已有数据，已超限时限制新增占用。预算包含当前密文、保留历史、工作区名称与全部密钥封套、删除后尚未清理的数据和附件上传预占，因此删除笔记不会立即回收全部预算。共享库计入所有者。超过预算会拒绝新增写入，保留读取、删除和取消上传；压缩名称或以更小封套替换现有内容也可继续减少已占用容量。
 
 `STORAGE_MIN_FREE_BYTES` 默认在 Blob 文件系统保留 1 GiB；分片写入、附件组装和同步新增写入前都会检查。附件组装还需一份附件大小的额外空间。该检查不能代替 PostgreSQL 数据盘、索引、WAL、S3 和备份盘的容量告警。预算是自托管资源保护，与付费套餐无关。
 

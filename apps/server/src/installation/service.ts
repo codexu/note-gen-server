@@ -189,6 +189,8 @@ function initialRuntimeConfiguration(config: AppConfig, serverName: string): Rec
     serverName,
     maxObjectBytes: config.maxObjectBytes,
     maxBlobBytes: config.maxBlobBytes,
+    accountStorageMaxBytes: config.accountStorageMaxBytes ?? 5 * 1024 ** 3,
+    instanceStorageMaxBytes: config.instanceStorageMaxBytes ?? 50 * 1024 ** 3,
     changeRetentionDays: config.changeRetentionDays,
     versionRetentionDays: config.versionRetentionDays,
     tombstoneRetentionDays: config.tombstoneRetentionDays,

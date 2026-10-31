@@ -10,6 +10,8 @@ export interface RuntimeConfiguration {
   serverName: string
   maxObjectBytes: number
   maxBlobBytes: number
+  accountStorageMaxBytes: number
+  instanceStorageMaxBytes: number
   changeRetentionDays: number
   versionRetentionDays: number
   tombstoneRetentionDays: number
@@ -180,6 +182,8 @@ export class DeploymentService {
       serverName: this.config.serverName,
       maxObjectBytes: this.config.maxObjectBytes,
       maxBlobBytes: this.config.maxBlobBytes,
+      accountStorageMaxBytes: this.config.accountStorageMaxBytes ?? 5 * 1024 ** 3,
+      instanceStorageMaxBytes: this.config.instanceStorageMaxBytes ?? 50 * 1024 ** 3,
       changeRetentionDays: this.config.changeRetentionDays,
       versionRetentionDays: this.config.versionRetentionDays,
       tombstoneRetentionDays: this.config.tombstoneRetentionDays,
@@ -266,6 +270,8 @@ function validateRuntimeConfiguration(value: RuntimeConfiguration): void {
   }
   if (!integerInRange(value.maxObjectBytes, 1, 64 * 1024 * 1024)) throw new Error('Invalid runtime configuration: maxObjectBytes')
   if (!integerInRange(value.maxBlobBytes, 1, 1024 * 1024 * 1024 * 1024)) throw new Error('Invalid runtime configuration: maxBlobBytes')
+  if (!integerInRange(value.accountStorageMaxBytes, 1024 ** 2, Number.MAX_SAFE_INTEGER)) throw new Error('Invalid runtime configuration: accountStorageMaxBytes')
+  if (!integerInRange(value.instanceStorageMaxBytes, 1024 ** 2, Number.MAX_SAFE_INTEGER)) throw new Error('Invalid runtime configuration: instanceStorageMaxBytes')
   if (!integerInRange(value.changeRetentionDays, 1, 3650)) throw new Error('Invalid runtime configuration: changeRetentionDays')
   if (!integerInRange(value.versionRetentionDays, value.changeRetentionDays, 3650)) throw new Error('Invalid runtime configuration: versionRetentionDays')
   if (!integerInRange(value.tombstoneRetentionDays, 1, 3650)) throw new Error('Invalid runtime configuration: tombstoneRetentionDays')
