@@ -6,6 +6,12 @@ NoteGen Sync Server 是 NoteGen 客户端使用的免费同步服务。官方公
 
 项目包含同步 API 和账号管理 Web。Web 负责注册、登录、设备关联、同步统计和账号管理，不包含 Markdown 编辑器、AI 功能或多人协作功能。
 
+## ❤️ Sponsor
+
+| 名称 | 介绍 |
+| --- | --- |
+| [讯度云](https://xunduyun.com) | 香港大宽带云服务器。 |
+
 ## 开始使用
 
 ### Docker Compose（推荐体验）
